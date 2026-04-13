@@ -1,0 +1,41 @@
+{
+  "name": "hrids-agent",
+  "version": "0.1.0",
+  "description": "原创智能体 CLI，借鉴 agentic CLI 架构思想",
+  "type": "module",
+  "bin": {
+    "hrids-agent": "./dist/main.js"
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts --auto",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "vitest --run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.8.0",
+    "commander": "^13.1.0",
+    "dotenv": "^17.4.1",
+    "express": "^5.2.1",
+    "glob": "^11.0.0",
+    "iconv-lite": "^0.7.2",
+    "ink": "^5.0.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.1",
+    "sqlite-vec": "^0.1.9",
+    "ws": "^8.20.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/react": "^18.3.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0"
+  }
+}
