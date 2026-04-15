@@ -2,7 +2,7 @@
 // 任何实现了 OpenAI Chat Completions API 的服务都可以使用
 import { z } from 'zod'
 import type { ToolDef } from '../Tool.js'
-import type { ChatMessage, LLMProvider, ProviderConfig, StreamChunk } from './types.js'
+import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
 import { withRetry } from '../retry.js'
 import { logger } from '../logger.js'
 
@@ -166,11 +166,13 @@ function toOAIMessages(messages: ChatMessage[], systemPrompt: string): OAIMessag
 export class OpenAIProvider implements LLMProvider {
   readonly name: string
   readonly model: string
+  readonly modelType: ModelType
   private config: ProviderConfig
 
   constructor(config: ProviderConfig, providerName = 'openai') {
     this.config = config
     this.model = config.model
+    this.modelType = config.modelType ?? 'llm'
     this.name = providerName
   }
 

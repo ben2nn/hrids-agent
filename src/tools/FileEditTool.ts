@@ -1,7 +1,9 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { resolve } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
+import { getGlobalCwd } from './BashTool.js'
 
 const inputSchema = z.object({
   path: z.string().describe('要编辑的文件路径'),
@@ -24,12 +26,14 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
   },
 
   async execute(input) {
-    if (!existsSync(input.path)) {
-      return { type: 'error', message: `文件不存在: ${input.path}` }
+    // 相对路径基于当前工作目录（persistentCwd）解析，绝对路径保持不变
+    const filePath = resolve(getGlobalCwd(), input.path)
+    if (!existsSync(filePath)) {
+      return { type: 'error', message: `文件不存在: ${filePath}` }
     }
 
     try {
-      const content = readFileSync(input.path, 'utf-8')
+      const content = readFileSync(filePath, 'utf-8')
       const count = content.split(input.oldStr).length - 1
 
       if (count === 0) {
@@ -40,11 +44,11 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
       }
 
       const updated = content.replace(input.oldStr, input.newStr)
-      writeFileSync(input.path, updated, 'utf-8')
-      auditLog({ action: 'file_edit', resource: input.path, result: 'allowed' })
-      return { type: 'success', output: `文件已更新: ${input.path}` }
+      writeFileSync(filePath, updated, 'utf-8')
+      auditLog({ action: 'file_edit', resource: filePath, result: 'allowed' })
+      return { type: 'success', output: `文件已更新: ${filePath}` }
     } catch (err) {
-      auditLog({ action: 'file_edit', resource: input.path, result: 'error', details: { error: String(err) } })
+      auditLog({ action: 'file_edit', resource: filePath, result: 'error', details: { error: String(err) } })
       return { type: 'error', message: `编辑失败: ${String(err)}` }
     }
   },

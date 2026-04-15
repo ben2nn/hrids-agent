@@ -18,7 +18,13 @@ const addSchema = z.object({
 
 export const MemoryAddTool: ToolDef<typeof addSchema> = {
   name: 'memory_add',
-  description: '将重要信息、决策、偏好或事实写入长期记忆。当发现值得记住的内容时主动调用。',
+  description: `将重要信息写入长期记忆。以下情况必须主动调用：
+- 用户表达偏好（"以后都用X"、"不要用Y"、"我喜欢X风格"）→ type=preference
+- 做出技术决策（"用X替代Y"、"选择了X方案"、"因为X所以用Y"）→ type=decision
+- 完成重要任务（"搞定了"、"上线了"、"终于解决了"）→ type=milestone
+- 发现 bug 根因或解决方案 → type=problem
+- 用户提到项目名、技术栈、团队信息等事实 → type=fact
+不要等到会话结束，发现值得记住的内容时立即调用。`,
   inputSchema: addSchema,
   readonly: false,
 
@@ -141,6 +147,48 @@ export const MemoryFactTool: ToolDef<typeof factSchema> = {
   },
 }
 
+// ── memory_update ────────────────────────────────────────────
+
+const updateSchema = z.object({
+  oldId: z.string().describe('要替换的旧记忆 ID（从 memory_search 或 memory_recall 结果中获取）'),
+  content: z.string().describe('新的记忆内容'),
+  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'emotional', 'fact']).optional()
+    .describe('新的记忆类型（不填则保持原类型）'),
+  importance: z.number().optional().describe('新的重要性 1-5'),
+})
+
+export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
+  name: 'memory_update',
+  description: `更新一条已有记忆（标记旧记忆失效，写入新版本）。以下情况必须调用而不是 memory_add：
+- 用户改变了之前的决策（"不用X了，改用Y"）
+- 用户修正了之前的偏好（"其实我更喜欢Y"）
+- 之前记录的事实已经过时（版本升级、项目重命名等）
+先用 memory_search 找到旧记忆的 ID，再调用此工具替换。`,
+  inputSchema: updateSchema,
+  readonly: false,
+
+  describe(input) {
+    return `更新记忆: ${input.oldId} → ${input.content.slice(0, 50)}`
+  },
+
+  async execute(input) {
+    try {
+      const store = getMemoryStore()
+      const updated = store.updateMemory(input.oldId, {
+        content: input.content,
+        type: input.type,
+        importance: input.importance,
+      })
+      if (!updated) {
+        return { type: 'error', message: `未找到记忆 ID: ${input.oldId}` }
+      }
+      return { type: 'success', output: `已更新（旧 ID: ${input.oldId} → 新 ID: ${updated.id}）` }
+    } catch (err) {
+      return { type: 'error', message: String(err) }
+    }
+  },
+}
+
 // ── memory_status ────────────────────────────────────────────
 
 const statusSchema = z.object({})
@@ -173,6 +221,7 @@ export const MemoryStatusTool: ToolDef<typeof statusSchema> = {
 
 export const MEMORY_TOOLS: ToolDef[] = [
   MemoryAddTool,
+  MemoryUpdateTool,
   MemorySearchTool,
   MemoryRecallTool,
   MemoryFactTool,

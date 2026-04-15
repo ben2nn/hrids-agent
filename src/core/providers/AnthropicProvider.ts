@@ -2,7 +2,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { toAnthropicTool } from '../Tool.js'
 import type { ToolDef } from '../Tool.js'
-import type { ChatMessage, LLMProvider, ProviderConfig, StreamChunk } from './types.js'
+import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
 import { withRetry } from '../retry.js'
 import { logger } from '../logger.js'
 
@@ -11,10 +11,12 @@ const log = logger.child({ component: 'anthropic-provider' })
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
   readonly model: string
+  readonly modelType: ModelType
   private client: Anthropic
 
   constructor(config: ProviderConfig) {
     this.model = config.model
+    this.modelType = config.modelType ?? 'llm'
     this.client = new Anthropic({
       apiKey: config.apiKey,
       baseURL: config.baseUrl,

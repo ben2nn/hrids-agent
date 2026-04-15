@@ -25,6 +25,7 @@ export class MemoryStore {
     this.db.pragma('foreign_keys = ON')
     this.vec = createVectorStore(this.db)
     this._initSchema()
+    this._migrate()
     this._restoreDim()
   }
 
@@ -33,16 +34,17 @@ export class MemoryStore {
   private _initSchema() {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
-        rowid       INTEGER PRIMARY KEY AUTOINCREMENT,
-        id          TEXT NOT NULL UNIQUE,
-        content     TEXT NOT NULL,
-        type        TEXT NOT NULL,
-        wing        TEXT NOT NULL DEFAULT 'general',
-        room        TEXT NOT NULL DEFAULT 'general',
-        tags        TEXT NOT NULL DEFAULT '[]',
-        importance  REAL NOT NULL DEFAULT 3,
-        created_at  TEXT NOT NULL,
-        source_session TEXT
+        rowid         INTEGER PRIMARY KEY AUTOINCREMENT,
+        id            TEXT NOT NULL UNIQUE,
+        content       TEXT NOT NULL,
+        type          TEXT NOT NULL,
+        wing          TEXT NOT NULL DEFAULT 'general',
+        room          TEXT NOT NULL DEFAULT 'general',
+        tags          TEXT NOT NULL DEFAULT '[]',
+        importance    REAL NOT NULL DEFAULT 3,
+        created_at    TEXT NOT NULL,
+        source_session TEXT,
+        superseded_by TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_mem_id   ON memories(id);
@@ -85,6 +87,13 @@ export class MemoryStore {
       this._dim = parseInt(saved.value, 10)
       void this.vec.init(this._dim)
     }
+  }
+
+  /** 迁移旧数据库：补充新增列（幂等） */
+  private _migrate() {
+    try {
+      this.db.exec(`ALTER TABLE memories ADD COLUMN superseded_by TEXT`)
+    } catch { /* 列已存在，忽略 */ }
   }
 
   // ── 记忆写入 ──────────────────────────────────────────────────
@@ -157,6 +166,35 @@ export class MemoryStore {
     }
   }
 
+  /**
+   * 更新记忆：将旧记忆标记为 superseded，写入新内容
+   * 返回新记忆，旧记忆保留但 superseded_by 指向新 id
+   */
+  updateMemory(
+    oldId: string,
+    patch: Partial<Pick<Memory, 'content' | 'type' | 'wing' | 'room' | 'importance' | 'tags'>>,
+  ): Memory | null {
+    const old = this.getMemory(oldId)
+    if (!old) return null
+
+    const newMem = this.addMemory({
+      content: patch.content ?? old.content,
+      type: patch.type ?? old.type,
+      wing: patch.wing ?? old.wing,
+      room: patch.room ?? old.room,
+      importance: patch.importance ?? old.importance,
+      tags: patch.tags ?? old.tags,
+      sourceSession: old.sourceSession,
+    })
+
+    // 标记旧记忆为已失效
+    this.db.prepare('UPDATE memories SET superseded_by = ? WHERE id = ?').run(newMem.id, oldId)
+    // 同步删除旧向量（避免搜索时命中过时内容）
+    void this.vec.delete(oldId)
+
+    return newMem
+  }
+
   deleteMemory(id: string): boolean {
     void this.vec.delete(id)
     const r = this.db.prepare('DELETE FROM memories WHERE id = ?').run(id)
@@ -171,10 +209,11 @@ export class MemoryStore {
   // ── 记忆检索 ──────────────────────────────────────────────────
 
   listMemories(opts: {
-    wing?: string; room?: string; type?: MemoryType; limit?: number
+    wing?: string; room?: string; type?: MemoryType; limit?: number; includeSuperseded?: boolean
   } = {}): Memory[] {
     let sql = 'SELECT * FROM memories WHERE 1=1'
     const params: unknown[] = []
+    if (!opts.includeSuperseded) { sql += ' AND superseded_by IS NULL' }
     if (opts.wing) { sql += ' AND wing = ?'; params.push(opts.wing) }
     if (opts.room) { sql += ' AND room = ?'; params.push(opts.room) }
     if (opts.type) { sql += ' AND type = ?'; params.push(opts.type) }
@@ -241,13 +280,22 @@ export class MemoryStore {
       .slice(0, topK)
   }
 
-  /** L1 核心摘要：按重要性取 top N，按 room 分组 */
+  /** L1 核心摘要：按时间衰减重要性排序，过滤已失效记忆 */
   getEssentialStory(wing?: string, maxItems = 15, maxChars = 3200): string {
-    const mems = this.listMemories({ wing, limit: 100 })
+    const mems = this.listMemories({ wing, limit: 100 }) // 已自动过滤 superseded
+
     if (mems.length === 0) return '## L1 — 暂无记忆。'
 
+    // 时间衰减：90天半衰期，近期记忆权重更高
+    const now = Date.now()
+    const scored = mems.map(m => {
+      const ageDays = (now - new Date(m.createdAt).getTime()) / 86_400_000
+      const decayed = m.importance * Math.exp(-ageDays / 90)
+      return { m, decayed }
+    }).sort((a, b) => b.decayed - a.decayed).slice(0, maxItems)
+
     const byRoom = new Map<string, Memory[]>()
-    for (const m of mems.slice(0, maxItems)) {
+    for (const { m } of scored) {
       const list = byRoom.get(m.room) ?? []
       list.push(m)
       byRoom.set(m.room, list)
@@ -392,6 +440,7 @@ export class MemoryStore {
       importance: row.importance as number,
       createdAt: row.created_at as string,
       sourceSession: row.source_session as string | undefined,
+      supersededBy: row.superseded_by as string | undefined,
     }
   }
 

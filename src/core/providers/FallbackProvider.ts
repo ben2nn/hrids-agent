@@ -1,13 +1,17 @@
 // FallbackProvider —— 多 LLM 故障转移
-// 任何错误都触发切换，并记住当前位置，下次调用直接从上次成功的模型开始
+// 当前模型重试 MAX_RETRIES_PER_MODEL 次，全部失败后切换下一个模型
+// 记住当前位置，下次调用直接从上次成功的模型开始
 import type { ToolDef } from '../Tool.js'
-import type { ChatMessage, LLMProvider, StreamChunk } from './types.js'
+import type { ChatMessage, LLMProvider, ModelType, StreamChunk } from './types.js'
 import { logger } from '../logger.js'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 
 const log = logger.child({ component: 'fallback-provider' })
+
+// 每个模型在切换前的最大重试次数
+const MAX_RETRIES_PER_MODEL = 3
 
 const STATE_PATH = join(homedir(), '.hrids-agent', 'fallback-state.json')
 
@@ -44,6 +48,9 @@ export class FallbackProvider implements LLMProvider {
   get model(): string {
     return this.currentProvider().model
   }
+  get modelType(): ModelType {
+    return this.currentProvider().modelType
+  }
 
   private providers: LLMProvider[]
   private groups: ProviderGroup[]
@@ -79,29 +86,34 @@ export class FallbackProvider implements LLMProvider {
     return this.providers[this.currentModelIdx]
   }
 
-  // 推进到下一个可用模型，返回是否还有下一个
-  private advance(): boolean {
+  // 推进到下一个可用模型，到末尾后循环回第一个，返回是否发生了循环（绕回头）
+  private advance(): { hasNext: boolean; wrapped: boolean } {
     if (this.groups.length > 0) {
       const group = this.groups[this.currentGroupIdx]
       if (this.currentModelIdx < group.providers.length - 1) {
         // 同平台下一个模型
         this.currentModelIdx++
-        return true
+        return { hasNext: true, wrapped: false }
       }
       if (this.currentGroupIdx < this.groups.length - 1) {
         // 跨平台
         this.currentGroupIdx++
         this.currentModelIdx = 0
-        return true
+        return { hasNext: true, wrapped: false }
       }
-      return false
+      // 已是最后一个，循环回第一个
+      this.currentGroupIdx = 0
+      this.currentModelIdx = 0
+      return { hasNext: true, wrapped: true }
     }
     // 无分组，打平列表
     if (this.currentModelIdx < this.providers.length - 1) {
       this.currentModelIdx++
-      return true
+      return { hasNext: true, wrapped: false }
     }
-    return false
+    // 已是最后一个，循环回第一个
+    this.currentModelIdx = 0
+    return { hasNext: true, wrapped: true }
   }
 
   async *stream(
@@ -110,70 +122,94 @@ export class FallbackProvider implements LLMProvider {
     systemPrompt: string,
     maxTokens: number,
   ): AsyncGenerator<StreamChunk> {
-    // 从当前记住的位置开始尝试，失败则依次推进
-    const startGroupIdx = this.currentGroupIdx
-    const startModelIdx = this.currentModelIdx
-    let attempts = 0
-    const totalProviders = this.groups.length > 0
-      ? this.groups.reduce((s, g) => s + g.providers.length, 0)
-      : this.providers.length
+    // 从当前记住的位置开始尝试
+    // 每个模型最多重试 MAX_RETRIES_PER_MODEL 次，全部失败后切换下一个模型
+    let modelSwitches = 0
 
     while (true) {
       const provider = this.currentProvider()
       const platformInfo = this.groups.length > 0
         ? `平台[${this.currentGroupIdx + 1}/${this.groups.length}]:${this.groups[this.currentGroupIdx].platformName} `
         : ''
-      log.info(`${platformInfo}尝试模型: ${provider.name}/${provider.model}`)
 
-      try {
-        const gen = provider.stream(messages, tools, systemPrompt, maxTokens)
-        const buffer: StreamChunk[] = []
+      // 对当前模型最多尝试 MAX_RETRIES_PER_MODEL 次
+      let lastErr: unknown
+      let succeeded = false
 
-        for await (const chunk of gen) {
-          buffer.push(chunk)
+      for (let attempt = 1; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
+        log.info(
+          `${platformInfo}尝试模型: ${provider.name}/${provider.model}` +
+          (attempt > 1 ? `（第 ${attempt}/${MAX_RETRIES_PER_MODEL} 次重试）` : ''),
+        )
 
-          // 已有实质性输出，直接透传剩余流（此时不再 fallback）
-          if (chunk.type === 'text_delta' || chunk.type === 'tool_call') {
-            saveState(this.currentGroupIdx, this.currentModelIdx)
-            yield chunk
-            for await (const rest of gen) {
-              yield rest
+        try {
+          const gen = provider.stream(messages, tools, systemPrompt, maxTokens)
+          const buffer: StreamChunk[] = []
+
+          for await (const chunk of gen) {
+            buffer.push(chunk)
+
+            // 已有实质性输出，直接透传剩余流（此时不再 fallback）
+            if (chunk.type === 'text_delta' || chunk.type === 'tool_call') {
+              saveState(this.currentGroupIdx, this.currentModelIdx)
+              yield chunk
+              for await (const rest of gen) {
+                yield rest
+              }
+              return
             }
-            return
+
+            if (chunk.type === 'done') {
+              saveState(this.currentGroupIdx, this.currentModelIdx)
+              yield chunk
+              return
+            }
           }
 
-          if (chunk.type === 'done') {
-            saveState(this.currentGroupIdx, this.currentModelIdx)
-            yield chunk
-            return
+          // 流正常结束
+          saveState(this.currentGroupIdx, this.currentModelIdx)
+          for (const chunk of buffer) yield chunk
+          succeeded = true
+          return
+
+        } catch (err) {
+          lastErr = err
+          if (attempt < MAX_RETRIES_PER_MODEL) {
+            log.warn(
+              `模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，将重试（${attempt}/${MAX_RETRIES_PER_MODEL}）`,
+              { error: String(err) },
+            )
+            // 简单等待后重试（指数退避：1s, 2s）
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt))
           }
         }
-
-        // 流正常结束
-        saveState(this.currentGroupIdx, this.currentModelIdx)
-        for (const chunk of buffer) yield chunk
-        return
-
-      } catch (err) {
-        attempts++
-        const hasNext = this.advance()
-
-        if (hasNext) {
-          const next = this.currentProvider()
-          const nextPlatform = this.groups.length > 0
-            ? `平台[${this.currentGroupIdx + 1}]:${this.groups[this.currentGroupIdx].platformName}/`
-            : ''
-          log.warn(
-            `模型 ${provider.name}/${provider.model} 失败，切换到 ${nextPlatform}${next.model}`,
-            { error: String(err) }
-          )
-          continue
-        }
-
-        // 所有模型都试过了
-        log.error('所有模型均失败，无法继续', { error: String(err), attempts })
-        throw new Error(`所有模型均失败（共尝试 ${attempts} 个）。最后错误: ${String(err)}`)
       }
+
+      if (succeeded) return
+
+      // 当前模型三次全部失败，尝试切换下一个模型
+      const { wrapped } = this.advance()
+      modelSwitches++
+
+      const next = this.currentProvider()
+      const nextPlatform = this.groups.length > 0
+        ? `平台[${this.currentGroupIdx + 1}]:${this.groups[this.currentGroupIdx].platformName}/`
+        : ''
+
+      if (wrapped) {
+        // 已循环回第一个模型，说明所有模型都试过了
+        log.error('所有模型均失败，无法继续', { error: String(lastErr), modelSwitches })
+        throw new Error(
+          `所有模型均失败（每个模型重试 ${MAX_RETRIES_PER_MODEL} 次，共切换 ${modelSwitches} 次）。` +
+          `最后错误: ${String(lastErr)}`,
+        )
+      }
+
+      log.warn(
+        `模型 ${provider.name}/${provider.model} 重试 ${MAX_RETRIES_PER_MODEL} 次均失败，` +
+        `切换到 ${nextPlatform}${next.model}`,
+        { error: String(lastErr) },
+      )
     }
   }
 }

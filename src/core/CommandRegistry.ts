@@ -190,7 +190,15 @@ export function createBuiltinCommands(apiKey: string, model: string): SlashComma
     // ── 会话管理命令 ──────────────────────────────────────────
     {
       name: 'new-session',
-      description: '强制创建新会话，清空当前对话历史',
+      description: '强制创建新会话，清空当前对话历史并重置工作目录',
+      async execute(_, ctx) {
+        ctx.newSession()
+        return { type: 'message', text: `已创建新会话（ID: ${ctx.sessionId}）` }
+      },
+    },
+    {
+      name: 'new',
+      description: '/new-session 的简写：创建新会话，清空历史并重置工作目录',
       async execute(_, ctx) {
         ctx.newSession()
         return { type: 'message', text: `已创建新会话（ID: ${ctx.sessionId}）` }

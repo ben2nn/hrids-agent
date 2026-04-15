@@ -20,6 +20,7 @@ export interface Memory {
   importance: number        // 1-5
   createdAt: string         // ISO 日期
   sourceSession?: string    // 来源会话 ID
+  supersededBy?: string     // 被哪条记忆取代（非空则为已失效）
   embedding?: number[]      // TF-IDF 向量（可选）
 }
 

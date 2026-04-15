@@ -50,17 +50,28 @@ export async function runMemoryPipeline(
 
   const store = getMemoryStore()
 
-  for (const mem of extracted) {
-    let content = mem.content
+  // ② LLM 批量提炼：一次调用压缩所有需要提炼的条目
+  let condensedContents: (string | null)[] = extracted.map(() => null)
+  if (condense && provider) {
+    const needCondense = extracted
+      .map((mem, i) => ({ i, content: mem.content }))
+      .filter(({ content }) => content.length >= 80)
 
-    // ② LLM 提炼：把长段原文压缩为精炼一句话
-    if (condense && provider) {
-      const condensed = await condenseWithLLM(content, provider)
-      if (condensed) {
-        content = condensed
-        result.condensed++
+    if (needCondense.length > 0) {
+      const batchResults = await condenseBatchWithLLM(
+        needCondense.map(({ content }) => content),
+        provider,
+      )
+      for (let j = 0; j < needCondense.length; j++) {
+        condensedContents[needCondense[j].i] = batchResults[j]
       }
+      result.condensed = batchResults.filter(Boolean).length
     }
+  }
+
+  for (let i = 0; i < extracted.length; i++) {
+    const mem = extracted[i]
+    const content = condensedContents[i] ?? mem.content
 
     // ③ 向量去重：相似度 > threshold 则跳过
     const similar = await store.findSimilar(content, dedupThreshold)
@@ -99,33 +110,77 @@ function inferRoom(type: string): string {
   return map[type] ?? 'general'
 }
 
-// LLM 提炼：把原始文本压缩为 1-2 句精炼记忆
-async function condenseWithLLM(
-  content: string,
+// LLM 批量提炼：一次调用压缩多条记忆，返回与输入等长的数组
+// 输入 N 条，输出 N 条（压缩失败或不需要压缩的位置返回 null）
+async function condenseBatchWithLLM(
+  contents: string[],
   provider: LLMProvider,
-): Promise<string | null> {
-  // 内容已经很短，不需要提炼
-  if (content.length < 80) return null
+): Promise<(string | null)[]> {
+  if (contents.length === 0) return []
 
-  const prompt = `将以下内容压缩为 1-2 句精炼的记忆条目，保留关键决策/事实/偏好，去掉冗余解释。只输出压缩后的文本，不要任何前缀或解释。
+  // 构建批量 prompt：每条用编号分隔，要求按编号输出
+  const numbered = contents
+    .map((c, i) => `[${i + 1}]\n${c.slice(0, 1500)}`)
+    .join('\n\n---\n\n')
+
+  const prompt = `将以下 ${contents.length} 条内容分别压缩为 1-2 句精炼的记忆条目，保留关键决策/事实/偏好，去掉冗余解释。
+
+严格按以下格式输出，每条用编号开头，不要任何额外说明：
+[1] 压缩后的文本
+[2] 压缩后的文本
+...
 
 原文：
-${content.slice(0, 1500)}`
+
+${numbered}`
 
   try {
     let raw = ''
     for await (const chunk of provider.stream(
       [{ role: 'user', content: prompt }],
       [],
-      '你是记忆提炼助手，只输出压缩后的文本。',
-      200,
+      '你是记忆提炼助手，严格按编号格式输出压缩结果，不输出任何其他内容。',
+      Math.min(200 * contents.length, 2000),
     )) {
       if (chunk.type === 'text_delta' && chunk.delta) raw += chunk.delta
     }
-    const trimmed = raw.trim()
-    // 提炼结果比原文长或为空，说明 LLM 没有压缩，放弃
-    return trimmed && trimmed.length < content.length ? trimmed : null
+
+    // 解析输出：按 [N] 分割
+    const results: (string | null)[] = contents.map(() => null)
+    const lines = raw.trim().split('\n')
+    let currentIdx: number | null = null
+    const buffer: string[] = []
+
+    const flush = () => {
+      if (currentIdx === null) return
+      const text = buffer.join(' ').trim()
+      const original = contents[currentIdx]
+      // 压缩结果比原文短才采用
+      if (text && text.length < original.length) {
+        results[currentIdx] = text
+      }
+      buffer.length = 0
+    }
+
+    for (const line of lines) {
+      const match = line.match(/^\[(\d+)\]\s*(.*)/)
+      if (match) {
+        flush()
+        const idx = parseInt(match[1], 10) - 1
+        if (idx >= 0 && idx < contents.length) {
+          currentIdx = idx
+          if (match[2].trim()) buffer.push(match[2].trim())
+        } else {
+          currentIdx = null
+        }
+      } else if (currentIdx !== null && line.trim()) {
+        buffer.push(line.trim())
+      }
+    }
+    flush()
+
+    return results
   } catch {
-    return null
+    return contents.map(() => null)
   }
 }

@@ -15,6 +15,11 @@ export type AuditAction =
   | 'permission_denied'
   | 'session_create'
   | 'session_destroy'
+  | 'skillhub_config_set'
+  | 'skillhub_install_cli'
+  | 'skillhub_setup'
+  | 'skillhub_uninstall'
+  | 'skillhub_upgrade'
 
 export interface AuditEntry {
   ts: string

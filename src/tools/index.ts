@@ -11,6 +11,7 @@ import { TodoWriteTool, TodoReadTool } from './TodoWriteTool.js'
 import { DecisionTool } from './DecisionTool.js'
 import { ScheduleCronTool } from './ScheduleCronTool.js'
 import { SkillTool, SkillListTool, SkillSaveTool } from './SkillTool.js'
+import { SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool, SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool } from './SkillHubTool.js'
 import { TEAM_TOOLS } from './TeamTools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
 import type { ToolDef } from '../core/Tool.js'
@@ -20,6 +21,8 @@ export {
   GlobTool, GrepTool, WebFetchTool, WebSearchTool,
   AskUserTool, TodoWriteTool, TodoReadTool,
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
+  SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool,
+  SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
 }
 export { TEAM_TOOLS } from './TeamTools.js'
 export { MEMORY_TOOLS } from '../memory/index.js'
@@ -41,6 +44,14 @@ export const ALL_TOOLS: ToolDef[] = [
   SkillTool,
   SkillListTool,
   SkillSaveTool,
+  SkillHubConfigTool,
+  SkillHubSearchTool,
+  SkillHubInstallTool,
+  SkillHubRecommendTool,
+  SkillHubSetupTool,
+  SkillHubListTool,
+  SkillHubUninstallTool,
+  SkillHubUpgradeTool,
   ...TEAM_TOOLS,
   ...MEMORY_TOOLS,
 ]

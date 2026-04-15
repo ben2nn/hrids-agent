@@ -1,6 +1,10 @@
 // Embedding 提供商 —— 生成语义向量，替代 TF-IDF
 // 支持 OpenAI API / Ollama 本地模型 / 降级 TF-IDF
+// 支持多模型 Fallback：EMBEDDING_FALLBACK_N 配置，重试三次后切换下一个模型
 // 向量维度：OpenAI text-embedding-3-small = 1536，Ollama nomic-embed-text = 768
+
+// 每个模型在切换前的最大重试次数（与 FallbackProvider 保持一致）
+const MAX_RETRIES_PER_MODEL = 3
 
 export interface EmbeddingConfig {
   provider: 'openai' | 'ollama' | 'tfidf'
@@ -67,7 +71,7 @@ export function bufferToVector(buf: Buffer): number[] {
   return vec
 }
 
-// ── EmbeddingProvider ─────────────────────────────────────────
+// ── 单一 EmbeddingProvider ────────────────────────────────────
 
 export class EmbeddingProvider {
   private config: EmbeddingConfig
@@ -76,6 +80,10 @@ export class EmbeddingProvider {
 
   constructor(config: EmbeddingConfig) {
     this.config = config
+  }
+
+  get name(): string {
+    return `${this.config.provider}/${this.config.model ?? 'default'}`
   }
 
   get dimensions(): number {
@@ -194,38 +202,246 @@ export class EmbeddingProvider {
   }
 }
 
+// ── EmbeddingFallbackProvider —— 多模型故障转移 ───────────────
+/**
+ * 对当前模型重试 MAX_RETRIES_PER_MODEL 次，全部失败后切换下一个模型。
+ * 与 FallbackProvider（LLM）的策略保持一致。
+ */
+export class EmbeddingFallbackProvider {
+  private providers: EmbeddingProvider[]
+  private currentIdx: number = 0
+
+  constructor(providers: EmbeddingProvider[]) {
+    if (providers.length === 0) throw new Error('EmbeddingFallbackProvider 至少需要一个提供商')
+    this.providers = providers
+  }
+
+  get name(): string { return `fallback(${this.providers[this.currentIdx].name})` }
+  get dimensions(): number { return this.providers[this.currentIdx].dimensions }
+
+  private async _callWithFallback<T>(
+    fn: (p: EmbeddingProvider) => Promise<T>,
+    context: string,
+  ): Promise<T> {
+    let modelSwitches = 0
+
+    for (let idx = this.currentIdx; idx < this.providers.length; idx++) {
+      const provider = this.providers[idx]
+      let lastErr: unknown
+
+      for (let attempt = 1; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
+        try {
+          const result = await fn(provider)
+          this.currentIdx = idx  // 记住成功的位置
+          return result
+        } catch (err) {
+          lastErr = err
+          if (attempt < MAX_RETRIES_PER_MODEL) {
+            process.stderr.write(
+              `[embedding] ${provider.name} 第 ${attempt} 次失败，将重试（${attempt}/${MAX_RETRIES_PER_MODEL}）: ${String(err)}\n`
+            )
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt))
+          }
+        }
+      }
+
+      // 当前模型三次全部失败，切换下一个
+      modelSwitches++
+      if (idx + 1 < this.providers.length) {
+        process.stderr.write(
+          `[embedding] ${provider.name} 重试 ${MAX_RETRIES_PER_MODEL} 次均失败，` +
+          `切换到 ${this.providers[idx + 1].name}: ${String(lastErr)}\n`
+        )
+      } else {
+        throw new Error(
+          `[embedding] 所有向量模型均失败（每个模型重试 ${MAX_RETRIES_PER_MODEL} 次，共切换 ${modelSwitches} 次）。` +
+          `最后错误: ${String(lastErr)}`
+        )
+      }
+    }
+
+    throw new Error(`[embedding] ${context} 失败：无可用模型`)
+  }
+
+  async embed(text: string): Promise<number[]> {
+    return this._callWithFallback(p => p.embed(text), 'embed')
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    return this._callWithFallback(p => p.embedBatch(texts), 'embedBatch')
+  }
+
+  async ping(): Promise<boolean> {
+    try {
+      await this.embed('test')
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
 // ── 全局单例 ─────────────────────────────────────────────────
 
-let _provider: EmbeddingProvider | null = null
+// 统一类型：单一或 Fallback 都暴露相同接口
+export type AnyEmbeddingProvider = EmbeddingProvider | EmbeddingFallbackProvider
 
-export function getEmbeddingProvider(): EmbeddingProvider {
-  if (!_provider) {
-    const model = process.env.EMBEDDING_MODEL
-    // 有模型名则使用向量 API，否则降级 TF-IDF
-    if (model) {
-      const baseUrl = process.env.EMBEDDING_BASE_URL
-      // 有 baseUrl 且不含 openai.com 则视为 Ollama，否则视为 OpenAI 兼容接口
-      const provider: EmbeddingConfig['provider'] =
-        baseUrl && !baseUrl.includes('openai.com') && !baseUrl.includes('dashscope')
-          ? 'ollama'
-          : 'openai'
-      _provider = new EmbeddingProvider({
-        provider,
-        model,
-        apiKey: process.env.OPENAI_API_KEY ?? process.env.DASHSCOPE_API_KEY,
-        baseUrl,
-        dimensions: process.env.EMBEDDING_DIMENSIONS
-          ? parseInt(process.env.EMBEDDING_DIMENSIONS, 10)
-          : undefined,
-      })
-    } else {
-      _provider = new EmbeddingProvider({ provider: 'tfidf' })
+let _provider: AnyEmbeddingProvider | null = null
+
+/**
+ * 从环境变量创建 EmbeddingProvider（支持多模型 Fallback）
+ *
+ * 优先级：
+ * 1. EMBEDDING_FALLBACK_N 多模型配置（N = 1, 2, 3...）
+ * 2. EMBEDDING_MODEL 单一模型
+ * 3. 降级 TF-IDF（无需 API）
+ *
+ * EMBEDDING_FALLBACK_N 格式（与 LLM_FALLBACK_N 相同）：
+ *   EMBEDDING_FALLBACK_1=provider:aliyun,models:text-embedding-v3,text-embedding-v2
+ *   EMBEDDING_FALLBACK_2=provider:openai,models:text-embedding-3-small
+ */
+function createEmbeddingProviderFromEnv(): AnyEmbeddingProvider {
+  // 1. 尝试读取 EMBEDDING_FALLBACK_N 多模型配置
+  const fallbackProviders: EmbeddingProvider[] = []
+  for (let i = 1; i <= 20; i++) {
+    const raw = process.env[`EMBEDDING_FALLBACK_${i}`]
+    if (!raw) break
+
+    const entries = parseEmbeddingLine(raw)
+    for (const cfg of entries) {
+      fallbackProviders.push(new EmbeddingProvider(cfg))
     }
+  }
+
+  if (fallbackProviders.length > 0) {
+    if (!process.env.AGENT_SERVER_MODE) {
+      const chain = fallbackProviders.map(p => p.name).join(' → ')
+      process.stderr.write(`[embedding] fallback 链: ${chain}\n`)
+    }
+    return fallbackProviders.length === 1
+      ? fallbackProviders[0]
+      : new EmbeddingFallbackProvider(fallbackProviders)
+  }
+
+  // 2. 单一 EMBEDDING_MODEL
+  const model = process.env.EMBEDDING_MODEL
+  if (model) {
+    const baseUrl = process.env.EMBEDDING_BASE_URL
+    const provider: EmbeddingConfig['provider'] =
+      baseUrl && !baseUrl.includes('openai.com') && !baseUrl.includes('dashscope')
+        ? 'ollama'
+        : 'openai'
+    return new EmbeddingProvider({
+      provider,
+      model,
+      apiKey: process.env.OPENAI_API_KEY ?? process.env.DASHSCOPE_API_KEY,
+      baseUrl,
+      dimensions: process.env.EMBEDDING_DIMENSIONS
+        ? parseInt(process.env.EMBEDDING_DIMENSIONS, 10)
+        : undefined,
+    })
+  }
+
+  // 3. 降级 TF-IDF
+  return new EmbeddingProvider({ provider: 'tfidf' })
+}
+
+/**
+ * 解析一行 EMBEDDING_FALLBACK_N 配置，返回多个 EmbeddingConfig
+ * 格式：provider:aliyun,models:text-embedding-v3,text-embedding-v2[,apiKey:xxx][,baseUrl:xxx]
+ */
+function parseEmbeddingLine(raw: string): EmbeddingConfig[] {
+  const modelsMatch = raw.match(/(?:^|,)models:(.+)$/)
+
+  if (modelsMatch) {
+    const beforeModels = raw.slice(0, raw.indexOf('models:'))
+    const kv = parseKV(beforeModels)
+
+    const afterModels = modelsMatch[1]
+    const modelTokens: string[] = []
+    const extraKV: Record<string, string> = {}
+
+    for (const token of afterModels.split(',')) {
+      const t = token.trim()
+      if (!t) continue
+      if (t.includes(':')) {
+        const idx = t.indexOf(':')
+        extraKV[t.slice(0, idx)] = t.slice(idx + 1)
+      } else {
+        modelTokens.push(t)
+      }
+    }
+
+    const merged = { ...kv, ...extraKV }
+    const platformProvider = merged.provider ?? 'openai'
+    const apiKey = merged.apiKey ?? resolveApiKey(platformProvider)
+    const baseUrl = merged.baseUrl ?? resolveBaseUrl(platformProvider)
+    const dimensions = merged.dimensions ? parseInt(merged.dimensions, 10) : undefined
+
+    return modelTokens.map(model => ({
+      provider: platformProvider === 'ollama' ? 'ollama' : 'openai',
+      model,
+      apiKey,
+      baseUrl,
+      dimensions,
+    } as EmbeddingConfig))
+  }
+
+  // 旧格式：model:xxx,provider:yyy,...
+  const kv = parseKV(raw)
+  if (!kv.model) throw new Error(`EMBEDDING_FALLBACK 配置行缺少 model 字段: ${raw}`)
+  const platformProvider = kv.provider ?? 'openai'
+  return [{
+    provider: platformProvider === 'ollama' ? 'ollama' : 'openai',
+    model: kv.model,
+    apiKey: kv.apiKey ?? resolveApiKey(platformProvider),
+    baseUrl: kv.baseUrl ?? resolveBaseUrl(platformProvider),
+    dimensions: kv.dimensions ? parseInt(kv.dimensions, 10) : undefined,
+  }]
+}
+
+/** 根据平台名自动解析 API Key */
+function resolveApiKey(platform: string): string | undefined {
+  switch (platform) {
+    case 'openai':  return process.env.OPENAI_API_KEY
+    case 'aliyun':  return process.env.DASHSCOPE_API_KEY
+    case 'zhipu':   return process.env.ZHIPU_API_KEY
+    case 'deepseek':return process.env.DEEPSEEK_API_KEY
+    case 'ollama':  return undefined
+    default:        return process.env.OPENAI_API_KEY ?? process.env.DASHSCOPE_API_KEY
+  }
+}
+
+/** 根据平台名自动解析 Base URL */
+function resolveBaseUrl(platform: string): string | undefined {
+  switch (platform) {
+    case 'aliyun':  return 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    case 'zhipu':   return 'https://open.bigmodel.cn/api/paas/v4'
+    case 'deepseek':return 'https://api.deepseek.com/v1'
+    case 'ollama':  return process.env.EMBEDDING_BASE_URL ?? 'http://localhost:11434'
+    default:        return process.env.EMBEDDING_BASE_URL
+  }
+}
+
+function parseKV(str: string): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const token of str.split(',')) {
+    const t = token.trim()
+    if (!t || !t.includes(':')) continue
+    const idx = t.indexOf(':')
+    result[t.slice(0, idx).trim()] = t.slice(idx + 1).trim()
+  }
+  return result
+}
+
+export function getEmbeddingProvider(): AnyEmbeddingProvider {
+  if (!_provider) {
+    _provider = createEmbeddingProviderFromEnv()
   }
   return _provider
 }
 
 /** 重置单例（用于配置变更后重新初始化） */
-export function resetEmbeddingProvider(config: EmbeddingConfig) {
-  _provider = new EmbeddingProvider(config)
+export function resetEmbeddingProvider(config?: EmbeddingConfig) {
+  _provider = config ? new EmbeddingProvider(config) : createEmbeddingProviderFromEnv()
 }

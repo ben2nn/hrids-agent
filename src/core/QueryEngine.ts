@@ -34,7 +34,7 @@ export type InterruptReason = 'turn_limit' | 'budget_exceeded' | 'aborted' | 'er
 
 export type StreamEvent =
   | { type: 'text_delta'; delta: string }
-  | { type: 'tool_start'; id: string; name: string; input: unknown }
+  | { type: 'tool_start'; id: string; name: string; input: unknown; description: string }
   | { type: 'tool_log'; id: string; name: string; line: string }
   | { type: 'tool_end'; id: string; name: string; result: ToolResult }
   | { type: 'permission_denied'; id: string; toolName: string; description: string }
@@ -44,6 +44,7 @@ export type StreamEvent =
   | { type: 'compact_start' }
   | { type: 'compact_done'; summary: string }
   | { type: 'interrupted'; reason: InterruptReason; message: string }
+  | { type: 'continuation_needed' }  // 非自动模式下，LLM 表达了继续意图但需用户确认
   | { type: 'done' }
   | { type: 'error'; message: string }
 
@@ -305,6 +306,31 @@ ${contentToSummarize}
     return result
   }
 
+  // 检测用户消息是否为查询/回忆类意图（只需回答，不应触发 continuation 自动执行）
+  private isQueryIntent(message: string): boolean {
+    const QUERY_PATTERNS = [
+      // 询问上一次/之前的内容
+      /上(一次|次|回|个)(的)?(问题|任务|内容|对话|消息|指令|操作|工作|结果)/,
+      /之前(的)?(问题|任务|内容|对话|消息|指令|操作|工作|结果)/,
+      /前(一次|次|回)(的)?(问题|任务|内容|对话)/,
+      /刚才(说|问|做|讲)(了|的)?(什么|啥)/,
+      // 询问历史/记录
+      /历史(记录|消息|对话|内容)/,
+      /对话(记录|历史)/,
+      // 你记得/还记得
+      /你(还)?记得/,
+      /(还)?记得(吗|么|不)/,
+      // 我之前说/问/做
+      /我(之前|刚才|上次)(说|问|做|讲)(了|的)?(什么|啥)?/,
+      // 回顾/总结类
+      /回顾(一下|下)?/,
+      /总结(一下|下)?(之前|上次|刚才)/,
+      // 是什么/是啥 结尾的简短问句（配合上下文）
+      /^(上|之前|刚才).{0,20}(是什么|是啥|是哪|怎么|如何)\??$/,
+    ]
+    return QUERY_PATTERNS.some(p => p.test(message))
+  }
+
   async *send(userMessage: string): AsyncGenerator<StreamEvent> {
     // 并发保护：如果已有任务在运行，拒绝新任务
     if (this.running) {
@@ -313,6 +339,8 @@ ${contentToSummarize}
     }
     this.running = true
     this.abortController = new AbortController()
+    // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行
+    const isQueryMode = this.isQueryIntent(userMessage)
     this.history.push({ role: 'user', content: userMessage })
 
     const maxTurns = this.config.maxTurns ?? 50
@@ -401,21 +429,48 @@ ${contentToSummarize}
 
         // 没有工具调用，检查是否是中途停止（任务未完成）
         if (toolCalls.length === 0) {
+          // 查询/回忆类意图：直接结束，不触发 continuation 检测
+          if (isQueryMode) {
+            break
+          }
           // 检测 LLM 是否在中途停下（说了"接下来要做X"但没做）
           const CONTINUATION_PATTERNS = [
+            // 明确的"接下来/下一步"意图
             /接下来(将|我会|会|要)/,
             /然后(我会|将|要)/,
             /下一步/,
-            /继续(读取|分析|处理|执行)/,
-            /让我(继续|读取|分析|查看)/,
-            /我(将|会)(读取|分析|处理|继续)/,
+            /第(一|二|三|四|五|六|七|八|九|十)[步个]/,
+            // 继续/让我/我将 + 动作
+            /继续(读取|分析|处理|执行|爬取|抓取|获取|修复|创建|编写|改进|优化)/,
+            /让我(继续|读取|分析|查看|创建|编写|修复|改进|尝试|搜索|获取|爬取)/,
+            /我(将|会)(读取|分析|处理|继续|创建|编写|修复|改进|尝试|搜索|获取|爬取)/,
+            // "发现了X，修复/处理" 类型（说了问题但没行动）
+            /发现(了|一个)(小|一个)?(bug|问题|错误|bug|issue)/i,
+            /需要(修复|处理|解决|改进|优化)/,
+            // "让我创建/改进/修改" 类型
+            /让我(来)?(创建|改进|修改|更新|重写|优化)/,
+            // 任务列表/计划类（说了计划但没执行）
+            /现在(开始|来|我来)(执行|处理|创建|编写|修复)/,
+            /马上(开始|执行|处理|创建)/,
+            // 英文混用场景
+            /let me (create|fix|update|improve|continue|check|read|write)/i,
+            /next[,，]? (I will|I'll|we)/i,
           ]
           const shouldContinue = CONTINUATION_PATTERNS.some(p => p.test(fullText))
           if (shouldContinue && turns < maxTurns) {
-            // 注入一条隐式 user 消息，推动 LLM 继续执行
-            this.history.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'auto_continue', content: '请继续执行，不要停下。' }] })
-            // 不 break，继续下一轮
-            continue
+            const mode = this.config.permissions.getMode()
+            if (mode === 'auto') {
+              // 自动模式：系统静默注入继续指令，不显示为用户消息
+              // 使用 [系统内部] 前缀标记，UI 层可识别并以 system 角色显示
+              this.history.push({ role: 'user', content: '[系统内部] 请继续执行，不要停下。直接调用工具完成任务，不要再解释计划。' })
+              // 不 break，继续下一轮
+              continue
+            } else {
+              // 非自动模式（ask/readonly/plan）：通知 UI 询问用户是否继续
+              // 此时 send() 正常结束，等待用户下一条消息
+              yield { type: 'continuation_needed' }
+              break
+            }
           }
           break
         }
@@ -423,8 +478,6 @@ ${contentToSummarize}
         // 执行工具调用（串行，保证历史顺序正确）
         const toolResults: ContentBlock[] = []
         for (const tc of toolCalls) {
-          yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input }
-
           // 实时日志队列：工具执行期间持续 yield 日志
           const logQueue: string[] = []
           const onLog = (line: string) => { logQueue.push(line) }
@@ -432,12 +485,14 @@ ${contentToSummarize}
           // 查找工具
           const tool = this.config.tools.find(t => t.name === tc.name)
           if (!tool) {
+            yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description: tc.name }
             yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: `未找到工具: ${tc.name}` } }
             toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: `错误: 未找到工具: ${tc.name}`, is_error: true })
             continue
           }
 
           const description = tool.describe?.(tc.input) ?? tc.name
+          yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description }
           const filePath = tool.getFilePath?.(tc.input as never)
           const allowed = await this.config.permissions.check({
             toolName: tc.name,
@@ -460,7 +515,11 @@ ${contentToSummarize}
           }
 
           // 工具执行：用 Promise.race 统一处理超时、abort、正常完成三种情况
-          const TOOL_TIMEOUT_MS = 5 * 60 * 1000
+          // 优先使用工具输入中指定的 timeout（如 bash 工具的 timeout 参数），否则用默认值 10 分钟
+          const inputTimeout = (tc.input as Record<string, unknown>)?.timeout
+          const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
+            ? inputTimeout + 5000  // 比工具自身超时多 5s，确保工具先超时并返回错误信息
+            : 10 * 60 * 1000       // 默认 10 分钟
 
           // 将工具执行结果 settle 到这个 promise，同时持续 yield 日志
           const toolPromise: Promise<ToolResult> = tool.execute(tc.input as never, { onLog })
@@ -562,6 +621,7 @@ ${contentToSummarize}
   clearHistory() { this.history = [] }
   getHistory(): readonly Message[] { return this.history }
   setHistory(messages: Message[]) { this.history = [...messages] }
+  setSystemPrompt(prompt: string) { this.config.systemPrompt = prompt }
 
   compactHistory(summary: string) {
     this.history = [

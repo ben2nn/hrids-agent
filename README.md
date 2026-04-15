@@ -1,6 +1,8 @@
-# hrids-agent 使用说明
+# hrids-agent
 
 > 通用自主工作者 CLI —— 你只做决策，它负责执行。
+
+基于 Agentic CLI 架构思想构建，支持多 LLM 提供商、长期记忆、多智能体协调、定时任务、MCP 工具扩展。
 
 ---
 
@@ -8,11 +10,10 @@
 
 ```bash
 # 安装依赖
-cd hrids-agent
 npm install
 
-# 设置 API Key（以 Anthropic 为例）
-export ANTHROPIC_API_KEY=sk-ant-...
+# 设置 API Key（以阿里云百炼为例）
+export DASHSCOPE_API_KEY=sk-...
 
 # 启动交互模式
 npm run dev
@@ -28,7 +29,7 @@ npm run dev
 npm run dev
 ```
 
-进入 TUI 界面，支持多轮对话、斜杠命令、实时流式输出。
+进入 TUI 界面，支持多轮对话、斜杠命令、实时流式输出。默认自动恢复上次会话。
 
 ### 单次执行模式
 
@@ -36,7 +37,7 @@ npm run dev
 npm run dev -- -p "帮我调研一下 Rust 和 Go 在高并发场景下的性能对比"
 ```
 
-执行完一条指令后自动退出，适合脚本调用。
+执行完一条指令后自动退出，适合脚本调用。可用 `--max-chars <n>` 限制输出长度。
 
 ### Server 模式（NDJSON）
 
@@ -55,9 +56,9 @@ npm run dev -- --server
 特殊消息类型：
 
 ```json
-{ "type": "abort" }                          // 中止当前任务
-{ "type": "user_reply", "answer": "..." }    // 回复 ask_user 问题
-{ "type": "decision_reply", "answer": "1" } // 回复 request_decision 决策
+{ "type": "abort" }                           // 中止当前任务
+{ "type": "user_reply", "answer": "..." }     // 回复 ask_user 问题
+{ "type": "decision_reply", "answer": "1" }  // 回复 request_decision 决策
 { "type": "set_cwd", "cwd": "/path/to/dir" } // 切换工作目录
 ```
 
@@ -87,12 +88,20 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 | `--auto` | 自动模式，无需确认写操作 | — |
 | `--readonly` | 只读模式，禁止所有写操作 | — |
 | `--plan` | 计划模式，写操作需手动确认 | — |
-| `--resume <sessionId>` | 恢复之前的会话 | — |
+| `--resume <sessionId>` | 恢复指定会话 | — |
+| `--new-session` | 强制创建新会话 | — |
 | `--list-sessions` | 列出最近的会话 | — |
 | `--cwd <dir>` | 设置工作目录 | `~/.hrids-agent/work/` |
 | `-p, --print <msg>` | 非交互模式，执行后退出 | — |
+| `--max-chars <n>` | 非交互模式输出字符上限 | 不限 |
 | `--server` | Server 模式（NDJSON stdin） | — |
 | `--gateway` | Gateway 模式（HTTP + WS） | — |
+| `--gateway-port <port>` | Gateway 监听端口 | `3282` |
+| `--gateway-host <host>` | Gateway 监听地址 | `127.0.0.1` |
+| `--gateway-token <token>` | Gateway 鉴权 Token | — |
+| `--embedding-provider <p>` | Embedding 提供商：openai / ollama / tfidf | `tfidf` |
+| `--embedding-model <model>` | Embedding 模型名称 | — |
+| `--embedding-base-url <url>` | Embedding API 端点 | — |
 
 ---
 
@@ -106,8 +115,20 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 | Groq | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
 | 阿里云百炼 | `DASHSCOPE_API_KEY` | `qwen-max`, `qwen-plus` |
 | 智谱 AI | `ZHIPU_API_KEY` | `glm-4` |
+| NVIDIA | `NVIDIA_API_KEY` | `--provider nvidia` |
 | Ollama（本地） | 无需 Key | `--provider ollama -m qwen2.5-coder:7b` |
 | 自定义端点 | `CUSTOM_API_KEY` | `--provider custom --base-url <url>` |
+
+### 多模型故障转移
+
+在 `.env` 中配置多平台故障转移，按优先级依次 fallback：
+
+```env
+# 格式: provider:平台名,models:模型1,模型2,...
+LLM_FALLBACK_1=provider:aliyun,models:qwen3.5-flash,qwen3.5-plus
+LLM_FALLBACK_2=provider:deepseek,models:deepseek-chat
+LLM_FALLBACK_3=provider:anthropic,models:claude-3-5-haiku-20241022
+```
 
 ---
 
@@ -155,13 +176,11 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 
 ## 工具列表
 
-工作者可以调用以下工具完成任务：
-
 ### 信息获取
 
 | 工具 | 说明 |
 |------|------|
-| `web_search` | 搜索网络信息（Anthropic 原生 beta 工具） |
+| `web_search` | 搜索网络信息 |
 | `web_fetch` | 获取指定网页内容，智能提取正文 |
 | `file_read` | 读取文件，支持行范围，默认显示行号 |
 | `grep` | 跨平台递归文本搜索 |
@@ -182,13 +201,21 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 | 工具 | 说明 |
 |------|------|
 | `ask_user` | 向用户提问，支持预设选项 |
-| `request_decision` | 结构化决策上报（见下方说明） |
+| `request_decision` | 结构化决策上报 |
 
 ### 定时调度
 
 | 工具 | 说明 |
 |------|------|
 | `schedule_cron` | 管理定时任务（create / list / delete / toggle） |
+
+### Skill 管理
+
+| 工具 | 说明 |
+|------|------|
+| `skill` | 调用已注册的 skill（内置或自定义） |
+| `skill_list` | 列出所有可用 skill |
+| `skill_save` | 将当前工作流沉淀为可复用 skill |
 
 ### 多智能体协调
 
@@ -224,58 +251,18 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 - 发现与原始目标的重大偏差
 - 超出授权范围（涉及费用、生产环境）
 
-上报格式示例：
-
-```
-══════════════════════════════════════════════════════════
-⚡ 需要您的决策
-══════════════════════════════════════════════════════════
-
-📋 是否将报告发布到公开网站？
-
-🎯 影响范围: 所有外部用户可见
-⏰ 紧迫性: 客户等待中
-
-📖 背景
-报告已生成完毕，内容经过审核。发布后无法撤回。
-
-🔀 可选方案
-  1. 立即发布 [风险: 低]
-     内容已就绪，直接发布到生产环境
-  2. 先发布到预览环境 [风险: 低]
-     发布到 staging，确认无误后再上线
-  3. 暂不发布 [风险: 低]
-     保存草稿，等待进一步确认
-
-💡 工作者建议: 方案 2，先预览确认
-
-请输入选项编号（1-3）或直接输入您的指示:
-```
-
 ---
 
 ## 定时任务
 
 工作者可以设置定时任务，在指定时间自动触发执行。
 
-### 通过对话设置
-
 ```
-你：每天早上 9 点帮我检查一下竞品网站有没有更新，有变化就告诉我
-```
-
-工作者会自动调用 `schedule_cron` 创建定时任务。
-
-### cron 表达式格式（5位：分 时 日 月 周）
-
-```
+# cron 表达式格式（5位：分 时 日 月 周）
 0 9 * * 1-5    工作日早 9 点
 0 18 * * *     每天下午 6 点
 */30 * * * *   每 30 分钟
-0 9 * * 1      每周一早 9 点
 ```
-
-### 定时任务持久化
 
 任务保存在 `~/.hrids-agent/crons.json`，进程重启后自动恢复。
 
@@ -283,16 +270,12 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 
 ## 权限控制
 
-### 运行模式
-
 | 模式 | 说明 |
 |------|------|
 | `ask`（默认） | 写操作前询问用户 |
 | `auto` | 自动允许所有操作（`--auto`） |
 | `readonly` | 只允许只读操作（`--readonly`） |
 | `plan` | 只读，写操作需手动确认（`--plan`） |
-
-### 路径级权限
 
 权限规则持久化在 `~/.hrids-agent/permission-rules.json`：
 
@@ -306,9 +289,7 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 }
 ```
 
-- `allowedPaths`：写操作白名单，设置后只允许写这些路径
-- `deniedPaths`：写操作黑名单，这些路径始终拒绝写入
-- 优先级：`deniedPaths` > `allowedPaths` > 工具级规则 > 模式默认值
+`deniedPaths` 优先级高于 `allowedPaths`，高于工具级规则，高于模式默认值。
 
 ---
 
@@ -317,27 +298,70 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 工作者拥有跨会话的长期记忆，分为 4 层：
 
 ```
-L0 身份层     (~100 tokens)    固定身份定义，每次注入 system prompt
-L1 核心摘要   (~500-800 tokens) 按重要性排序的记忆摘要
-L2 按需检索   (~200-500 tokens) 按分类过滤，工具调用触发
-L3 语义搜索   (按需)            sqlite-vec KNN 向量搜索 / TF-IDF 降级
+L0 身份层     (~100 tokens)      固定身份定义，每次注入 system prompt
+L1 核心摘要   (~500-800 tokens)  按重要性排序的记忆摘要
+L2 按需检索   (~200-500 tokens)  按分类过滤，工具调用触发
+L3 语义搜索   (按需)             sqlite-vec KNN 向量搜索 / TF-IDF 降级
 ```
 
 记忆类型：`decision`（决策）/ `preference`（偏好）/ `milestone`（里程碑）/ `problem`（问题）/ `fact`（事实）/ `emotional`（情感）
 
-会话结束后自动从对话中提取记忆，无需手动操作。
+会话结束后自动从对话中提取记忆（由 `MEMORY_CONDENSE=true` 控制是否用 LLM 精炼）。
 
 ### Embedding 配置
 
 ```bash
-# 使用 OpenAI Embedding（更高质量）
+# OpenAI Embedding
 npm run dev -- --embedding-provider openai --embedding-model text-embedding-3-small
 
-# 使用 Ollama 本地 Embedding
+# Ollama 本地 Embedding
 npm run dev -- --embedding-provider ollama --embedding-model nomic-embed-text --embedding-base-url http://localhost:11434
 
 # 默认：TF-IDF（无需额外配置）
 ```
+
+---
+
+## Skill 自动沉淀
+
+会话结束后，若工具调用次数 >= 5 次，工作者会自动判断本次工作流是否值得沉淀为可复用 skill，并写入 `~/.hrids-agent/skills/`。
+
+也可以手动触发：
+
+```
+你：把刚才的工作流保存为 skill
+```
+
+---
+
+## 自定义 Skills
+
+在以下目录创建 `SKILL.md` 文件即可添加自定义 skill：
+
+```
+~/.hrids-agent/skills/<skill-name>/SKILL.md    # 用户级（全局生效）
+<项目目录>/.agent/skills/<skill-name>/SKILL.md  # 项目级（仅当前项目）
+```
+
+`SKILL.md` 格式：
+
+```markdown
+---
+description: 这个 skill 的简短描述
+when-to-use: 什么情况下使用
+argument-hint: <参数提示>
+---
+
+# Skill 内容
+
+这里写注入给工作者的 prompt 内容...
+
+## 用户补充说明
+
+{{args}}
+```
+
+优先级：项目级 > 用户级 > 内置。
 
 ---
 
@@ -367,37 +391,6 @@ MCP 工具以 `mcp__<服务器名>__<工具名>` 格式注册，工作者可以�
 
 ---
 
-## 自定义 Skills
-
-在以下目录创建 `SKILL.md` 文件即可添加自定义 skill：
-
-```
-~/.hrids-agent/skills/<skill-name>/SKILL.md   # 用户级（全局生效）
-<项目目录>/.agent/skills/<skill-name>/SKILL.md # 项目级（仅当前项目）
-```
-
-`SKILL.md` 格式：
-
-```markdown
----
-description: 这个 skill 的简短描述
-when-to-use: 什么情况下使用
-argument-hint: <参数提示>
----
-
-# Skill 内容
-
-这里写注入给工作者的 prompt 内容...
-
-## 用户补充说明
-
-{{args}}
-```
-
-优先级：项目级 > 用户级 > 内置。
-
----
-
 ## 项目记忆文件
 
 在项目根目录创建 `AGENT.md` 或 `CLAUDE.md`，工作者启动时自动读取并注入上下文：
@@ -411,11 +404,6 @@ argument-hint: <参数提示>
 - 组件文件使用 PascalCase
 - 所有注释使用中文
 - 提交信息遵循 Conventional Commits
-
-## 常用命令
-- 启动开发服务器：npm run dev
-- 构建：npm run build
-- 测试：npm test
 ```
 
 ---
@@ -434,8 +422,7 @@ argument-hint: <参数提示>
   "maxBudgetUsd": 5.0,
   "autoCompactThreshold": 60000,
   "agentCwd": "/home/user/workspace",
-  "mcpServers": [],
-  "theme": "default"
+  "mcpServers": []
 }
 ```
 
@@ -459,6 +446,9 @@ npm run dev -- --list-sessions
 
 # 恢复指定会话
 npm run dev -- --resume <sessionId>
+
+# 强制创建新会话（默认自动恢复上次会话）
+npm run dev -- --new-session
 ```
 
 会话保存在 `~/.hrids-agent/sessions/`，格式为 JSONL。
@@ -469,11 +459,11 @@ npm run dev -- --resume <sessionId>
 
 ```
 ~/.hrids-agent/
-├── config.json          # 全局配置
-├── permission-rules.json # 权限规则
-├── crons.json           # 定时任务
-├── sessions/            # 会话历史
-├── memory/              # 长期记忆数据库（SQLite）
-├── skills/              # 用户级自定义 skills
-└── work/                # 默认工作目录
+├── config.json            # 全局配置
+├── permission-rules.json  # 权限规则
+├── crons.json             # 定时任务
+├── sessions/              # 会话历史
+├── memory/                # 长期记忆数据库（SQLite）
+├── skills/                # 用户级自定义 skills（含自动沉淀）
+└── work/                  # 默认工作目录
 ```

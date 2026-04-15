@@ -246,25 +246,36 @@ function splitByTurns(lines: string[], patterns: RegExp[]): string[] {
 
 /**
  * 从对话历史中自动提取记忆（供 QueryEngine 在会话结束后调用）
+ * 同时扫描 user 和 assistant 消息：
+ * - user 消息包含偏好、决策意图（"以后都用X"）
+ * - assistant 消息包含里程碑、问题解决方案
  */
 export function extractFromConversation(
   messages: Array<{ role: string; content: string | unknown[] }>
 ): ExtractedMemory[] {
-  // 只提取 assistant 的回复（包含决策、里程碑等有价值信息）
-  const assistantTexts = messages
-    .filter(m => m.role === 'assistant')
-    .map(m => {
-      if (typeof m.content === 'string') return m.content
-      if (Array.isArray(m.content)) {
-        return (m.content as Array<{ type: string; text?: string }>)
-          .filter(b => b.type === 'text')
-          .map(b => b.text ?? '')
-          .join('\n')
-      }
-      return ''
-    })
+  const extractText = (m: { role: string; content: string | unknown[] }): string => {
+    if (typeof m.content === 'string') return m.content
+    if (Array.isArray(m.content)) {
+      return (m.content as Array<{ type: string; text?: string }>)
+        .filter(b => b.type === 'text')
+        .map(b => b.text ?? '')
+        .join('\n')
+    }
+    return ''
+  }
+
+  // user 消息：重点提取 preference / decision / fact
+  const userTexts = messages
+    .filter(m => m.role === 'user')
+    .map(extractText)
     .filter(Boolean)
 
-  const allText = assistantTexts.join('\n\n')
+  // assistant 消息：重点提取 milestone / problem / decision
+  const assistantTexts = messages
+    .filter(m => m.role === 'assistant')
+    .map(extractText)
+    .filter(Boolean)
+
+  const allText = [...userTexts, ...assistantTexts].join('\n\n')
   return extractMemories(allText)
 }

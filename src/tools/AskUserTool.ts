@@ -1,6 +1,5 @@
 // 向用户提问工具 —— 智能体主动向用户询问信息
 import { z } from 'zod'
-import * as readline from 'readline'
 import type { ToolDef } from '../core/Tool.js'
 
 const inputSchema = z.object({
@@ -8,17 +7,24 @@ const inputSchema = z.object({
   options: z.array(z.string()).optional().describe('可选的预设选项列表'),
 })
 
-// server 模式下，通过 NDJSON 协议与前端交互
-// 发送 ask_user 事件 → 等待前端通过 stdin 发回 { type: "user_reply", answer: "..." }
+// 统一的 pending resolve —— 交互模式和 server 模式共用
 let pendingResolve: ((answer: string) => void) | null = null
+// 当前待回答的问题（供 UI 层展示）
+let pendingQuestion: { question: string; options?: string[] } | null = null
 
-/** 由 server 模式的消息循环调用，将用户回答注入等待中的 ask_user */
+/** 由 server 模式的消息循环或 Ink UI 层调用，将用户回答注入等待中的 ask_user */
 export function resolveAskUser(answer: string): boolean {
   if (!pendingResolve) return false
   const resolve = pendingResolve
   pendingResolve = null
+  pendingQuestion = null
   resolve(answer)
   return true
+}
+
+/** 获取当前待回答的问题（UI 层用于判断是否处于 ask_user 等待状态） */
+export function getPendingAskUser(): { question: string; options?: string[] } | null {
+  return pendingQuestion
 }
 
 export const AskUserTool: ToolDef<typeof inputSchema> = {
@@ -35,6 +41,7 @@ export const AskUserTool: ToolDef<typeof inputSchema> = {
     // server 模式：通过 NDJSON 协议发送问题，等待前端回复
     if (process.env.AGENT_SERVER_MODE === '1') {
       return new Promise(resolve => {
+        pendingQuestion = { question: input.question, options: input.options }
         pendingResolve = (answer: string) => {
           if (input.options && /^\d+$/.test(answer.trim())) {
             const idx = parseInt(answer.trim()) - 1
@@ -54,33 +61,19 @@ export const AskUserTool: ToolDef<typeof inputSchema> = {
       })
     }
 
-    // 交互模式：直接用 readline
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: false,
-    })
-
+    // 交互模式（Ink UI）：通过回调等待，由 App.tsx 的 handleSubmit 调用 resolveAskUser
     return new Promise(resolve => {
-      let prompt = `\n❓ ${input.question}`
-      if (input.options && input.options.length > 0) {
-        prompt += '\n选项:\n' + input.options.map((o, i) => `  ${i + 1}. ${o}`).join('\n')
-        prompt += '\n请输入选项编号或直接回答: '
-      } else {
-        prompt += '\n你的回答: '
-      }
-
-      rl.question(prompt, answer => {
-        rl.close()
+      pendingQuestion = { question: input.question, options: input.options }
+      pendingResolve = (answer: string) => {
         if (input.options && /^\d+$/.test(answer.trim())) {
           const idx = parseInt(answer.trim()) - 1
-          if (idx >= 0 && idx < input.options.length) {
-            resolve({ type: 'success', output: input.options[idx] })
+          if (idx >= 0 && idx < (input.options?.length ?? 0)) {
+            resolve({ type: 'success', output: input.options![idx] })
             return
           }
         }
         resolve({ type: 'success', output: answer.trim() || '（用户未输入）' })
-      })
+      }
     })
   },
 }

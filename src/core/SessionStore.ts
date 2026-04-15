@@ -13,6 +13,7 @@ export interface SessionMeta {
   messageCount: number
   model: string
   title: string // 第一条用户消息的前 60 字
+  workDir?: string // 该会话的独立工作目录
 }
 
 function ensureDir(dir: string) {
@@ -23,6 +24,7 @@ export function saveSession(
   sessionId: string,
   messages: readonly Message[],
   model: string,
+  workDir?: string,
 ) {
   ensureDir(SESSIONS_DIR)
   const sessionDir = join(SESSIONS_DIR, sessionId)
@@ -46,6 +48,7 @@ export function saveSession(
     messageCount: messages.length,
     model,
     title,
+    workDir: workDir ?? existing?.workDir,
   }
   writeFileSync(join(sessionDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8')
 }

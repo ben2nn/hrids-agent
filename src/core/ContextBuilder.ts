@@ -13,9 +13,23 @@ export interface ContextInfo {
   date: string
 }
 
-// 默认工作目录：~/.hrids-agent/work/
+// 默认工作目录：~/.hrids-agent/work/（共享目录，不绑定会话）
 export function getDefaultAgentCwd(): string {
   const dir = join(homedir(), '.hrids-agent', 'work')
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
+// 为指定会话创建独立工作目录：~/.hrids-agent/work/<YYYYMMDD-HHmmss>-<sessionId>/
+export function getSessionWorkDir(sessionId: string): string {
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+  const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  const dirName = `${datePart}-${timePart}-${sessionId}`
+  const dir = join(homedir(), '.hrids-agent', 'work', dirName)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }
@@ -96,6 +110,19 @@ export async function buildSystemContext(basePrompt: string, cwd?: string): Prom
     // 记忆系统不可用时静默跳过
   }
 
+  // 注入记忆触发规则（让 agent 知道何时必须主动写记忆）
+  sections.push(`## 记忆规则
+遇到以下情况时，必须立即调用 memory_add，不要等到会话结束：
+- 用户表达偏好或习惯："以后都用X"、"不要用Y"、"我喜欢X风格" → type=preference
+- 做出技术决策："选择X方案"、"用X替代Y"、"因为X所以用Y" → type=decision
+- 完成重要任务："搞定了"、"上线了"、"终于解决了" → type=milestone
+- 发现 bug 根因或解决方案 → type=problem
+- 用户提到项目名、技术栈、团队成员等事实 → type=fact
+
+如果新信息与已有记忆矛盾（用户改变了决策或偏好），先用 memory_search 找到旧记忆 ID，再调用 memory_update 替换，不要重复新增。
+
+wing 填当前项目名（从工作目录或对话上下文推断），room 填具体主题（如 architecture、auth、deployment）。`)
+
   // 注入环境信息（工作目录不在此处注入，由 getDynamicContext 动态提供）
   const platform = process.platform
   const isWindows = platform === 'win32'
@@ -124,6 +151,13 @@ export async function buildSystemContext(basePrompt: string, cwd?: string): Prom
   } else {
     envInfo.push('注意: Linux 环境，使用 bash 命令')
   }
+
+  envInfo.push(`\nbash 工具超时设置（必须显式传入 timeout 参数，否则默认 60s）：
+- 快速命令（ls/cat/echo）：不传或 timeout=10000
+- 安装依赖（pip/npm install）：timeout=120000
+- 运行脚本/爬虫（短任务）：timeout=300000
+- 大批量处理/全量爬取：timeout=1800000（30分钟）
+- 超长任务：timeout=3600000（1小时）`)
 
   if (gitCtx) envInfo.push(`\nGit 状态:\n${gitCtx}`)
 

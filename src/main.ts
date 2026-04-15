@@ -6,11 +6,11 @@ import { loadConfig, saveConfig } from './core/Config.js'
 import { QueryEngine } from './core/QueryEngine.js'
 import { PermissionManager } from './core/PermissionManager.js'
 import { CommandRegistry, createBuiltinCommands } from './core/CommandRegistry.js'
-import { generateSessionId, loadSession, listSessions, saveSession, getLastSessionId } from './core/SessionStore.js'
-import { buildSystemContext, getDynamicContext, getDefaultAgentCwd } from './core/ContextBuilder.js'
+import { generateSessionId, loadSession, loadSessionMeta, listSessions, saveSession, getLastSessionId } from './core/SessionStore.js'
+import { buildSystemContext, getDynamicContext, getDefaultAgentCwd, getSessionWorkDir } from './core/ContextBuilder.js'
 import { createProvider, createProviderFromEnv } from './core/providers/index.js'
 import { TeamManager } from './core/coordinator/TeamManager.js'
-import { getCoordinatorSystemPrompt } from './core/coordinator/coordinatorPrompt.js'
+import { getCoordinatorSystemPrompt, classifyTask } from './core/coordinator/coordinatorPrompt.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { setGlobalCwd, getGlobalCwd } from './tools/BashTool.js'
 import { resolveAskUser } from './tools/AskUserTool.js'
@@ -72,11 +72,13 @@ async function autoExtractMemories(
 ) {
   try {
     const history = engine.getHistory()
+    if (condense) log.info('记忆总结：开始 LLM 提炼', { sessionId, caller: 'memory-pipeline' })
     await runMemoryPipeline(history as never, {
       condense,
       provider: condense ? provider : undefined,
       sessionId,
     })
+    if (condense) log.info('记忆总结：LLM 提炼完成', { sessionId, caller: 'memory-pipeline' })
   } catch {
     // 静默失败，不影响主流程
   }
@@ -90,6 +92,7 @@ async function autoDistillSkill(engine: QueryEngine, provider: import('./core/pr
 
     // 统计工具调用次数
     let toolCallCount = 0
+
     for (const msg of history) {
       if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
       for (const b of msg.content as import('./core/QueryEngine.js').ContentBlock[]) {
@@ -119,6 +122,7 @@ async function autoDistillSkill(engine: QueryEngine, provider: import('./core/pr
     const condensed = lines.join('\n').slice(0, 6000)
 
     // 调用 LLM 判断是否值得沉淀，并提炼 skill
+    log.info('Skill 总结：开始 LLM 提炼', { toolCallCount, caller: 'skill-distill' })
     const distillPrompt = `以下是一段 agent 完成任务的对话历史（共 ${toolCallCount} 次工具调用）。
 
 请判断这个工作流是否值得沉淀为可复用的 skill。
@@ -169,7 +173,7 @@ ${condensed}`
 
     if (!parsed.name || !parsed.prompt) return
 
-    // 检查是否已有同名 skill（避免重复沉淀）
+    log.info('Skill 总结：LLM 提炼完成', { skillName: parsed.name, caller: 'skill-distill' })
     const skillsDir = join(homedir(), '.hrids-agent', 'skills')
     const skillDir = join(skillsDir, parsed.name)
     const skillMdPath = join(skillDir, 'SKILL.md')
@@ -194,6 +198,8 @@ ${condensed}`
   }
 }
 
+// 启动时用基础层（不含扩展）构建初始 systemPrompt
+// 每次用户发消息时，根据消息内容动态注入对应扩展块
 const BASE_SYSTEM_PROMPT = getCoordinatorSystemPrompt()
 
 async function main() {
@@ -311,8 +317,76 @@ async function main() {
       // 记忆提炼开关：环境变量优先，其次 config.json
       const memoryCondense = process.env.MEMORY_CONDENSE === 'true' || (config.memoryCondense ?? false)
 
-      // 初始化工作目录（优先级：--cwd > config.agentCwd > 默认）
-      const initialCwd = opts.cwd ?? config.agentCwd ?? getDefaultAgentCwd()
+      // 会话管理：优先 --resume，其次询问用户是否恢复上次会话，--new-session 强制新建
+      // 注意：需要在初始化工作目录之前确定 sessionId，以便创建对应的工作目录
+      let sessionId: string
+      let initialMessages: import('./core/QueryEngine.js').Message[]
+
+      if (opts.resume) {
+        // 明确指定 --resume，直接恢复
+        sessionId = opts.resume
+        initialMessages = loadSession(sessionId) ?? []
+      } else if (opts.newSession) {
+        // 明确指定 --new-session，强制新建
+        sessionId = generateSessionId()
+        initialMessages = []
+      } else {
+        // 默认行为：检测是否有上次会话，有则询问用户
+        const lastSessionId = getLastSessionId()
+        if (lastSessionId) {
+          const lastMeta = loadSessionMeta(lastSessionId)
+          const lastTitle = lastMeta?.title ?? '未知'
+          const lastTime = lastMeta?.updatedAt
+            ? new Date(lastMeta.updatedAt).toLocaleString('zh-CN')
+            : '未知时间'
+          const msgCount = lastMeta?.messageCount ?? 0
+
+          process.stdout.write(`\n上次会话：「${lastTitle}」\n`)
+          process.stdout.write(`  时间：${lastTime}，共 ${msgCount} 条消息\n`)
+          process.stdout.write(`恢复上次会话？[Y/n] `)
+
+          const answer = await new Promise<string>(resolve => {
+            // 确保 stdin 处于可读状态
+            if (process.stdin.isPaused()) process.stdin.resume()
+            process.stdin.setEncoding('utf-8')
+            const handler = (data: string) => {
+              process.stdin.removeListener('data', handler)
+              process.stdin.pause()
+              resolve(data.toString().trim().toLowerCase())
+            }
+            process.stdin.once('data', handler)
+          })
+
+          if (answer === '' || answer === 'y') {
+            // 恢复上次会话
+            sessionId = lastSessionId
+            initialMessages = loadSession(sessionId) ?? []
+            console.log(`✓ 已恢复会话（${initialMessages.length} 条消息）\n`)
+          } else {
+            // 新建会话
+            sessionId = generateSessionId()
+            initialMessages = []
+            console.log('✓ 已创建新会话\n')
+          }
+        } else {
+          // 没有历史会话，直接新建
+          sessionId = generateSessionId()
+          initialMessages = []
+        }
+      }
+
+      // 初始化工作目录（优先级：--cwd > config.agentCwd > 旧会话目录 > 新建会话独立目录）
+      // 约定：每个新会话必须在 work 目录下创建对应的独立文件夹
+      const existingWorkDir = loadSessionMeta(sessionId)?.workDir
+      const initialCwd = opts.cwd
+        ?? config.agentCwd
+        ?? existingWorkDir
+        ?? getSessionWorkDir(sessionId)
+
+      // 确保会话工作目录存在（恢复旧会话时目录可能已被删除）
+      if (!existsSync(initialCwd)) {
+        mkdirSync(initialCwd, { recursive: true })
+      }
       setGlobalCwd(initialCwd)
       try { process.chdir(initialCwd) } catch { /* 目录不存在时忽略 */ }
 
@@ -379,17 +453,6 @@ async function main() {
       // 初始化全局 TeamManager（多智能体协调）
       TeamManager.init(provider, tools)
 
-      // 会话管理：优先 --resume，其次自动恢复上次会话，--new-session 强制新建
-      const sessionId = opts.resume
-        ?? (opts.newSession ? null : getLastSessionId())
-        ?? generateSessionId()
-      const initialMessages = (opts.resume || !opts.newSession)
-        ? (loadSession(sessionId) ?? [])
-        : []
-      if (initialMessages.length > 0) {
-        console.log(`已恢复会话 ${sessionId}（${initialMessages.length} 条消息）`)
-      }
-
       const systemPrompt = await buildSystemContext(BASE_SYSTEM_PROMPT)
 
       const engine = new QueryEngine({
@@ -404,6 +467,13 @@ async function main() {
         initialMessages,
       })
 
+      // 根据用户消息动态更新 systemPrompt（按任务类型注入扩展块）
+      async function buildPromptForMessage(msg: string): Promise<void> {
+        const taskPrompt = getCoordinatorSystemPrompt(msg)
+        const fullPrompt = await buildSystemContext(taskPrompt, getGlobalCwd())
+        engine.setSystemPrompt(fullPrompt)
+      }
+
       // 恢复持久化的定时任务（回调由 App 组件内注册，避免绕过 Ink 渲染层）
       restoreScheduledJobs()
 
@@ -412,6 +482,7 @@ async function main() {
         const maxChars = opts.maxChars ? parseInt(opts.maxChars, 10) : Infinity
         let totalChars = 0
         let truncated = false
+        await buildPromptForMessage(opts.print)
         for await (const ev of engine.send(opts.print)) {
           if (ev.type === 'text_delta') {
             if (truncated) continue
@@ -429,7 +500,7 @@ async function main() {
           }
         }
         process.stdout.write('\n')
-        saveSession(sessionId, engine.getHistory(), model)
+        saveSession(sessionId, engine.getHistory(), model, initialCwd)
         void autoExtractMemories(engine, sessionId, provider, memoryCondense)
         void autoDistillSkill(engine, provider)
         await disconnectAllMcp()
@@ -497,7 +568,14 @@ async function main() {
                 getMode: () => permMode,
                 sessionId,
                 listSessions: () => listSessions(),
-                newSession: () => { engine.clearHistory() },
+                newSession: () => {
+                  const newId = generateSessionId()
+                  engine.clearHistory()
+                  // 重置工作目录，防止旧任务文件污染新任务
+                  const newWorkDir = getSessionWorkDir(newId)
+                  setGlobalCwd(newWorkDir)
+                  try { process.chdir(newWorkDir) } catch { /* 忽略 */ }
+                },
                 switchSession: (id: string) => {
                   const messages = loadSession(id)
                   if (!messages) return false
@@ -512,10 +590,11 @@ async function main() {
               if (result.type === 'inject') {
                 // skill inject：将 skill prompt 发给 LLM
                 try {
+                  await buildPromptForMessage(result.prompt)
                   for await (const ev of engine.send(result.prompt)) {
                     emit(ev)
                   }
-                  saveSession(sessionId, engine.getHistory(), model)
+                  saveSession(sessionId, engine.getHistory(), model, initialCwd)
                   void autoExtractMemories(engine, sessionId, provider, memoryCondense)
                   void autoDistillSkill(engine, provider)
                 } catch (err) {
@@ -529,10 +608,11 @@ async function main() {
 
             const msgWithCtx = msg + getDynamicContext(getGlobalCwd())
             try {
+              await buildPromptForMessage(msg)
               for await (const ev of engine.send(msgWithCtx)) {
                 emit(ev)
               }
-              saveSession(sessionId, engine.getHistory(), model)
+              saveSession(sessionId, engine.getHistory(), model, initialCwd)
               void autoExtractMemories(engine, sessionId, provider, memoryCondense)
               void autoDistillSkill(engine, provider)
             } catch (err) {
@@ -599,11 +679,12 @@ async function main() {
 
       let currentModel = model
 
-      // 自动保存会话 + 自动沉淀 skill
+      // 自动保存会话 + 自动沉淀 skill + 动态注入扩展 prompt
       const originalSend = engine.send.bind(engine)
       engine.send = async function* (msg: string) {
+        await buildPromptForMessage(msg)
         yield* originalSend(msg)
-        saveSession(sessionId, engine.getHistory(), currentModel)
+        saveSession(sessionId, engine.getHistory(), currentModel, initialCwd)
         void autoExtractMemories(engine, sessionId, provider, memoryCondense)
         void autoDistillSkill(engine, provider)
       }

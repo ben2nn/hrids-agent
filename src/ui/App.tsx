@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react'
+﻿import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { Box, Text, useInput, useApp } from 'ink'
 import TextInput from 'ink-text-input'
 import type { QueryEngine, StreamEvent } from '../core/QueryEngine.js'
@@ -7,6 +7,9 @@ import type { CommandContext } from '../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js'
 import type { CronJob } from '../tools/ScheduleCronTool.js'
 import { listSessions, loadSession, generateSessionId, saveSession } from '../core/SessionStore.js'
+import { getSessionWorkDir } from '../core/ContextBuilder.js'
+import { setGlobalCwd } from '../tools/BashTool.js'
+import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js'
 
 interface Props {
   engine: QueryEngine
@@ -19,11 +22,19 @@ interface Props {
   getProviderName?: () => { name: string; model: string }
 }
 
-type MsgRole = 'user' | 'assistant' | 'tool' | 'system' | 'error' | 'cost'
+type MsgRole = 'user' | 'assistant' | 'tool' | 'system' | 'error'
+
+interface CostInfo {
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+}
 
 interface DisplayMsg {
+  id?: string      // 工具消息专用，用于 updateMsg 定位
   role: MsgRole
   text: string
+  color?: string   // 可选颜色覆盖（用于黄色 system 消息等）
 }
 
 const ROLE_COLOR: Record<MsgRole, string> = {
@@ -32,16 +43,14 @@ const ROLE_COLOR: Record<MsgRole, string> = {
   tool:      'cyan',
   system:    'gray',
   error:     'red',
-  cost:      'yellow',
 }
 
 const ROLE_PREFIX: Record<MsgRole, string> = {
   user:      '你 › ',
-  assistant: '',
+  assistant: '✦ ',
   tool:      '',
   system:    '• ',
   error:     '✗ ',
-  cost:      '$ ',
 }
 
 export function App({ engine, commands, sessionId: initialSessionId, onModelChange, currentModel, providerName, getProviderName }: Props) {
@@ -54,11 +63,27 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [loading, setLoading] = useState(false)
   const [streamBuf, setStreamBuf] = useState('')   // 当前流式文本缓冲
   const [toolProgress, setToolProgress] = useState('')  // 工具执行中的临时日志，不写入 msgs
+  const [askUserPrompt, setAskUserPrompt] = useState<string | null>(null)  // ask_user 等待时的提示文字
+  const [costInfo, setCostInfo] = useState<CostInfo | null>(null)
   const modelRef = useRef(currentModel)
   const [displayProvider, setDisplayProvider] = useState(providerName)
 
-  const push = useCallback((role: MsgRole, text: string) => {
-    setMsgs(prev => [...prev, { role, text }])
+  const push = useCallback((msg: DisplayMsg) => {
+    setMsgs(prev => [...prev, msg])
+  }, [])
+
+  // 原地更新指定 id 的消息；若找不到对应 id，则降级追加 fallback 消息
+  const updateMsg = useCallback((id: string, updater: (prev: DisplayMsg) => DisplayMsg, fallback?: DisplayMsg) => {
+    setMsgs(prev => {
+      const idx = prev.findIndex(m => m.id === id)
+      if (idx !== -1) {
+        // 找到：原地更新
+        return prev.map((m, i) => i === idx ? updater(m) : m)
+      }
+      // 未找到：降级追加 fallback 消息（若提供）
+      if (fallback) return [...prev, fallback]
+      return prev
+    })
   }, [])
 
   // cron 触发队列：避免在 loading 时直接调用，排队等待
@@ -67,6 +92,10 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   // tool_log 批量缓冲：避免每行都触发重渲染导致 Ink 卡死
   const toolLogBufRef = useRef<string[]>([])
   const toolLogFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 每个工具执行期间的日志，用于 tool_end 时持久化到历史
+  const currentToolLogsRef = useRef<string[]>([])
+  // 每个工具最多保留的日志行数（避免爬虫等大量输出撑爆界面）
+  const MAX_TOOL_LOG_LINES = 30
 
   const flushToolLog = useCallback(() => {
     if (toolLogBufRef.current.length === 0) return
@@ -79,6 +108,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const bufferToolLog = useCallback((line: string) => {
     // 过滤 stderr 行，不在 CLI UI 中显示
     if (line.trimStart().startsWith('[stderr]')) return
+    // 同时记录到当前工具日志缓冲，供 tool_end 持久化
+    currentToolLogsRef.current.push(line)
     toolLogBufRef.current.push(line)
     // 50ms 内的日志合并成一条，超过 20 行立即 flush
     if (toolLogBufRef.current.length >= 20) {
@@ -91,7 +122,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   // 公共 engine 执行逻辑，供用户消息和 cron 触发共用
   const runEngine = useCallback(async (prompt: string, displayAs?: string) => {
-    if (displayAs !== undefined) push('system', displayAs)
+    if (displayAs !== undefined) push({ role: 'system', text: displayAs, color: displayAs.startsWith('⏰') ? 'yellow' : undefined })
     setLoading(true)
     loadingRef.current = true
     setStreamBuf('')
@@ -100,27 +131,71 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       for await (const ev of engine.send(prompt)) {
         switch (ev.type) {
           case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
-          case 'tool_start': push('tool', `⚙ ${ev.name}`); break
-          case 'tool_log': bufferToolLog(`  ${ev.line}`); break
-          case 'tool_end':
-            flushToolLog() // 确保残留日志先 flush
-            setToolProgress('') // 清空临时进度
-            if (ev.result.type === 'error') push('error', `✗ ${ev.name}: ${ev.result.message}`)
-            else {
-              // output 截断显示，避免大量文本撑爆 Ink 渲染
-              const out = ev.result.output ?? ''
-              const preview = out.length > 500 ? out.slice(0, 500) + `\n…（共 ${out.length} 字符）` : out
-              push('tool', `✓ ${ev.name}${preview ? `\n${preview}` : ''}`)
+          case 'tool_start':
+            currentToolLogsRef.current = [] // 重置当前工具日志缓冲
+            push({ id: ev.id, role: 'tool', text: `⚙ ${ev.name}  ${ev.description}` })
+            // ask_user 工具：切换输入框为回答模式
+            if (ev.name === 'ask_user') {
+              // tool_start 在 execute() 之前触发，pendingQuestion 尚未设置
+              // 直接从 tool_start 的 input 读取问题内容
+              const askInput = ev.input as { question?: string; options?: string[] }
+              const question = askInput?.question ?? ''
+              const options = askInput?.options ?? []
+              const hint = options.length > 0
+                ? `❓ ${question}\n选项: ${options.map((o, i) => `${i + 1}. ${o}`).join('  ')}`
+                : `❓ ${question}`
+              setAskUserPrompt(hint)
+              setLoading(false)           // 解锁输入框，让用户可以输入
+              loadingRef.current = false  // 同步更新 ref，防止 Ctrl+C 误触发 abort
             }
             break
-          case 'permission_denied': push('system', `⚠ 已拒绝: ${ev.description}`); break
-          case 'usage': push('cost', `输入 ${ev.inputTokens} / 输出 ${ev.outputTokens} tokens  累计 $${ev.costUsd.toFixed(4)}`); break
-          case 'compact_start': push('system', '⟳ 上下文过长，正在自动压缩历史...'); break
-          case 'compact_done': push('system', `✓ 历史已压缩（约 ${engine.getEstimatedTokens().toLocaleString()} tokens）`); break
-          case 'budget_exceeded': push('error', `⚠ 已超出成本预算 $${ev.limitUsd.toFixed(2)}（当前 $${ev.costUsd.toFixed(4)}），任务已停止`); break
-          case 'error': push('error', ev.message); break
+          case 'tool_log': bufferToolLog(`  ${ev.line}`); break
+          case 'tool_end': {
+            flushToolLog() // 确保残留日志先 flush
+            setToolProgress('') // 清空临时进度
+            setAskUserPrompt(null) // 清除 ask_user 提示（如果有）
+            if (ev.name === 'ask_user') {
+              setLoading(true)           // 恢复 loading 状态，继续执行后续工具
+              loadingRef.current = true  // 同步更新 ref
+            }
+            const logs = currentToolLogsRef.current
+            currentToolLogsRef.current = []
+            // 日志截断：超过 MAX_TOOL_LOG_LINES 行时保留最后 N 行并插入省略提示
+            const kept = logs.length > MAX_TOOL_LOG_LINES
+              ? [`  …（省略前 ${logs.length - MAX_TOOL_LOG_LINES} 行）`, ...logs.slice(-MAX_TOOL_LOG_LINES)]
+              : logs
+            const logSuffix = kept.length > 0 ? '\n' + kept.join('\n') : ''
+            const result = ev.result
+            if (result.type === 'error') {
+              // 失败：追加日志 + 错误行，整块变红；降级时 push 独立消息
+              updateMsg(ev.id, prev => ({
+                ...prev,
+                text: prev.text + logSuffix + `\n✗ ${ev.name}: ${result.message}`,
+                color: 'red',
+              }), { role: 'error', text: `✗ ${ev.name}: ${result.message}` })
+            } else {
+              // 成功：追加日志 + 结果行；output 超 500 字符时截断
+              const out = result.output ?? ''
+              const preview = out.length > 500 ? out.slice(0, 500) + `\n…（共 ${out.length} 字符）` : out
+              updateMsg(ev.id, prev => ({
+                ...prev,
+                text: prev.text + logSuffix + `\n✓ ${ev.name}${preview ? '\n' + preview : ''}`,
+              }), { role: 'tool', text: `✓ ${ev.name}${preview ? '\n' + preview : ''}` })
+            }
+            break
+          }
+          case 'permission_denied': push({ role: 'system', text: `⚠ 已拒绝: ${ev.description}`, color: 'yellow' }); break
+          case 'usage': setCostInfo({ inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, costUsd: ev.costUsd }); break
+          case 'compact_start': push({ role: 'system', text: '⟳ 上下文过长，正在自动压缩历史...' }); break
+          case 'compact_done': push({ role: 'system', text: `✓ 历史已压缩（约 ${engine.getEstimatedTokens().toLocaleString()} tokens）` }); break
+          case 'budget_exceeded': push({ role: 'error', text: `⚠ 已超出成本预算 ${ev.limitUsd.toFixed(2)}（当前 ${ev.costUsd.toFixed(4)}），任务已停止` }); break
+          case 'continuation_needed':
+            // 非自动模式：LLM 表达了继续意图，提示用户确认
+            push({ role: 'system', text: '▸ 助手计划继续执行更多操作，发送"继续"确认，或输入新指令调整方向。', color: 'yellow' })
+            break
+          case 'error': push({ role: 'error', text: ev.message }); break
           case 'done':
-            if (assistantText) { setStreamBuf(''); push('assistant', assistantText); assistantText = '' }
+            if (assistantText) { setStreamBuf(''); push({ role: 'assistant', text: assistantText }); assistantText = '' }
             // 刷新 provider/model 显示（fallback 切换后同步更新）
             if (getProviderName) {
               const latest = getProviderName()
@@ -131,7 +206,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         }
       }
     } catch (err) {
-      push('error', String(err))
+      push({ role: 'error', text: String(err) })
     }
     setStreamBuf('')
     setToolProgress('')
@@ -189,14 +264,18 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       const newId = generateSessionId()
       engine.clearHistory()
       setSessionId(newId)
-      push('system', `已创建新会话 (${newId})`)
+      // 重置工作目录到新的独立子目录，防止旧任务文件污染新任务
+      const newWorkDir = getSessionWorkDir(newId)
+      setGlobalCwd(newWorkDir)
+      try { process.chdir(newWorkDir) } catch { /* 忽略 */ }
+      push({ role: 'system', text: `已创建新会话 (${newId})\n工作目录: ${newWorkDir}` })
     },
     switchSession: (id: string) => {
       const messages = loadSession(id)
       if (!messages) return false
       engine.setHistory(messages)
       setSessionId(id)
-      push('system', `已切换到会话 ${id}（${messages.length} 条消息）`)
+      push({ role: 'system', text: `已切换到会话 ${id}（${messages.length} 条消息）` })
       return true
     },
   }
@@ -206,6 +285,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     if (!text || loading) return
     setInput('')
 
+    // 优先检查是否有待处理的 ask_user（工具在等待用户回答）
+    const pending = getPendingAskUser()
+    if (pending) {
+      push({ role: 'user', text })
+      resolveAskUser(text)
+      return
+    }
+
     // 处理斜杠命令
     const parsed = commands.parse(text)
     if (parsed) {
@@ -213,24 +300,24 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         const helpText = commands.getAll()
           .map(c => `  /${c.name}${c.argumentHint ? ' ' + c.argumentHint : ''}  —  ${c.description}`)
           .join('\n')
-        push('system', `可用命令:\n${helpText}`)
+        push({ role: 'system', text: `可用命令:\n${helpText}` })
         return
       }
 
       const cmd = commands.find(parsed.name)
       if (!cmd) {
-        push('error', `未知命令: /${parsed.name}，输入 /help 查看可用命令`)
+        push({ role: 'error', text: `未知命令: /${parsed.name}，输入 /help 查看可用命令` })
         return
       }
 
       const result = await cmd.execute(parsed.args, cmdCtx)
       if (result.type === 'exit') { exit(); return }
-      if (result.type === 'message') { push('system', result.text); return }
+      if (result.type === 'message') { push({ role: 'system', text: result.text }); return }
       if (result.type === 'noop') return
 
       // inject：将 skill prompt 作为用户消息发给 LLM
       if (result.type === 'inject') {
-        push('user', `/${parsed.name}${parsed.args ? ' ' + parsed.args : ''}`)
+        push({ role: 'user', text: `/${parsed.name}${parsed.args ? ' ' + parsed.args : ''}` })
         await runEngine(result.prompt)
         return
       }
@@ -238,32 +325,47 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     }
 
     // 普通消息 → 发给 LLM
-    push('user', text)
+    push({ role: 'user', text })
     await runEngine(text)
   }, [loading, commands, engine, push, exit, cmdCtx])
 
   useInput((_, key) => {
+    // useInput 作为备用，处理空闲状态下的 Ctrl+C 退出
     if (key.ctrl && (key as { name?: string }).name === 'c') {
-      if (loading) {
-        // 任务运行中：中断任务而非退出
-        engine.abort()
-        setLoading(false)
-        setStreamBuf('')
-        setToolProgress('')
-        push('system', '⚠ 任务已中断（Ctrl+C）')
-      } else {
+      if (!loadingRef.current) {
         exit()
       }
     }
   })
+
+  // 直接监听 stdin 原始字节，确保 loading 期间也能捕获 Ctrl+C（\x03）
+  useEffect(() => {
+    const handler = (data: Buffer) => {
+      // \x03 = Ctrl+C
+      if (data.length === 1 && data[0] === 0x03) {
+        if (loadingRef.current) {
+          engine.abort()
+          setLoading(false)
+          loadingRef.current = false
+          setStreamBuf('')
+          setToolProgress('')
+          push({ role: 'system', text: '⚠ 任务已中断（Ctrl+C）' })
+        } else {
+          exit()
+        }
+      }
+    }
+    process.stdin.on('data', handler)
+    return () => { process.stdin.off('data', handler) }
+  }, [engine, exit, push])
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
       {/* 消息历史 */}
       <Box flexDirection="column" marginBottom={1}>
         {msgs.map((m, i) => (
-          <Box key={i} marginBottom={0}>
-            <Text color={ROLE_COLOR[m.role]}>
+          <Box key={m.id ?? i} marginBottom={0}>
+            <Text color={m.color ?? ROLE_COLOR[m.role]}>
               {ROLE_PREFIX[m.role]}{m.text}
             </Text>
           </Box>
@@ -280,13 +382,28 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       {/* 流式输出中的实时文本 */}
       {loading && streamBuf && (
         <Box marginBottom={1}>
-          <Text color="white">{streamBuf}</Text>
+          <Text color="white">✦ {streamBuf}</Text>
         </Box>
       )}
 
       {/* 状态栏 */}
       <Box marginBottom={0}>
-        {loading
+        {askUserPrompt
+          ? (
+            <Box flexDirection="column">
+              <Text color="yellow">{askUserPrompt}</Text>
+              <Box>
+                <Text color="cyan">{'› '}</Text>
+                <TextInput
+                  value={input}
+                  onChange={setInput}
+                  onSubmit={handleSubmit}
+                  placeholder="输入回答..."
+                />
+              </Box>
+            </Box>
+          )
+          : loading
           ? <Text color="yellow" dimColor>▸ 思考中...</Text>
           : (
             <Box>
@@ -306,6 +423,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       <Box marginTop={0}>
         <Text dimColor>
           {displayProvider}  {modelRef.current}
+          {costInfo && ` 输入 ${costInfo.inputTokens} / 输出 ${costInfo.outputTokens} tokens  累计 ${costInfo.costUsd.toFixed(4)}`}
           {loading ? '  Ctrl+C 中断' : '  Ctrl+C 退出'}
         </Text>
       </Box>

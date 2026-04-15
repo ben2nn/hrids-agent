@@ -7,7 +7,7 @@ import { ALL_TOOLS } from '../tools/index.js'
 import { createAgentTool } from '../tools/AgentTool.js'
 import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { buildSystemContext, getDynamicContext, getDefaultAgentCwd } from '../core/ContextBuilder.js'
+import { buildSystemContext, getDynamicContext, getSessionWorkDir } from '../core/ContextBuilder.js'
 import { loadSession, saveSession } from '../core/SessionStore.js'
 import { loadConfig } from '../core/Config.js'
 import { setGlobalCwd, getGlobalCwd } from '../tools/BashTool.js'
@@ -72,7 +72,10 @@ export class SessionManager {
     const model = req.model ?? agentConfig.model
     const sessionId = randomUUID()
 
-    log.info('创建会话', { sessionId, model, autoMode: req.autoMode })
+    // 确定会话工作目录：优先使用请求中指定的 cwd，否则为新会话创建独立工作目录
+    const sessionCwd = req.cwd ?? getSessionWorkDir(sessionId)
+
+    log.info('创建会话', { sessionId, model, autoMode: req.autoMode, cwd: sessionCwd })
     auditLog({ sessionId, action: 'session_create', resource: sessionId, result: 'allowed', details: { model } })
 
     // 创建 LLM 提供商
@@ -92,7 +95,7 @@ export class SessionManager {
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
         model,
-        cwd: req.cwd ?? getDefaultAgentCwd(),
+        cwd: sessionCwd,
       },
       engine: null as unknown as QueryEngine, // 下方赋值
       subscribers: new Set(),
@@ -159,7 +162,7 @@ export class SessionManager {
     // 恢复已有会话或新建
     const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
 
-    const systemPrompt = await buildSystemContext(BASE_SYSTEM_PROMPT, req.cwd)
+    const systemPrompt = await buildSystemContext(BASE_SYSTEM_PROMPT, sessionCwd)
 
     session.engine = new QueryEngine({
       provider,
@@ -173,8 +176,7 @@ export class SessionManager {
       initialMessages,
     })
 
-    if (req.cwd) setGlobalCwd(req.cwd)
-    else setGlobalCwd(getDefaultAgentCwd())
+    setGlobalCwd(sessionCwd)
 
     this.sessions.set(sessionId, session)
     this.resetIdleTimer(session)

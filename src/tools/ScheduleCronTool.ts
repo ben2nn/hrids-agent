@@ -77,6 +77,23 @@ function parseNextRun(expression: string): number | undefined {
   }
 }
 
+// ── 判断 cron 表达式是否为周期性（含通配符）────────────────────────────────
+
+// 判断 cron 表达式是否为周期性任务。
+// 规则：5个字段中，只要有任意一个字段含 * / - , 就认为是周期性任务。
+// 例如：
+//   "0 * * * *"    → true（每小时）
+//   "*/30 * * * *" → true（每30分钟）
+//   "0 9 * * 1-5"  → true（工作日每天）
+//   "0 15 15 4 *"  → true（4月15日，每年重复）
+// 只有所有字段都是纯数字时才视为一次性任务（实际上极少见）。
+function isRecurringExpression(expression: string): boolean {
+  const parts = expression.trim().split(/\s+/)
+  if (parts.length !== 5) return false
+  // 只要有任意字段含 * 或 / 就是周期性
+  return parts.some(p => p.includes('*') || p.includes('/') || p.includes('-') || p.includes(','))
+}
+
 // ── 运行时调度器（进程内，重启后需重新注册）──────────────────────────────────
 
 const activeTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -135,7 +152,13 @@ const createSchema = z.object({
   expression: z.string().describe('cron 表达式（5位：分 时 日 月 周），例如 "0 9 * * 1-5" 表示工作日早9点'),
   description: z.string().describe('任务的人类可读描述，例如"每天早9点汇报昨日进展"'),
   task: z.string().describe('触发时注入给工作者的任务 prompt，应自包含、无需额外上下文'),
-  once: z.boolean().optional().describe('是否为一次性任务，触发后自动删除。当任务只需执行一次时（如"今天查天气"）必须设为 true'),
+  once: z.boolean().optional().describe(
+    '是否为一次性任务，触发后自动删除。\n' +
+    '判断规则（必须严格遵守）：\n' +
+    '- once=false（默认）：周期性任务，cron 表达式中含有 * 或 */n 通配符，如"每小时"、"每天"、"每周"、"每30分钟"等\n' +
+    '- once=true：仅当任务明确只执行一次时才设为 true，如"今天查一次天气"、"这次提醒我"、"明天早上叫我起床"（特定日期/时间，不重复）\n' +
+    '⚠️ 含有"每"字或周期性描述的任务绝对不能设为 once=true'
+  ),
 })
 
 const deleteSchema = z.object({
@@ -163,21 +186,28 @@ const inputSchema = z.discriminatedUnion('action', [
 export const ScheduleCronTool: ToolDef<typeof inputSchema> = {
   name: 'schedule_cron',
   description: `管理定时任务，让工作者能够在指定时间自动触发执行。
-- create: 创建新的定时任务（once=true 表示一次性任务，触发后自动删除）
+- create: 创建新的定时任务
 - list: 查看所有定时任务及其状态
 - delete: 删除定时任务
 - toggle: 启用或禁用定时任务
 
-⚠️ 任务有效性原则：
-- 如果任务描述中包含"今天"、"这次"、"一次"等时间限定词，必须将 once 设为 true
-- 周期性任务（每天、每周等）才使用 once=false（默认）
+⚠️ once 字段判断规则（极其重要，必须严格遵守）：
+- once=false（默认，周期性任务）：用户说"每小时"、"每天"、"每30分钟"、"每周"等含有周期性含义的任务
+  → cron 表达式通常含有 * 或 */n，如 "0 * * * *"（每小时）、"*/30 * * * *"（每30分钟）
+- once=true（一次性任务）：用户明确说只执行一次，如"今天下午3点提醒我"、"明天早上叫我起床"
+  → cron 表达式通常是固定的具体时间，如 "0 15 15 4 *"（4月15日下午3点）
+
+❌ 错误示例：用户说"每小时提醒我"→ once 绝对不能设为 true
+✅ 正确示例：用户说"每小时提醒我"→ once=false，expression="0 * * * *"
 
 cron 表达式格式（5位）：分 时 日 月 周
 常用示例：
-  "0 9 * * 1-5"   工作日早9点
-  "0 18 * * *"    每天下午6点
-  "*/30 * * * *"  每30分钟
-  "0 9 * * 1"     每周一早9点`,
+  "0 * * * *"     每小时整点（周期性，once=false）
+  "*/30 * * * *"  每30分钟（周期性，once=false）
+  "0 9 * * 1-5"   工作日早9点（周期性，once=false）
+  "0 18 * * *"    每天下午6点（周期性，once=false）
+  "0 9 * * 1"     每周一早9点（周期性，once=false）
+  "0 15 15 4 *"   4月15日下午3点（一次性，once=true）`,
   inputSchema,
   readonly: false,
 
@@ -206,6 +236,11 @@ cron 表达式格式（5位）：分 时 日 月 周
     if (input.action === 'create') {
       const id = `cron-${Date.now().toString(36)}`
       const nextRunAt = parseNextRun(input.expression)
+
+      // 自动推断 once：如果 cron 表达式含有 * 或 */n 通配符（周期性），强制 once=false
+      const isRecurring = isRecurringExpression(input.expression)
+      const once = isRecurring ? false : (input.once ?? false)
+
       const job: CronJob = {
         id,
         expression: input.expression,
@@ -214,7 +249,7 @@ cron 表达式格式（5位）：分 时 日 月 周
         createdAt: Date.now(),
         nextRunAt,
         enabled: true,
-        once: input.once ?? false,
+        once,
       }
       crons.push(job)
       saveCrons(crons)
@@ -223,10 +258,11 @@ cron 表达式格式（5位）：分 时 日 月 周
       const nextStr = nextRunAt
         ? `下次执行: ${new Date(nextRunAt).toLocaleString('zh-CN')}`
         : '（无法解析下次执行时间，请检查 cron 表达式）'
-      const onceStr = job.once ? '\n⚠️ 一次性任务：触发后将自动删除' : ''
+      const onceStr = job.once ? '\n⚠️ 一次性任务：触发后将自动删除' : '\n🔁 周期性任务：将持续重复执行'
+      const correctedStr = (isRecurring && input.once === true) ? '\n📌 注意：检测到周期性 cron 表达式，已自动将 once 修正为 false' : ''
       return {
         type: 'success',
-        output: `✅ 定时任务已创建\nID: ${id}\n表达式: ${input.expression}\n描述: ${input.description}\n${nextStr}${onceStr}`,
+        output: `✅ 定时任务已创建\nID: ${id}\n表达式: ${input.expression}\n描述: ${input.description}\n${nextStr}${onceStr}${correctedStr}`,
       }
     }
 
