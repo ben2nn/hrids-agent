@@ -1,42 +1,32 @@
 // 会话管理器 —— 管理 agent 进程的生命周期
-import { randomUUID } from 'crypto'
-import { createProvider } from '../core/providers/index.js'
+import { createProvider, createProviderFromEnv } from '../core/providers/index.js'
 import { QueryEngine } from '../core/QueryEngine.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { createAgentTool } from '../tools/AgentTool.js'
 import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { buildSystemContext, getDynamicContext, getSessionWorkDir } from '../core/ContextBuilder.js'
-import { loadSession, saveSession } from '../core/SessionStore.js'
+import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js'
+import { getCoordinatorSystemPrompt } from '../core/coordinator/coordinatorPrompt.js'
+import { loadSession, loadSessionMeta, saveSession, generateSessionId } from '../core/SessionStore.js'
 import { loadConfig } from '../core/Config.js'
 import { setGlobalCwd, getGlobalCwd } from '../tools/BashTool.js'
-import { resolveAskUser } from '../tools/AskUserTool.js'
+import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
+import { setTodoSessionId, setTodosUpdatedCallback } from '../tools/TodoWriteTool.js'
 import { logger } from '../core/logger.js'
 import { auditLog } from '../core/audit.js'
+import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
+import type { LLMProvider } from '../core/providers/types.js'
 import type { CreateSessionRequest, SessionInfo } from './types.js'
 import type WebSocket from 'ws'
 
 const log = logger.child({ component: 'gateway' })
 
-const BASE_SYSTEM_PROMPT = `你是一个智能编程助手，可以帮助用户完成代码编写、文件操作、命令执行等任务。
-
-## 工作原则
-1. 优先用只读工具（file_read, glob, grep）了解情况，再执行写操作
-2. 执行破坏性操作前先说明意图
-3. 遇到错误时分析原因并尝试修复
-4. 使用 todo_write 追踪复杂任务的进度
-5. 对于需要多步骤的复杂任务，考虑使用 agent 工具派生子智能体
-6. 需要用户提供信息时，使用 ask_user 工具
-
-## 回复规范
-- 使用中文回复
-- 代码块使用 markdown 格式
-- 操作完成后给出简洁的结果摘要`
-
 export interface ManagedSession {
   info: SessionInfo
   engine: QueryEngine
+  provider: LLMProvider
+  permissions: PermissionManager
   // 当前连接的 WebSocket 客户端（同一会话可被多个客户端订阅）
   subscribers: Set<WebSocket>
   // 空闲超时计时器
@@ -70,34 +60,48 @@ export class SessionManager {
 
     const agentConfig = loadConfig()
     const model = req.model ?? agentConfig.model
-    const sessionId = randomUUID()
+    // resume 时复用原会话 id，保持会话连续性；否则生成新 id
+    const sessionId = req.resume ?? generateSessionId()
 
-    // 确定会话工作目录：优先使用请求中指定的 cwd，否则为新会话创建独立工作目录
-    const sessionCwd = req.cwd ?? getSessionWorkDir(sessionId)
+    // resume 时从磁盘读取原会话 title
+    const resumeMeta = req.resume ? loadSessionMeta(req.resume) : null
+
+    // 确定会话工作目录：优先使用请求中指定的 cwd，resume 时沿用原会话目录，否则新建独立目录
+    const sessionCwd = req.cwd ?? resumeMeta?.workDir ?? getSessionWorkDir(sessionId)
 
     log.info('创建会话', { sessionId, model, autoMode: req.autoMode, cwd: sessionCwd })
     auditLog({ sessionId, action: 'session_create', resource: sessionId, result: 'allowed', details: { model } })
 
     // 创建 LLM 提供商
-    const provider = createProvider({
-      model,
-      apiKey: req.apiKey ?? agentConfig.apiKey,
-      baseUrl: req.baseUrl ?? agentConfig.baseUrl,
-      provider: req.provider as never ?? agentConfig.provider,
-    })
+    // 若请求显式指定了 model/provider/apiKey，则用 createProvider 精确创建；
+    // 否则走 .env 的 LLM_FALLBACK_N / DEFAULT_MODEL 多模型 fallback 配置
+    const provider = (req.model || req.provider || req.apiKey)
+      ? createProvider({
+          model,
+          apiKey: req.apiKey ?? agentConfig.apiKey,
+          baseUrl: req.baseUrl ?? agentConfig.baseUrl,
+          provider: req.provider as never ?? agentConfig.provider,
+        })
+      : createProviderFromEnv()
 
-    // 权限管理：auto 模式直接允许；非 auto 模式通过 WebSocket 协议询问客户端
-    const permMode = req.autoMode ? 'auto' : agentConfig.permissionMode
+    // 权限管理：permissionMode 优先；autoMode 兼容旧字段；否则读全局配置
+    const permMode = req.permissionMode ?? (req.autoMode ? 'auto' : agentConfig.permissionMode)
+    // 使用 provider 的实际模型名（createProviderFromEnv 时 model 变量可能是旧默认值）
+    const actualModel = provider.model
     const session: ManagedSession = {
       info: {
         id: sessionId,
         status: 'ready',
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
-        model,
+        model: actualModel,
         cwd: sessionCwd,
+        title: resumeMeta?.title,
+        permissionMode: permMode as 'ask' | 'auto' | 'plan',
       },
       engine: null as unknown as QueryEngine, // 下方赋值
+      provider,
+      permissions: null as unknown as PermissionManager, // 下方赋值
       subscribers: new Set(),
       idleTimer: null,
       pendingPermissions: new Map(),
@@ -153,7 +157,7 @@ export class SessionManager {
 
     const tools = [
       ...ALL_TOOLS,
-      createAgentTool(req.apiKey ?? process.env.ANTHROPIC_API_KEY ?? '', model),
+      createAgentTool(req.apiKey ?? agentConfig.apiKey ?? '', actualModel),
       ...mcpTools,
     ]
 
@@ -162,7 +166,7 @@ export class SessionManager {
     // 恢复已有会话或新建
     const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
 
-    const systemPrompt = await buildSystemContext(BASE_SYSTEM_PROMPT, sessionCwd)
+    const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(), sessionCwd)
 
     session.engine = new QueryEngine({
       provider,
@@ -175,8 +179,22 @@ export class SessionManager {
       autoCompactThreshold: agentConfig.autoCompactThreshold,
       initialMessages,
     })
+    session.permissions = permissions
 
     setGlobalCwd(sessionCwd)
+
+    setTodoSessionId(sessionId)
+    setTodosUpdatedCallback((sid, todos) => {
+      const s = this.sessions.get(sid)
+      if (s) {
+        this.broadcast(s, { type: 'todos_updated', todos })
+      }
+    })
+
+    // Gateway 模式：注册 ask_user 回调，将问题广播给前端
+    setGatewayAskCallback((question, options) => {
+      this.broadcast(session, { type: 'ask_user', question, options })
+    })
 
     this.sessions.set(sessionId, session)
     this.resetIdleTimer(session)
@@ -215,6 +233,8 @@ export class SessionManager {
     session.subscribers.clear()
 
     await disconnectAllMcp()
+    setTodoSessionId(null)
+    setGatewayAskCallback(null)
     this.sessions.delete(id)
   }
 
@@ -241,7 +261,7 @@ export class SessionManager {
     // 保存所有会话历史
     for (const [id, session] of this.sessions) {
       try {
-        saveSession(id, session.engine.getHistory(), session.info.model)
+        saveSession(id, session.engine.getHistory(), session.info.model, session.info.cwd)
       } catch { /* 忽略 */ }
     }
 
@@ -283,19 +303,48 @@ export class SessionManager {
 
     log.debug('处理消息', { sessionId, contentLength: content.length })
 
-    const msgWithCtx = content + getDynamicContext(session.info.cwd)
+    // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
+    const coordinatorPrompt = getCoordinatorSystemPrompt(content)
+
+    // plan 模式：动态注入规划模式系统提示，让 LLM 知道只做分析不执行写操作
+    if (session.permissions.getMode() === 'plan') {
+      const planModeAppendix = `
+
+## 当前模式：Plan（规划模式）
+你现在处于规划模式。在此模式下，所有写操作（文件写入、命令执行等）均被禁止。
+你的任务是：
+1. 使用只读工具（file_read、glob、grep 等）充分了解现状
+2. 制定详细的执行计划，列出每一步要做什么、修改哪些文件、执行什么命令
+3. 不要尝试调用任何写操作工具，调用了也会被系统拒绝
+用户确认计划后，会切换到执行模式。`
+      session.engine.setSystemPrompt(coordinatorPrompt + planModeAppendix)
+    } else {
+      // 非 plan 模式：使用动态注入了任务扩展的 coordinator prompt
+      session.engine.setSystemPrompt(coordinatorPrompt)
+    }
+
+    const msgWithCtx = content
 
     try {
       for await (const ev of session.engine.send(msgWithCtx)) {
-        this.broadcast(session, ev)
-        if (ev.type === 'done') {
-          saveSession(sessionId, session.engine.getHistory(), session.info.model)
+        // 将 QueryEngine 内部事件格式转换为前端协议格式
+        const clientMsg = toClientMessage(ev)
+        if (clientMsg) this.broadcast(session, clientMsg)
+
+        // 每次工具调用结束后增量保存，减少崩溃时的数据丢失
+        if (ev.type === 'tool_end' || ev.type === 'done') {
+          saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
         }
       }
     } finally {
       session.info.status = 'ready'
       session.info.lastActiveAt = Date.now()
     }
+
+    // 后台钩子：记忆提炼 + Skill 自动沉淀（不阻塞响应）
+    const memoryCondense = loadConfig().memoryCondense ?? false
+    void autoExtractMemories(session.engine, sessionId, session.provider, memoryCondense)
+    void autoDistillSkill(session.engine, session.provider)
   }
 
   // 处理客户端发来的控制消息
@@ -308,11 +357,19 @@ export class SessionManager {
 
     switch (msg.type) {
       case 'message':
-        void this.runMessage(sessionId, String(msg.content ?? ''))
+        void this.runMessage(sessionId, String(msg.content ?? '')).catch((err) => {
+          log.error('runMessage 未捕获异常', { sessionId, error: String(err) })
+          this.broadcast(session, { type: 'error', message: `执行失败: ${String(err)}` })
+          session.info.status = 'ready'
+        })
         break
       // 恢复中断的任务：直接注入"继续执行"指令，history 里已有中断上下文
       case 'resume':
-        void this.runMessage(sessionId, String(msg.content ?? '请继续执行之前未完成的任务，从中断处接着做。'))
+        void this.runMessage(sessionId, String(msg.content ?? '请继续执行之前未完成的任务，从中断处接着做。')).catch((err) => {
+          log.error('resume runMessage 未捕获异常', { sessionId, error: String(err) })
+          this.broadcast(session, { type: 'error', message: `恢复执行失败: ${String(err)}` })
+          session.info.status = 'ready'
+        })
         break
       case 'abort':
         session.engine.abort()
@@ -340,6 +397,16 @@ export class SessionManager {
         }
         break
       }
+      case 'set_permission_mode': {
+        const mode = msg.mode as string
+        if (mode === 'ask' || mode === 'auto' || mode === 'plan') {
+          session.permissions.setMode(mode)
+          session.info.permissionMode = mode
+          this.broadcast(session, { type: 'permission_mode_changed', mode })
+          log.info('权限模式已切换', { sessionId, mode })
+        }
+        break
+      }
     }
   }
 
@@ -353,5 +420,66 @@ export class SessionManager {
         void this.destroySession(session.info.id)
       }
     }, this.config.idleTimeoutMs)
+  }
+}
+
+// ── QueryEngine StreamEvent → 前端 WebSocket 协议转换 ──────────────────────
+// QueryEngine 使用内部字段名（id/name/line/costUsd），前端期望不同的字段名
+import type { StreamEvent } from '../core/QueryEngine.js'
+
+function toClientMessage(ev: StreamEvent): object | null {
+  switch (ev.type) {
+    case 'text_delta':
+      return { type: 'text_delta', delta: ev.delta }
+
+    case 'tool_start':
+      return { type: 'tool_start', toolId: ev.id, toolName: ev.name, input: ev.input }
+
+    case 'tool_log':
+      return { type: 'tool_log', toolId: ev.id, log: ev.line }
+
+    case 'tool_end': {
+      // result.type: 'success' | 'error' → status; 'denied' 由 permission_denied 事件处理
+      const status = ev.result.type === 'success' ? 'success' : 'error'
+      const result = ev.result.type === 'success' ? ev.result.output : ev.result.message
+      return { type: 'tool_end', toolId: ev.id, toolName: ev.name, status, result }
+    }
+
+    case 'permission_denied':
+      // 权限拒绝：以 tool_end denied 状态通知前端
+      return { type: 'tool_end', toolId: ev.id, toolName: ev.toolName, status: 'denied' }
+
+    case 'usage':
+      return {
+        type: 'usage',
+        inputTokens: ev.inputTokens,
+        outputTokens: ev.outputTokens,
+        cost: ev.costUsd,
+        model: '',
+      }
+
+    case 'budget_exceeded':
+      return { type: 'budget_exceeded', message: `已超出预算上限（$${ev.limitUsd}），当前花费 $${ev.costUsd.toFixed(4)}` }
+
+    case 'done':
+      return { type: 'done' }
+
+    case 'error':
+      return { type: 'error', message: ev.message }
+
+    case 'interrupted':
+      return { type: 'error', message: ev.message }
+
+    // 以下事件不需要推送给前端
+    case 'turn_limit':
+    case 'compact_start':
+    case 'compact_done':
+      return null
+
+    case 'continuation_needed':
+      return { type: 'continuation_needed' }
+
+    default:
+      return null
   }
 }

@@ -1,4 +1,5 @@
 import { BashTool } from './BashTool.js'
+import { PowerShellTool } from './PowerShellTool.js'
 import { FileReadTool } from './FileReadTool.js'
 import { FileWriteTool } from './FileWriteTool.js'
 import { FileEditTool } from './FileEditTool.js'
@@ -16,8 +17,11 @@ import { TEAM_TOOLS } from './TeamTools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
 import type { ToolDef } from '../core/Tool.js'
 
+// 根据平台选择 shell 工具：Windows 使用 PowerShellTool，其他平台使用 BashTool
+const shellTool = process.platform === 'win32' ? PowerShellTool : BashTool
+
 export {
-  BashTool, FileReadTool, FileWriteTool, FileEditTool,
+  BashTool, PowerShellTool, FileReadTool, FileWriteTool, FileEditTool,
   GlobTool, GrepTool, WebFetchTool, WebSearchTool,
   AskUserTool, TodoWriteTool, TodoReadTool,
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
@@ -28,7 +32,7 @@ export { TEAM_TOOLS } from './TeamTools.js'
 export { MEMORY_TOOLS } from '../memory/index.js'
 
 export const ALL_TOOLS: ToolDef[] = [
-  BashTool,
+  shellTool,  // Windows → PowerShellTool，Linux/macOS → BashTool
   FileReadTool,
   FileWriteTool,
   FileEditTool,

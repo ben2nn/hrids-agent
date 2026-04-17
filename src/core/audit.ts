@@ -11,6 +11,7 @@ export type AuditAction =
   | 'file_edit'
   | 'file_delete'
   | 'bash_execute'
+  | 'powershell_execute'
   | 'permission_check'
   | 'permission_denied'
   | 'session_create'

@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import { existsSync, mkdirSync } from 'fs'
 import { Command } from 'commander'
 import { render } from 'ink'
 import React from 'react'
@@ -20,14 +21,10 @@ import { createAgentTool } from './tools/AgentTool.js'
 import { loadMcpTools, disconnectAllMcp } from './tools/McpTool.js'
 import { App } from './ui/App.js'
 import { createGateway } from './gateway/server.js'
-import { runMemoryPipeline, resetEmbeddingProvider } from './memory/index.js'
+import { resetEmbeddingProvider } from './memory/index.js'
+import { autoExtractMemories, autoDistillSkill } from './core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from './skills/index.js'
 import { logger } from './core/logger.js'
-import { mkdirSync, writeFileSync, existsSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
-
-const log = logger.child({ component: 'main' })
 
 // ── 启动配置校验 ──────────────────────────────────────────────
 // 在实际调用 API 前提前检测缺失的必要配置，给出明确提示
@@ -63,141 +60,6 @@ function validateStartupConfig(opts: Record<string, string | boolean | undefined
   }
 }
 
-// 会话结束后自动提炼记忆（后台静默执行，不阻塞主流程）
-async function autoExtractMemories(
-  engine: QueryEngine,
-  sessionId: string,
-  provider: import('./core/providers/index.js').LLMProvider,
-  condense: boolean,
-) {
-  try {
-    const history = engine.getHistory()
-    if (condense) log.info('记忆总结：开始 LLM 提炼', { sessionId, caller: 'memory-pipeline' })
-    await runMemoryPipeline(history as never, {
-      condense,
-      provider: condense ? provider : undefined,
-      sessionId,
-    })
-    if (condense) log.info('记忆总结：LLM 提炼完成', { sessionId, caller: 'memory-pipeline' })
-  } catch {
-    // 静默失败，不影响主流程
-  }
-}
-
-// 会话结束后自动提炼 skill（后台静默执行，不阻塞主流程）
-// 启发式判断：工具调用次数 >= 5 且会话有实质内容，才尝试提炼
-async function autoDistillSkill(engine: QueryEngine, provider: import('./core/providers/index.js').LLMProvider): Promise<void> {
-  try {
-    const history = engine.getHistory()
-
-    // 统计工具调用次数
-    let toolCallCount = 0
-
-    for (const msg of history) {
-      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
-      for (const b of msg.content as import('./core/QueryEngine.js').ContentBlock[]) {
-        if (b.type === 'tool_use') toolCallCount++
-      }
-    }
-
-    // 门槛：工具调用 < 5 次，不值得沉淀
-    if (toolCallCount < 5) return
-
-    // 序列化对话历史（只保留文本和工具调用摘要，控制 token）
-    const lines: string[] = []
-    for (const msg of history) {
-      if (typeof msg.content === 'string') {
-        lines.push(`[${msg.role === 'user' ? '用户' : '助手'}]: ${msg.content.slice(0, 500)}`)
-        continue
-      }
-      const parts: string[] = []
-      for (const b of msg.content as import('./core/QueryEngine.js').ContentBlock[]) {
-        if (b.type === 'text') parts.push(b.text.slice(0, 300))
-        else if (b.type === 'tool_use') parts.push(`[调用工具: ${b.name}]`)
-      }
-      if (parts.length > 0) {
-        lines.push(`[${msg.role === 'user' ? '用户' : '助手'}]: ${parts.join(' ')}`)
-      }
-    }
-    const condensed = lines.join('\n').slice(0, 6000)
-
-    // 调用 LLM 判断是否值得沉淀，并提炼 skill
-    log.info('Skill 总结：开始 LLM 提炼', { toolCallCount, caller: 'skill-distill' })
-    const distillPrompt = `以下是一段 agent 完成任务的对话历史（共 ${toolCallCount} 次工具调用）。
-
-请判断这个工作流是否值得沉淀为可复用的 skill。
-
-**值得沉淀的条件（满足任一即可）：**
-- 包含 3 个以上不同工具的协作使用
-- 克服了错误或障碍后找到了可行方案
-- 包含可重复的、有价值的操作模式
-
-**不值得沉淀：**
-- 简单的问答或单一工具操作
-- 高度特定于当前项目、无法复用的内容
-
-如果不值得沉淀，只输出：null
-
-如果值得沉淀，输出以下 JSON（不要包含任何其他内容）：
-{
-  "name": "英文小写连字符名称，描述任务类型",
-  "description": "一句话描述这个 skill 的用途（中文）",
-  "when_to_use": "什么情况下应该使用这个 skill（中文）",
-  "prompt": "完整的 Markdown 格式执行步骤，用占位符替换具体路径/项目名，如 <目标文件>、<项目名>"
-}
-
-对话历史：
-${condensed}`
-
-    let raw = ''
-    for await (const chunk of provider.stream(
-      [{ role: 'user', content: distillPrompt }],
-      [],
-      '你是一个 skill 提炼助手，只输出 null 或 JSON，不输出任何其他内容。',
-      2000,
-    )) {
-      if (chunk.type === 'text_delta' && chunk.delta) raw += chunk.delta
-    }
-
-    const trimmed = raw.trim()
-    if (!trimmed || trimmed === 'null') return
-
-    // 解析 JSON（容忍 markdown 代码块包裹）
-    const jsonStr = trimmed.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim()
-    let parsed: { name: string; description: string; when_to_use?: string; prompt: string }
-    try {
-      parsed = JSON.parse(jsonStr)
-    } catch {
-      return // 解析失败静默跳过
-    }
-
-    if (!parsed.name || !parsed.prompt) return
-
-    log.info('Skill 总结：LLM 提炼完成', { skillName: parsed.name, caller: 'skill-distill' })
-    const skillsDir = join(homedir(), '.hrids-agent', 'skills')
-    const skillDir = join(skillsDir, parsed.name)
-    const skillMdPath = join(skillDir, 'SKILL.md')
-    const isUpdate = existsSync(skillMdPath)
-
-    // 构建 SKILL.md
-    const frontmatter = [
-      '---',
-      `description: "${parsed.description}"`,
-      parsed.when_to_use ? `when-to-use: "${parsed.when_to_use}"` : null,
-      '---',
-    ].filter(Boolean).join('\n')
-
-    const content = frontmatter + '\n\n' + parsed.prompt.trim() + '\n'
-
-    mkdirSync(skillDir, { recursive: true })
-    writeFileSync(skillMdPath, content, 'utf-8')
-
-    log.info(`自动沉淀 skill: ${parsed.name}（${isUpdate ? '更新' : '新建'}）`, { path: skillMdPath })
-  } catch {
-    // 静默失败，不影响主流程
-  }
-}
-
 // 启动时用基础层（不含扩展）构建初始 systemPrompt
 // 每次用户发消息时，根据消息内容动态注入对应扩展块
 const BASE_SYSTEM_PROMPT = getCoordinatorSystemPrompt()
@@ -214,7 +76,6 @@ async function main() {
     .option('--api-key <key>', 'API Key（也可通过环境变量设置）')
     .option('--base-url <url>', '自定义 API 端点（Ollama / 本地代理）')
     .option('--auto', '自动模式（无需确认写操作）')
-    .option('--readonly', '只读模式')
     .option('--plan', '计划模式（只读，写操作需手动确认后执行）')
     .option('--resume <sessionId>', '恢复之前的会话')
     .option('--list-sessions', '列出最近的会话')
@@ -270,26 +131,47 @@ async function main() {
 
       // Gateway 模式：独立启动，不需要 provider/engine，由 SessionManager 按需创建
       if (opts.gateway) {
+        // ⚠️ 必须在 gateway.start() 之前覆盖全局异常处理器
+        // 避免启动过程中或运行期间的异常触发底部的 process.exit(1)
+        process.removeAllListeners('uncaughtException')
+        process.removeAllListeners('unhandledRejection')
+        process.on('uncaughtException', (err) => {
+          logger.error('未捕获异常（Gateway 继续运行）', { error: err.message, stack: err.stack })
+        })
+        process.on('unhandledRejection', (reason) => {
+          logger.error('未处理的 Promise 拒绝（Gateway 继续运行）', { reason: String(reason) })
+        })
+
         const gateway = createGateway({
           port: parseInt(opts.gatewayPort, 10),
           host: opts.gatewayHost,
           authToken: opts.gatewayToken,
         })
         await gateway.start()
-        console.log(`[gateway] 端点:`)
-        console.log(`  REST  http://${opts.gatewayHost}:${opts.gatewayPort}/sessions`)
-        console.log(`  WS    ws://${opts.gatewayHost}:${opts.gatewayPort}/sessions/:id/stream`)
+        const webUrl = `http://${opts.gatewayHost}:${opts.gatewayPort}`
+        console.log(``)
+        console.log(`  ╔══════════════════════════════════════════════╗`)
+        console.log(`  ║          hrids-agent Gateway 已就绪          ║`)
+        console.log(`  ╚══════════════════════════════════════════════╝`)
+        console.log(``)
+        console.log(`  🌐 Web UI     ${webUrl}`)
+        console.log(`  📡 REST API   ${webUrl}/sessions`)
+        console.log(`  🔌 WebSocket  ws://${opts.gatewayHost}:${opts.gatewayPort}/sessions/:id/stream`)
         if (opts.gatewayToken) {
-          console.log(`  Token ${opts.gatewayToken}`)
+          console.log(`  🔑 Token      ${opts.gatewayToken}`)
         }
+        console.log(``)
+        console.log(`  提示：在浏览器中打开 ${webUrl} 开始使用`)
+        console.log(`  按 Ctrl+C 停止服务`)
+        console.log(``)
         // 保持进程运行，监听退出信号
         const shutdown = async (signal: string) => {
-          log.info(`收到 ${signal}，开始优雅关闭...`)
+          logger.info(`收到 ${signal}，开始优雅关闭...`)
           process.stdout.write(`\n[gateway] 正在关闭（${signal}）...\n`)
           try {
             await gateway.stop(15000)
           } catch (err) {
-            log.error('关闭失败', { error: String(err) })
+            logger.error('关闭失败', { error: String(err) })
           }
           process.exit(0)
         }
@@ -417,8 +299,7 @@ async function main() {
       }
 
       // 权限模式
-      const permMode = opts.readonly ? 'readonly'
-        : opts.plan ? 'plan'
+      const permMode = opts.plan ? 'plan'
         : opts.auto ? 'auto'
         : config.permissionMode
 
@@ -712,16 +593,23 @@ async function main() {
 }
 
 main().catch(err => {
-  log.error('启动失败', { error: String(err) })
+  logger.error('启动失败', { error: String(err) })
   console.error('启动失败:', err)
   process.exit(1)
 })
 
-// 全局未捕获异常保护（非 server 模式）
+// 全局未捕获异常保护（非 gateway/server 模式）
+// Gateway 模式会在启动后覆盖这两个处理器（不退出进程）
 process.on('uncaughtException', (err) => {
-  log.error('未捕获异常', { error: err.message, stack: err.stack })
-  process.exit(1)
+  logger.error('未捕获异常', { error: err.message, stack: err.stack })
+  // 仅在非 gateway 模式下退出（gateway 模式会 removeAllListeners 后重新注册）
+  if (!process.argv.includes('--gateway')) {
+    process.exit(1)
+  }
 })
 process.on('unhandledRejection', (reason) => {
-  log.error('未处理的 Promise 拒绝', { reason: String(reason) })
+  logger.error('未处理的 Promise 拒绝', { reason: String(reason) })
+  if (!process.argv.includes('--gateway')) {
+    // 非 gateway 模式下记录但不强制退出，避免误杀
+  }
 })

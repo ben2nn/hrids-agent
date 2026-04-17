@@ -2,6 +2,13 @@
 // 设计原则：基础层保持精简，专项规范按任务类型动态注入，避免 prompt 无限膨胀
 
 // ─────────────────────────────────────────────
+// 平台相关配置
+// ─────────────────────────────────────────────
+
+/** 根据平台获取 shell 工具名称 */
+const SHELL_TOOL_NAME = process.platform === 'win32' ? 'powershell' : 'bash'
+
+// ─────────────────────────────────────────────
 // 基础层：每次都加载，保持精简
 // ─────────────────────────────────────────────
 const BASE_PROMPT = `你是一个通用自主工作者。你的主人（用户）只做决策，你负责独立完成所有执行工作。
@@ -43,7 +50,7 @@ const BASE_PROMPT = `你是一个通用自主工作者。你的主人（用户�
 
 ## 工具速查
 - 信息获取：web_search / web_fetch / file_read / grep / glob / memory_search
-- 任务执行：bash / file_write / file_edit / todo_write
+- 任务执行：${SHELL_TOOL_NAME} / file_write / file_edit / todo_write
 - 人机交互：ask_user（简单问答）/ request_decision（决策上报）
 - 协作：agent（子工作者）/ schedule_cron（定时任务）
 - 技能管理：skill（调用技能）/ skill_list（列出技能）/ skill_save（保存技能）
@@ -90,7 +97,7 @@ const EXT_SCRIPT: PromptExtension = {
   id: 'script',
   content: `## 脚本执行规范
 
-**bash 超时（必须设置）：**
+**${SHELL_TOOL_NAME} 超时（必须设置）：**
 - 安装依赖（pip/npm install）：timeout=120000
 - 运行脚本/爬虫：timeout=300000
 - 大批量处理/全量爬取：timeout=600000 或更长
@@ -105,7 +112,7 @@ const EXT_SCRIPT: PromptExtension = {
 **长时间任务：**
 1. 先用小数据量（10-20条）验证逻辑，再扩大规模
 2. 脚本内置进度保存，支持断点续传
-3. bash 超时后先检查输出文件是否有数据，再判断是否失败
+3. ${SHELL_TOOL_NAME} 超时后先检查输出文件是否有数据，再判断是否失败
 4. 同一命令超时两次后，先读取脚本分析原因，再决定是否修改`,
 }
 

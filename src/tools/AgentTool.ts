@@ -91,6 +91,7 @@ export function createAgentTool(apiKey: string, model: string): ToolDef<typeof i
         // 回退：使用传入的 apiKey/model
         const { createProvider } = await import('../core/providers/index.js')
         const { BashTool } = await import('./BashTool.js')
+        const { PowerShellTool } = await import('./PowerShellTool.js')
         const { FileReadTool } = await import('./FileReadTool.js')
         const { FileWriteTool } = await import('./FileWriteTool.js')
         const { FileEditTool } = await import('./FileEditTool.js')
@@ -99,8 +100,11 @@ export function createAgentTool(apiKey: string, model: string): ToolDef<typeof i
         const { WebFetchTool } = await import('./WebFetchTool.js')
         const { TodoWriteTool, TodoReadTool } = await import('./TodoWriteTool.js')
 
+        // 根据平台选择 shell 工具
+        const shellTool = process.platform === 'win32' ? PowerShellTool : BashTool
+
         const allFallbackTools = [
-          BashTool, FileReadTool, FileWriteTool, FileEditTool,
+          shellTool, FileReadTool, FileWriteTool, FileEditTool,
           GlobTool, GrepTool, WebFetchTool, TodoWriteTool, TodoReadTool,
         ]
 

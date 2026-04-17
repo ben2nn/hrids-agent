@@ -215,6 +215,18 @@ export function getProjectSkillsDir(cwd: string): string {
   return join(cwd, '.agent', 'skills')
 }
 
+/** 读取用户技能禁用列表（~/.hrids-agent/skills-disabled.json） */
+export function getDisabledUserSkills(): Set<string> {
+  const disabledPath = join(homedir(), '.hrids-agent', 'skills-disabled.json')
+  if (!existsSync(disabledPath)) return new Set()
+  try {
+    const arr = JSON.parse(readFileSync(disabledPath, 'utf-8')) as string[]
+    return new Set(Array.isArray(arr) ? arr : [])
+  } catch {
+    return new Set()
+  }
+}
+
 /**
  * 构建完整的 SkillRegistry：
  * 优先级：project > user > bundled
@@ -228,15 +240,19 @@ export function buildSkillRegistry(
 ): SkillRegistry {
   const registry = new SkillRegistry()
 
+  // 读取禁用列表（只影响 user 技能）
+  const disabledUserSkills = getDisabledUserSkills()
+
   // 1. 内置 skills（最低优先级）
   registry.registerAll(getBundledSkills())
 
-  // 2. 用户级 skills
-  registry.registerAll(loadSkillsFromDir(
+  // 2. 用户级 skills（过滤掉禁用的）
+  const userSkills = loadSkillsFromDir(
     getUserSkillsDir(),
     'user',
     onError ? (name, err) => onError('user', name, err) : undefined,
-  ))
+  ).filter(s => !disabledUserSkills.has(s.name))
+  registry.registerAll(userSkills)
 
   // 3. 项目级 skills（最高优先级）
   if (cwd) {

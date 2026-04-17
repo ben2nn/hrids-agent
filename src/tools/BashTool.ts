@@ -9,8 +9,6 @@ import { logger } from '../core/logger.js'
 
 const log = logger.child({ component: 'bash-tool' })
 
-const isWindows = process.platform === 'win32'
-
 // 持久化工作目录，在当前 session 进程内跨命令调用保持 cd 状态
 // 默认使用 ~/.hrids-agent/work/，由 setGlobalCwd 覆盖
 function initDefaultCwd(): string {
@@ -31,11 +29,11 @@ export function getGlobalCwd(): string {
 }
 
 const inputSchema = z.object({
-  command: z.string().describe('要执行的 shell 命令'),
+  command: z.string().describe('要执行的 shell 命令（bash/sh 语法）'),
   timeout: z.number().optional().describe('超时时间（毫秒），默认 60000。长时间任务（如爬虫、编译）可设置更大的值，例如 1800000（30分钟）'),
 })
 
-// 危险命令黑名单（加强版）
+// 危险命令黑名单（Linux/macOS）
 const BLOCKED_PATTERNS = [
   /rm\s+-rf\s+\/(?!\w)/,           // rm -rf /
   /rm\s+-rf\s+~\s*$/,              // rm -rf ~
@@ -53,7 +51,7 @@ const BLOCKED_PATTERNS = [
 
 export const BashTool: ToolDef<typeof inputSchema> = {
   name: 'bash',
-  description: '在 shell 中执行命令，返回 stdout 和 stderr',
+  description: '在 Linux/macOS 的 bash/sh 环境中执行命令，返回 stdout 和 stderr。仅适用于 Unix 系统。',
   inputSchema,
   readonly: false,
 
@@ -94,10 +92,7 @@ export const BashTool: ToolDef<typeof inputSchema> = {
     // 拦截纯 cd 命令，直接更新持久目录
     const cdMatch = input.command.trim().match(/^cd\s+(.+)$/)
     if (cdMatch) {
-      let target = cdMatch[1].trim().replace(/^["']|["']$/g, '').trim()
-      // Windows 下将正斜杠转为反斜杠，避免路径解析错误
-      if (isWindows) target = target.replace(/\//g, '\\')
-      // path.resolve 在 Windows 下能正确处理绝对路径（含跨盘符）和相对路径
+      const target = cdMatch[1].trim().replace(/^["']|["']$/g, '').trim()
       const newDir = path.resolve(persistentCwd, target)
       if (fs.existsSync(newDir) && fs.statSync(newDir).isDirectory()) {
         persistentCwd = newDir
@@ -114,84 +109,30 @@ export const BashTool: ToolDef<typeof inputSchema> = {
     logLine(`[bash] 工作目录: ${persistentCwd}`)
 
     return new Promise<ReturnType<typeof BashTool.execute> extends Promise<infer R> ? R : never>((resolve) => {
-      let shell: string
-      let shellArgs: string[]
-
-      if (isWindows) {
-        // 用 PowerShell 代替 cmd.exe，使用 -EncodedCommand 避免特殊字符转义问题
-        // Base64 编码整个脚本块，彻底规避分号/引号/空格等导致的参数解析错误
-        // 同时设置 stderr 编码，避免中文乱码
-        const script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::InputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; ${input.command}`
-        const encoded = Buffer.from(script, 'utf16le').toString('base64')
-        shell = 'powershell.exe'
-        shellArgs = [
-          '-NoProfile',
-          '-NonInteractive',
-          '-EncodedCommand',
-          encoded,
-        ]
-      } else {
-        shell = '/bin/sh'
-        shellArgs = ['-c', input.command]
-      }
-
-      const child = spawn(shell, shellArgs, {
+      const child = spawn('/bin/sh', ['-c', input.command], {
         cwd: persistentCwd,
         env: {
           ...process.env,
           PYTHONIOENCODING: 'utf-8',
-          // PowerShell / Linux 均使用 UTF-8
           PYTHONUTF8: '1',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
-        // Windows 下让 Node 以 UTF-8 处理子进程 I/O
-        ...(isWindows ? { windowsHide: true } : {}),
       })
-
-      // PowerShell stdout 和 stderr 管道均为 UTF-8
-      // （Node.js 通过管道读取时，PowerShell 输出的 CLIXML 是 UTF-8 编码）
-      const decodeStdout = (chunk: Buffer): string => chunk.toString('utf-8')
-      const decodeStderr = (chunk: Buffer): string => {
-        // 跳过 UTF-8 BOM（0xEF 0xBB 0xBF），如有
-        const data = (chunk.length >= 3 && chunk[0] === 0xEF && chunk[1] === 0xBB && chunk[2] === 0xBF)
-          ? chunk.slice(3)
-          : chunk
-        return data.toString('utf-8')
-      }
 
       const outputChunks: Buffer[] = []
       const stderrChunks: Buffer[] = []
 
       child.stdout.on('data', (chunk: Buffer) => {
-        const text = decodeStdout(chunk)
+        const text = chunk.toString('utf-8')
         text.split('\n').filter(l => l).forEach(l => logLine(`[stdout] ${l}`))
         outputChunks.push(chunk)
       })
 
       child.stderr.on('data', (chunk: Buffer) => {
-        let text = decodeStderr(chunk)
-        // PowerShell 的 stderr 是 CLIXML 格式，提取其中的纯文本错误信息
-        if (text.includes('#< CLIXML')) {
-          const match = text.match(/<S S="Error">([\s\S]*?)<\/S>/g)
-          if (match) {
-            text = match
-              .map(s => s.replace(/<S S="Error">|<\/S>/g, '').replace(/_x000D__x000A_/g, '\n').trim())
-              .join('\n')
-          } else {
-            // 非 Error 类型的 CLIXML（进度条、状态等）对用户无意义，直接丢弃
-            // 避免剥标签后残留乱码字节被渲染到 UI
-            text = ''
-          }
-        }
-        // PowerShell 进度条/模块加载信息以 <Objs ...> XML 开头，直接丢弃
-        if (text.trimStart().startsWith('<Objs ')) {
-          text = ''
-        }
-        const trimmed = text.trim()
-        if (!trimmed) return
-        trimmed.split('\n').filter(l => l).forEach(l => logLine(`[stderr] ${l}`, true))
-        // stderr 单独收集，不混入 outputChunks，避免污染 CLI 回复内容
-        stderrChunks.push(Buffer.from(trimmed, 'utf-8'))
+        const text = chunk.toString('utf-8').trim()
+        if (!text) return
+        text.split('\n').filter(l => l).forEach(l => logLine(`[stderr] ${l}`, true))
+        stderrChunks.push(Buffer.from(text, 'utf-8'))
       })
 
       const timer = setTimeout(() => {

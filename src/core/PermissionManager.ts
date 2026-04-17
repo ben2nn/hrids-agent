@@ -7,7 +7,6 @@ import { join, resolve, relative } from 'path'
 export type PermissionMode =
   | 'ask'      // 每次都询问用户
   | 'auto'     // 自动允许所有操作
-  | 'readonly' // 只允许只读操作
   | 'plan'     // 计划模式：只允许只读，写操作需要先进入 plan 确认
 
 export interface PermissionRequest {
@@ -117,7 +116,6 @@ export class PermissionManager {
       case 'auto':
         return true
 
-      case 'readonly':
       case 'plan':
         return false
 

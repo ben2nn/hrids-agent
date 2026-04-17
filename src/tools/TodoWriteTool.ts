@@ -1,11 +1,31 @@
 // Todo 列表工具 —— 帮助智能体追踪任务进度
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 
-const TODO_FILE = join(homedir(), '.hrids-agent', 'todos.json')
+let currentSessionId: string | null = null
+let todosUpdatedCallback: ((sessionId: string, todos: Todo[]) => void) | null = null
+
+export function setTodoSessionId(id: string | null): void {
+  currentSessionId = id
+}
+
+export function getTodoSessionId(): string | null {
+  return currentSessionId
+}
+
+export function setTodosUpdatedCallback(cb: ((sessionId: string, todos: Todo[]) => void) | null): void {
+  todosUpdatedCallback = cb
+}
+
+function getTodoFile(): string {
+  if (currentSessionId) {
+    return join(homedir(), '.hrids-agent', 'sessions', currentSessionId, 'todos.json')
+  }
+  return join(homedir(), '.hrids-agent', 'todos.json')
+}
 
 export type TodoStatus = 'pending' | 'in_progress' | 'completed'
 
@@ -17,10 +37,11 @@ export interface Todo {
 }
 
 function loadTodos(): Todo[] {
-  if (!existsSync(TODO_FILE)) return []
+  const todoFile = getTodoFile()
+  if (!existsSync(todoFile)) return []
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = JSON.parse(readFileSync(TODO_FILE, 'utf-8')) as any[]
+    const raw = JSON.parse(readFileSync(todoFile, 'utf-8')) as any[]
     // 兼容旧格式：{ task, status } → { id, content, status, priority }
     return raw.map((item, index) => ({
       id: item.id ?? String(index + 1),
@@ -34,7 +55,9 @@ function loadTodos(): Todo[] {
 }
 
 function saveTodos(todos: Todo[]) {
-  writeFileSync(TODO_FILE, JSON.stringify(todos, null, 2), 'utf-8')
+  const todoFile = getTodoFile()
+  mkdirSync(dirname(todoFile), { recursive: true })
+  writeFileSync(todoFile, JSON.stringify(todos, null, 2), 'utf-8')
 }
 
 const inputSchema = z.object({
@@ -70,6 +93,11 @@ export const TodoWriteTool: ToolDef<typeof inputSchema> = {
     if (!Array.isArray(todos)) todos = []
     input = { ...input, todos }
     saveTodos(input.todos)
+
+    // 若有 sessionId 且有回调，触发 todos_updated 推送
+    if (currentSessionId && todosUpdatedCallback) {
+      todosUpdatedCallback(currentSessionId, input.todos)
+    }
 
     const summary = input.todos.map(t => {
       const icon = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '○'

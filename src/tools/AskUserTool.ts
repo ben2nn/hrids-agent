@@ -12,6 +12,14 @@ let pendingResolve: ((answer: string) => void) | null = null
 // 当前待回答的问题（供 UI 层展示）
 let pendingQuestion: { question: string; options?: string[] } | null = null
 
+// Gateway 模式下的问题推送回调（由 SessionManager 注册）
+let gatewayAskCallback: ((question: string, options?: string[]) => void) | null = null
+
+/** 注册 Gateway 模式下的 ask_user 推送回调 */
+export function setGatewayAskCallback(cb: ((question: string, options?: string[]) => void) | null): void {
+  gatewayAskCallback = cb
+}
+
 /** 由 server 模式的消息循环或 Ink UI 层调用，将用户回答注入等待中的 ask_user */
 export function resolveAskUser(answer: string): boolean {
   if (!pendingResolve) return false
@@ -73,6 +81,11 @@ export const AskUserTool: ToolDef<typeof inputSchema> = {
           }
         }
         resolve({ type: 'success', output: answer.trim() || '（用户未输入）' })
+      }
+
+      // Gateway 模式：通过回调通知 SessionManager 广播给前端
+      if (gatewayAskCallback) {
+        gatewayAskCallback(input.question, input.options)
       }
     })
   },

@@ -8,7 +8,9 @@
   },
   "scripts": {
     "dev": "tsx src/main.ts --auto",
+    "gateway": "npm run build:web && tsx src/main.ts --gateway",
     "build": "tsc",
+    "build:web": "npm run build --prefix web",
     "start": "node dist/main.js",
     "test": "vitest --run",
     "test:watch": "vitest"
@@ -24,9 +26,11 @@
     "iconv-lite": "^0.7.2",
     "ink": "^5.0.1",
     "ink-text-input": "^6.0.0",
+    "mammoth": "^1.8.0",
     "react": "^18.3.1",
     "sqlite-vec": "^0.1.9",
     "ws": "^8.20.0",
+    "xlsx": "^0.18.5",
     "zod": "^3.24.0"
   },
   "devDependencies": {

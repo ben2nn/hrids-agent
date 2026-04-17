@@ -505,7 +505,11 @@ ${contentToSummarize}
             log.info('权限拒绝', { toolName: tc.name, description })
             auditLog({ action: 'permission_denied', resource: tc.name, result: 'denied', details: { description } })
             yield { type: 'permission_denied', id: tc.id, toolName: tc.name, description }
-            toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: '用户拒绝了此操作', is_error: true })
+            // plan 模式下给 LLM 明确的反馈，避免反复尝试写操作
+            const denyReason = this.config.permissions.getMode() === 'plan'
+              ? '[Plan 模式] 此操作在规划模式下被禁止。请继续完成规划，不要尝试执行写操作。'
+              : '用户拒绝了此操作'
+            toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: denyReason, is_error: true })
             continue
           }
 
