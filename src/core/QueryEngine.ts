@@ -507,7 +507,7 @@ ${contentToSummarize}
             yield { type: 'permission_denied', id: tc.id, toolName: tc.name, description }
             // plan 模式下给 LLM 明确的反馈，避免反复尝试写操作
             const denyReason = this.config.permissions.getMode() === 'plan'
-              ? '[Plan 模式] 此操作在规划模式下被禁止。请继续完成规划，不要尝试执行写操作。'
+              ? '[Plan 模式] 此操作在规划模式下被禁止。你可以写文档类文件（.md/.txt/.json 等）或 .kiro/ 目录下的文件，但不能修改代码或配置文件。请继续完成规划，将执行步骤以文档形式输出。'
               : '用户拒绝了此操作'
             toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: denyReason, is_error: true })
             continue

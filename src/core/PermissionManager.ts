@@ -2,12 +2,12 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
-import { join, resolve, relative } from 'path'
+import { join, resolve, extname } from 'path'
 
 export type PermissionMode =
   | 'ask'      // 每次都询问用户
   | 'auto'     // 自动允许所有操作
-  | 'plan'     // 计划模式：只允许只读，写操作需要先进入 plan 确认
+  | 'plan'     // 计划模式：允许写文档类文件（.md/.txt/.json 等），禁止写代码/配置文件
 
 export interface PermissionRequest {
   toolName: string
@@ -20,6 +20,36 @@ export interface PermissionRequest {
 export type PermissionCallback = (req: PermissionRequest) => Promise<boolean>
 
 const RULES_FILE = join(homedir(), '.hrids-agent', 'permission-rules.json')
+
+// plan 模式下允许写入的文件扩展名（文档类）
+const PLAN_MODE_ALLOWED_EXTENSIONS = new Set([
+  '.md', '.txt', '.rst', '.adoc',           // 文档
+  '.json', '.yaml', '.yml', '.toml',        // 结构化数据/配置草稿
+  '.csv', '.tsv',                           // 数据文件
+  '.html', '.htm',                          // 标记文档
+])
+
+// plan 模式下允许写入的目录前缀（相对路径或绝对路径均可）
+const PLAN_MODE_ALLOWED_DIR_PATTERNS = [
+  /[/\\]\.kiro[/\\]/,    // .kiro/ 目录（需求/设计/任务文档）
+  /[/\\]docs[/\\]/,      // docs/ 目录
+  /[/\\]spec[/\\]/,      // spec/ 目录
+  /[/\\]design[/\\]/,    // design/ 目录
+  /[/\\]plans[/\\]/,     // plans/ 目录
+  /[/\\]notes[/\\]/,     // notes/ 目录
+]
+
+/**
+ * 判断某个文件路径在 plan 模式下是否允许写入。
+ * 规则：扩展名为文档类，或路径位于文档目录下。
+ */
+function isPlanModeWriteAllowed(filePath: string): boolean {
+  const ext = extname(filePath).toLowerCase()
+  if (PLAN_MODE_ALLOWED_EXTENSIONS.has(ext)) return true
+  // 路径中包含文档目录
+  const normalized = filePath.replace(/\\/g, '/')
+  return PLAN_MODE_ALLOWED_DIR_PATTERNS.some(pattern => pattern.test('/' + normalized + '/'))
+}
 
 // 持久化的权限规则
 interface PersistedRules {
@@ -117,6 +147,8 @@ export class PermissionManager {
         return true
 
       case 'plan':
+        // plan 模式：文档类文件允许写入，其他写操作一律拒绝
+        if (req.filePath && isPlanModeWriteAllowed(req.filePath)) return true
         return false
 
       case 'ask': {

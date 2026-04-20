@@ -719,15 +719,17 @@ export function createGateway(config: GatewayConfig = {}) {
       const disabledSet = getDisabledUserSkills()
 
       // 内置技能（从全局注册表取）
-      const builtinSkills = getBundledSkills()
-        .filter(s => s.userInvocable)
-        .map(s => ({
+      const builtinSkillsRaw = getBundledSkills().filter(s => s.userInvocable)
+      const builtinSkills = await Promise.all(
+        builtinSkillsRaw.map(async s => ({
           name: s.name,
           description: s.description,
           source: 'builtin' as const,
           installed: undefined,
           enabled: undefined,
-        }))
+          prompt: s.getPrompt ? await s.getPrompt('') : undefined,
+        })),
+      )
 
       // 用户技能：直接从文件系统加载，不经过禁用过滤，确保禁用的技能也能显示
       // 异步读取 SKILL.md 内容作为 prompt（用于前端详情展示）

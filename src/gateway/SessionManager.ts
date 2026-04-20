@@ -306,17 +306,29 @@ export class SessionManager {
     // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
     const coordinatorPrompt = getCoordinatorSystemPrompt(content)
 
-    // plan 模式：动态注入规划模式系统提示，让 LLM 知道只做分析不执行写操作
+    // plan 模式：动态注入规划模式系统提示，让 LLM 知道文档类文件可写，代码文件不可写
     if (session.permissions.getMode() === 'plan') {
       const planModeAppendix = `
 
 ## 当前模式：Plan（规划模式）
-你现在处于规划模式。在此模式下，所有写操作（文件写入、命令执行等）均被禁止。
-你的任务是：
+你现在处于规划模式。在此模式下：
+
+**允许的写操作（文档类文件）：**
+- 扩展名为 .md、.txt、.rst、.adoc 的文档文件
+- 扩展名为 .json、.yaml、.yml、.toml 的结构化数据文件
+- 扩展名为 .csv、.tsv 的数据文件
+- .kiro/、docs/、spec/、design/、plans/、notes/ 等文档目录下的任意文件
+
+**禁止的写操作（代码/配置文件）：**
+- 源代码文件（.ts、.js、.py、.go 等）
+- 系统配置文件（.env、package.json、tsconfig.json 等）
+- 执行命令（bash、powershell 等）
+
+你的工作流程：
 1. 使用只读工具（file_read、glob、grep 等）充分了解现状
-2. 制定详细的执行计划，列出每一步要做什么、修改哪些文件、执行什么命令
-3. 不要尝试调用任何写操作工具，调用了也会被系统拒绝
-用户确认计划后，会切换到执行模式。`
+2. 将需求文档、设计文档、任务清单等写入 .md 文件
+3. 不要尝试修改代码或执行命令，调用了也会被系统拒绝
+用户确认文档后，会切换到执行模式来实施变更。`
       session.engine.setSystemPrompt(coordinatorPrompt + planModeAppendix)
     } else {
       // 非 plan 模式：使用动态注入了任务扩展的 coordinator prompt
