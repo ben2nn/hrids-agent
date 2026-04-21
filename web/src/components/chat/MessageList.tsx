@@ -1,7 +1,8 @@
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useMessageStore } from '../../store/messageStore.js'
 import { MessageItem } from './MessageItem.js'
+import { AgentTurn } from './AgentTurn.js'
 import type { DisplayMessage } from '../../lib/types.js'
 
 // ─── 稳定的空数组/空字符串默认值（避免每次渲染产生新引用） ────────────────
@@ -13,6 +14,55 @@ const EMPTY_STRING = ''
 
 interface MessageListProps {
   sessionId: string
+}
+
+// ─── 虚拟列表条目类型 ──────────────────────────────────────────────────────
+
+type VirtualEntry =
+  | { kind: 'user'; message: DisplayMessage }
+  | { kind: 'agent-turn'; messages: DisplayMessage[] }
+  | { kind: 'single'; message: DisplayMessage }   // system / error / compact
+  | { kind: 'streaming' }
+
+// ─── 消息分组逻辑 ──────────────────────────────────────────────────────────
+// 将扁平的消息列表转换为虚拟列表条目：
+// - user 消息：独立条目
+// - 连续的 tool / assistant 消息：合并为一个 agent-turn 条目
+// - system / error / compact：独立条目（不渲染或特殊渲染）
+
+function groupMessages(messages: DisplayMessage[]): VirtualEntry[] {
+  const entries: VirtualEntry[] = []
+  let i = 0
+
+  while (i < messages.length) {
+    const msg = messages[i]
+
+    if (msg.type === 'user') {
+      entries.push({ kind: 'user', message: msg })
+      i++
+      continue
+    }
+
+    if (msg.type === 'tool' || msg.type === 'assistant') {
+      // 收集连续的 tool / assistant 消息作为一个 agent 回合
+      const turnMsgs: DisplayMessage[] = []
+      while (
+        i < messages.length &&
+        (messages[i].type === 'tool' || messages[i].type === 'assistant')
+      ) {
+        turnMsgs.push(messages[i])
+        i++
+      }
+      entries.push({ kind: 'agent-turn', messages: turnMsgs })
+      continue
+    }
+
+    // system / error / compact
+    entries.push({ kind: 'single', message: msg })
+    i++
+  }
+
+  return entries
 }
 
 // ─── 欢迎提示（无消息时显示） ──────────────────────────────────────────────
@@ -51,14 +101,26 @@ function StreamingCursor() {
 // ─── MessageList 组件 ──────────────────────────────────────────────────────
 
 export function MessageList({ sessionId }: MessageListProps) {
-  // 用稳定的模块级常量作为默认值，避免每次渲染产生新引用触发无限循环
   const messages = useMessageStore((s) => s.messages.get(sessionId) ?? EMPTY_MESSAGES)
   const streamingText = useMessageStore((s) => s.streamingText.get(sessionId) ?? EMPTY_STRING)
-  // toolCardsMap：直接取 Map 实例，Object.is 比较实例引用，store 替换实例时才重渲染
   const toolCardsMap = useMessageStore((s) => s.toolCards.get(sessionId) ?? null)
 
-  // 是否有流式内容正在输出
   const hasStreaming = streamingText.length > 0
+
+  // ── 消息分组 ──────────────────────────────────────────────────────────
+  // 将扁平消息列表转换为虚拟列表条目（合并 agent 回合）
+  const entries = useMemo(() => groupMessages(messages), [messages])
+
+  // 判断流式输出是否应该合并到最后一个 agent-turn 里
+  const lastEntry = entries.length > 0 ? entries[entries.length - 1] : null
+  const streamingMergesIntoLastTurn = hasStreaming && lastEntry?.kind === 'agent-turn'
+
+  // 虚拟列表总条目数：
+  // - 流式合并到最后一个 agent-turn：条目数不变（流式占位替换最后一个 agent-turn）
+  // - 否则：条目数 + 1（独立的流式占位）
+  const totalCount = streamingMergesIntoLastTurn
+    ? entries.length          // 最后一个 agent-turn 会被流式版本替换
+    : entries.length + (hasStreaming ? 1 : 0)
 
   // 虚拟滚动容器 ref
   const parentRef = useRef<HTMLDivElement>(null)
@@ -67,31 +129,35 @@ export function MessageList({ sessionId }: MessageListProps) {
   const shouldAutoScrollRef = useRef(true)
   const isUserScrollingRef = useRef(false)
 
-  // 虚拟列表的总条目数：消息数 + 流式输出占位（若有）
-  const totalCount = messages.length + (hasStreaming ? 1 : 0)
-
   // ── 虚拟滚动配置 ──────────────────────────────────────────────────────
   const virtualizer = useVirtualizer({
     count: totalCount,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => {
-      if (index === messages.length) return 80
-      const msg = messages[index]
-      if (!msg) return 60
-      switch (msg.type) {
-        case 'user':
-          return Math.max(60, Math.ceil((msg.content?.length ?? 0) / 60) * 24 + 40)
-        case 'assistant':
-          return Math.max(80, Math.ceil((msg.content?.length ?? 0) / 80) * 24 + 60)
-        case 'tool':
-          return 64
-        case 'system':
-          return 40
-        case 'error':
-          return 72
-        default:
-          return 60
+      if (index === entries.length) return 80  // 流式占位
+      const entry = entries[index]
+      if (!entry) return 60
+
+      if (entry.kind === 'user') {
+        const content = (entry.message as { content: string }).content ?? ''
+        return Math.max(60, Math.ceil(content.length / 60) * 24 + 40)
       }
+      if (entry.kind === 'agent-turn') {
+        // 工具数 * 48 + 可选说明文字高度
+        const toolCount = entry.messages.filter((m) => m.type === 'tool').length
+        const assistantMsg = entry.messages.find((m) => m.type === 'assistant')
+        const textHeight = assistantMsg
+          ? Math.max(80, Math.ceil(((assistantMsg as { content: string }).content?.length ?? 0) / 80) * 24 + 60)
+          : 0
+        return toolCount * 48 + textHeight + 40
+      }
+      if (entry.kind === 'single') {
+        if (entry.message.type === 'compact') {
+          return (entry.message as { expanded?: boolean }).expanded ? 400 : 48
+        }
+        return 40
+      }
+      return 60
     },
     overscan: 5,
   })
@@ -147,39 +213,27 @@ export function MessageList({ sessionId }: MessageListProps) {
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualItems.map((virtualItem) => {
-          const isStreamingItem = virtualItem.index === messages.length
-          const msg = messages[virtualItem.index]
+          const isStreamingItem = !streamingMergesIntoLastTurn && virtualItem.index === entries.length
+          const entry = entries[virtualItem.index]
 
-          // 判断是否显示头像：
-          // Agent 消息（tool/assistant）在以下情况显示头像：
-          //   - 是第一条消息
-          //   - 前一条是 user 消息
-          //   - 前一条是 system/error（忽略类型，视为新回合）
-          const isAgentMsg = !isStreamingItem && (msg?.type === 'tool' || msg?.type === 'assistant')
-          let showAvatar = false
-          if (isAgentMsg) {
-            const prevMsg = virtualItem.index > 0 ? messages[virtualItem.index - 1] : null
-            showAvatar = !prevMsg || prevMsg.type === 'user' || prevMsg.type === 'system' || prevMsg.type === 'error'
-          }
-          // 流式消息：前一条是 user 或无消息时显示头像
-          const streamingShowAvatar = isStreamingItem && (
-            messages.length === 0 || messages[messages.length - 1]?.type === 'user'
-          )
+          // ── 独立流式占位（前面没有 agent-turn 可合并） ──────────────
+          if (isStreamingItem) {
+            const lastEnt = entries.length > 0 ? entries[entries.length - 1] : null
+            const streamingShowAvatar = !lastEnt || lastEnt.kind === 'user'
 
-          return (
-            <div
-              key={virtualItem.key}
-              data-index={virtualItem.index}
-              ref={virtualizer.measureElement}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                transform: `translateY(${virtualItem.start}px)`,
-              }}
-            >
-              {isStreamingItem ? (
+            return (
+              <div
+                key={virtualItem.key}
+                data-index={virtualItem.index}
+                ref={virtualizer.measureElement}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${virtualItem.start}px)`,
+                }}
+              >
                 <div className="flex flex-col px-4 py-1 animate-fade-in">
                   {streamingShowAvatar && (
                     <div className="flex items-center gap-2 mb-1.5">
@@ -198,25 +252,85 @@ export function MessageList({ sessionId }: MessageListProps) {
                     </div>
                   </div>
                 </div>
-              ) : (
-                <MessageItem
-                  message={msg}
+              </div>
+            )
+          }
+
+          if (!entry) return null
+
+          // ── 判断是否显示头像 ────────────────────────────────────────
+          let showAvatar = false
+          if (entry.kind === 'agent-turn') {
+            const prevEntry = virtualItem.index > 0 ? entries[virtualItem.index - 1] : null
+            showAvatar = !prevEntry || prevEntry.kind === 'user' || prevEntry.kind === 'single'
+          }
+
+          // ── 最后一个 agent-turn + 流式合并：把流式文字附加进去渲染 ──
+          const isLastTurnWithStreaming =
+            streamingMergesIntoLastTurn &&
+            entry.kind === 'agent-turn' &&
+            virtualItem.index === entries.length - 1
+
+          if (isLastTurnWithStreaming && entry.kind === 'agent-turn') {
+            const streamingAsAssistant: DisplayMessage = {
+              id: '__streaming__',
+              type: 'assistant',
+              content: streamingText,
+              timestamp: Date.now(),
+            }
+            const mergedMessages = [...entry.messages, streamingAsAssistant]
+
+            return (
+              <div
+                key={virtualItem.key}
+                data-index={virtualItem.index}
+                ref={virtualizer.measureElement}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${virtualItem.start}px)`,
+                }}
+              >
+                <AgentTurn
+                  messages={mergedMessages}
+                  toolCardsMap={toolCardsMap}
+                  sessionId={sessionId}
                   showAvatar={showAvatar}
-                  toolCard={
-                    msg?.type === 'tool'
-                      ? toolCardsMap?.get((msg as { toolId: string }).toolId)
-                      : undefined
-                  }
-                  onToggleToolCard={
-                    msg?.type === 'tool'
-                      ? () => useMessageStore.getState().toggleToolCard(
-                          sessionId,
-                          (msg as { toolId: string }).toolId,
-                        )
-                      : undefined
-                  }
+                  streamingMessageId="__streaming__"
                 />
-              )}
+              </div>
+            )
+          }
+
+          return (
+            <div
+              key={virtualItem.key}
+              data-index={virtualItem.index}
+              ref={virtualizer.measureElement}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                transform: `translateY(${virtualItem.start}px)`,
+              }}
+            >
+              {entry.kind === 'agent-turn' ? (
+                <AgentTurn
+                  messages={entry.messages}
+                  toolCardsMap={toolCardsMap}
+                  sessionId={sessionId}
+                  showAvatar={showAvatar}
+                />
+              ) : (entry.kind === 'user' || entry.kind === 'single') ? (
+                <MessageItem
+                  message={entry.message}
+                  showAvatar={false}
+                  sessionId={sessionId}
+                />
+              ) : null}
             </div>
           )
         })}

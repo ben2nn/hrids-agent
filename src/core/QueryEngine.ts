@@ -81,6 +81,8 @@ export class QueryEngine {
   readonly costs: CostTracker
   // 上次压缩生成的摘要，用于迭代更新（避免多次压缩后信息层层丢失）
   private previousSummary: string | null = null
+  // 压缩前归档回调（由外部注册，用于持久化原始历史）
+  onBeforeCompact: ((summary: string) => Promise<void>) | null = null
 
   constructor(config: QueryEngineConfig) {
     this.config = config
@@ -365,6 +367,10 @@ ${contentToSummarize}
         if (estimateTokens(this.history) > autoCompactThreshold) {
           yield { type: 'compact_start' }
           const summary = await this.generateCompactSummary()
+          // 压缩前先归档（如果注册了归档回调）
+          if (this.onBeforeCompact) {
+            try { await this.onBeforeCompact(summary) } catch { /* 归档失败不阻断压缩 */ }
+          }
           this.compactHistory(summary)
           // 压缩后修复孤立的工具调用对，防止 API 报错
           this.sanitizeToolPairs()

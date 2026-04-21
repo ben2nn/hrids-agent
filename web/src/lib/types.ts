@@ -13,6 +13,7 @@ export type ServerMessage =
   | { type: 'cwd_changed'; cwd: string }
   | { type: 'permission_mode_changed'; mode: 'ask' | 'auto' | 'plan' }
   | { type: 'continuation_needed' }
+  | { type: 'compact_done'; summary: string }
   | { type: 'done' }
   | { type: 'error'; message: string }
   | { type: 'budget_exceeded'; message: string }
@@ -138,6 +139,18 @@ export type DisplayMessage =
     }
   | { id: string; type: 'system'; content: string; timestamp: number }
   | { id: string; type: 'error'; content: string; timestamp: number }
+  | {
+      id: string; type: 'compact'
+      /** 归档时间 ISO 字符串 */
+      archivedAt: string
+      /** 归档前的消息数量 */
+      messageCount: number
+      /** 压缩摘要文本 */
+      summary: string
+      /** 是否展开摘要 */
+      expanded?: boolean
+      timestamp: number
+    }
 
 // ─── 工具卡片状态 ──────────────────────────────────────────────────────────
 
@@ -169,4 +182,13 @@ export interface CostInfo {
   outputTokens: number
   cost: number
   model: string
+}
+
+// ─── 压缩归档段 ────────────────────────────────────────────────────────────
+
+export interface CompactArchive {
+  filename: string
+  archivedAt: string
+  messageCount: number
+  summary: string
 }

@@ -8,7 +8,7 @@ import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt } from '../core/coordinator/coordinatorPrompt.js'
-import { loadSession, loadSessionMeta, saveSession, generateSessionId } from '../core/SessionStore.js'
+import { loadSession, loadSessionMeta, saveSession, generateSessionId, archiveSession, listArchives } from '../core/SessionStore.js'
 import { loadConfig } from '../core/Config.js'
 import { setGlobalCwd, getGlobalCwd } from '../tools/BashTool.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
@@ -180,6 +180,12 @@ export class SessionManager {
       initialMessages,
     })
     session.permissions = permissions
+
+    // 注册压缩前归档回调：保留完整历史，workDir 不变
+    session.engine.onBeforeCompact = async (summary: string) => {
+      saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+      archiveSession(sessionId, summary)
+    }
 
     setGlobalCwd(sessionCwd)
 
@@ -473,8 +479,10 @@ function toClientMessage(ev: StreamEvent): object | null {
     // 以下事件不需要推送给前端
     case 'turn_limit':
     case 'compact_start':
-    case 'compact_done':
       return null
+
+    case 'compact_done':
+      return { type: 'compact_done', summary: ev.summary }
 
     case 'continuation_needed':
       return { type: 'continuation_needed' }

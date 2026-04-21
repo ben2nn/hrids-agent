@@ -3,7 +3,7 @@ import http from 'http'
 import express from 'express'
 import { WebSocketServer, WebSocket } from 'ws'
 import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta } from '../core/SessionStore.js'
+import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
 import type { CreateSessionRequest } from './types.js'
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from 'fs'
@@ -348,6 +348,17 @@ export function createGateway(config: GatewayConfig = {}) {
     }
 
     res.json(displayMessages)
+  })
+
+  // GET /sessions/:id/history-segments — 读取会话的压缩归档段列表
+  app.get('/sessions/:id/history-segments', (req, res) => {
+    try {
+      const archives = listSessionArchives(req.params.id)
+      res.json(archives)
+    } catch (err) {
+      log.warn('读取归档段失败', { error: String(err) })
+      res.json([])
+    }
   })
 
   // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）

@@ -1,20 +1,41 @@
 // Web 搜索工具 —— 优先使用 Anthropic 原生 web_search 能力，降级到 DuckDuckGo
 import { z } from 'zod';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 const inputSchema = z.object({
     query: z.string().describe('搜索查询词'),
 });
+// 获取代理配置
+function getProxyAgent() {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+    if (proxyUrl) {
+        return new HttpsProxyAgent(proxyUrl);
+    }
+    return undefined;
+}
+// 获取 fetch 配置（包含代理支持）
+function getFetchOptions(options = {}) {
+    const agent = getProxyAgent();
+    return {
+        ...options,
+        // @ts-expect-error Node.js fetch 支持 agent 选项
+        agent,
+    };
+}
 // ── 降级方案：DuckDuckGo HTML 搜索（无需 API Key）────────────────────────────
 async function searchViaDuckDuckGo(query) {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, {
+    const fetchOptions = getFetchOptions({
         headers: {
-            'User-Agent': 'Mozilla/5.0 (compatible; hrids-agent/0.1)',
-            'Accept': 'text/html',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
         },
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(20000),
         redirect: 'follow',
     });
+    const res = await fetch(url, fetchOptions);
     if (!res.ok) {
         throw new Error(`DuckDuckGo 返回 HTTP ${res.status}`);
     }
@@ -51,7 +72,7 @@ async function searchViaDuckDuckGo(query) {
 }
 // ── 主方案：Anthropic 原生 web_search beta ────────────────────────────────────
 async function searchViaAnthropic(query, apiKey) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const fetchOptions = getFetchOptions({
         method: 'POST',
         headers: {
             'x-api-key': apiKey,
@@ -65,8 +86,9 @@ async function searchViaAnthropic(query, apiKey) {
             tools: [{ type: 'web_search_20250305', name: 'web_search' }],
             messages: [{ role: 'user', content: `搜索并总结: ${query}` }],
         }),
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(30000),
     });
+    const res = await fetch('https://api.anthropic.com/v1/messages', fetchOptions);
     if (!res.ok) {
         throw new Error(`Anthropic API 错误: ${res.status}`);
     }
@@ -76,6 +98,26 @@ async function searchViaAnthropic(query, apiKey) {
         .map(b => b.text)
         .join('\n');
     return text || '未找到相关结果';
+}
+// 解析网络错误，提供更友好的错误信息
+function parseNetworkError(err) {
+    const errMsg = String(err);
+    if (errMsg.includes('fetch failed') || errMsg.includes('ECONNREFUSED')) {
+        const proxyHint = process.env.HTTPS_PROXY || process.env.HTTP_PROXY
+            ? ''
+            : '\n提示：可能需要配置代理。请设置环境变量 HTTPS_PROXY 或 HTTP_PROXY，例如：\n  HTTPS_PROXY=http://127.0.0.1:7890';
+        return `网络连接失败，无法访问目标服务器。${proxyHint}`;
+    }
+    if (errMsg.includes('ETIMEDOUT') || errMsg.includes('Timeout')) {
+        return '请求超时，请检查网络连接或稍后重试';
+    }
+    if (errMsg.includes('ENOTFOUND') || errMsg.includes('getaddrinfo')) {
+        return 'DNS 解析失败，无法找到目标服务器';
+    }
+    if (errMsg.includes('certificate') || errMsg.includes('SSL') || errMsg.includes('TLS')) {
+        return 'SSL/TLS 证书验证失败';
+    }
+    return errMsg;
 }
 export const WebSearchTool = {
     name: 'web_search',
@@ -100,6 +142,7 @@ export const WebSearchTool = {
             }
         }
         catch (err) {
+            const errorMsg = parseNetworkError(err);
             // 主方案失败时尝试降级
             if (anthropicKey) {
                 try {
@@ -107,10 +150,11 @@ export const WebSearchTool = {
                     return { type: 'success', output: `[Anthropic 搜索失败，已降级到 DuckDuckGo]\n\n${result}` };
                 }
                 catch (fallbackErr) {
-                    return { type: 'error', message: `搜索失败: ${String(err)}；降级也失败: ${String(fallbackErr)}` };
+                    const fallbackError = parseNetworkError(fallbackErr);
+                    return { type: 'error', message: `搜索失败: ${errorMsg}；降级也失败: ${fallbackError}` };
                 }
             }
-            return { type: 'error', message: `搜索失败: ${String(err)}` };
+            return { type: 'error', message: `搜索失败: ${errorMsg}` };
         }
     },
 };

@@ -1,9 +1,8 @@
-
-.env
-.env
-node_modules
 docs
+dist
+node_modules
 refercode
 tests
 .kiro
 .vscode
+web/node_modules

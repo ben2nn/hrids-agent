@@ -6,7 +6,7 @@ import type {
   PermissionRequest,
   CostInfo,
 } from '../lib/types.js'
-import { getSessionMessages } from '../lib/gateway.js'
+import { getSessionMessages, getHistorySegments } from '../lib/gateway.js'
 
 // ─── pendingAskUser 存储格式 ───────────────────────────────────────────────
 
@@ -52,6 +52,11 @@ interface MessageState {
    * 切换指定工具卡片的展开/折叠状态。
    */
   toggleToolCard: (sessionId: string, toolId: string) => void
+
+  /**
+   * 切换指定归档分隔线的展开/折叠状态。
+   */
+  toggleCompact: (sessionId: string, messageId: string) => void
 
   /**
    * 清空指定会话的权限请求。
@@ -316,6 +321,23 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         break
       }
 
+      // ── compact_done：插入归档分隔线消息 ─────────────────────────────
+      case 'compact_done': {
+        const compactMsg: DisplayMessage = {
+          id: genId(),
+          type: 'compact',
+          archivedAt: new Date().toISOString(),
+          messageCount: 0, // 实时压缩时消息数未知，显示为 0
+          summary: msg.summary,
+          expanded: false,
+          timestamp: Date.now(),
+        }
+        const newMessages = new Map(state.messages)
+        newMessages.set(sessionId, [...getMessages(state.messages, sessionId), compactMsg])
+        set({ messages: newMessages })
+        break
+      }
+
       // ── continuation_needed：LLM 有继续执行意图，等待用户确认 ─────────
       case 'continuation_needed': {
         const newPendingContinuation = new Set(state.pendingContinuation)
@@ -323,7 +345,6 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         set({ pendingContinuation: newPendingContinuation })
         break
       }
-
       default: {
         // 未知消息类型，忽略
         break
@@ -399,6 +420,19 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     set({ toolCards: newToolCards })
   },
 
+  toggleCompact(sessionId: string, messageId: string) {
+    const state = get()
+    const msgs = getMessages(state.messages, sessionId)
+    const newMsgs = msgs.map(m =>
+      m.id === messageId && m.type === 'compact'
+        ? { ...m, expanded: !m.expanded }
+        : m
+    )
+    const newMessages = new Map(state.messages)
+    newMessages.set(sessionId, newMsgs)
+    set({ messages: newMessages })
+  },
+
   clearPermission(sessionId: string) {
     const state = get()
     const newPendingPermission = new Map(state.pendingPermission)
@@ -415,8 +449,11 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
   async loadHistoryMessages(sessionId: string) {
     try {
-      const messages = await getSessionMessages(sessionId)
-      if (messages.length === 0) return
+      const [messages, archives] = await Promise.all([
+        getSessionMessages(sessionId),
+        getHistorySegments(sessionId),
+      ])
+      if (messages.length === 0 && archives.length === 0) return
       const state = get()
       // 只在该 session 还没有消息时才填充（避免覆盖实时消息）
       if (state.messages.has(sessionId) && (state.messages.get(sessionId)?.length ?? 0) > 0) return
@@ -437,8 +474,21 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         }
       }
 
+      // 在消息列表头部插入归档分隔线（按时间升序，最早的在最前）
+      const archiveMsgs: DisplayMessage[] = archives.map((arc) => ({
+        id: `compact-${arc.filename}`,
+        type: 'compact' as const,
+        archivedAt: arc.archivedAt,
+        messageCount: arc.messageCount,
+        summary: arc.summary,
+        expanded: false,
+        timestamp: new Date(arc.archivedAt).getTime(),
+      }))
+
+      const allMessages: DisplayMessage[] = [...archiveMsgs, ...messages]
+
       const newMessages = new Map(state.messages)
-      newMessages.set(sessionId, messages)
+      newMessages.set(sessionId, allMessages)
 
       if (historyCards.size > 0) {
         const newToolCards = new Map(state.toolCards)

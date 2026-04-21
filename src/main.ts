@@ -7,7 +7,7 @@ import { loadConfig, saveConfig } from './core/Config.js'
 import { QueryEngine } from './core/QueryEngine.js'
 import { PermissionManager } from './core/PermissionManager.js'
 import { CommandRegistry, createBuiltinCommands } from './core/CommandRegistry.js'
-import { generateSessionId, loadSession, loadSessionMeta, listSessions, saveSession, getLastSessionId } from './core/SessionStore.js'
+import { generateSessionId, loadSession, loadSessionMeta, listSessions, saveSession, getLastSessionId, archiveSession, listArchives } from './core/SessionStore.js'
 import { buildSystemContext, getDynamicContext, getDefaultAgentCwd, getSessionWorkDir } from './core/ContextBuilder.js'
 import { createProvider, createProviderFromEnv } from './core/providers/index.js'
 import { TeamManager } from './core/coordinator/TeamManager.js'
@@ -391,6 +391,13 @@ async function main() {
       // Server 模式：持续从 stdin 读取消息，保持会话历史
       if (opts.server) {
         process.env.AGENT_SERVER_MODE = '1'
+
+        // 注册压缩前归档回调（server 模式同样需要）
+        engine.onBeforeCompact = async (summary: string) => {
+          saveSession(sessionId, engine.getHistory(), model, initialCwd)
+          archiveSession(sessionId, summary)
+        }
+
         const { createInterface } = await import('readline')
         const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
         const emit = (obj: object) => {
@@ -449,6 +456,7 @@ async function main() {
                 getMode: () => permMode,
                 sessionId,
                 listSessions: () => listSessions(),
+                listArchives: () => listArchives(sessionId),
                 newSession: () => {
                   const newId = generateSessionId()
                   engine.clearHistory()
@@ -559,6 +567,12 @@ async function main() {
       registry.registerSkills(skillRegistry)
 
       let currentModel = model
+
+      // 注册压缩前归档回调：保留完整历史，workDir 不变
+      engine.onBeforeCompact = async (summary: string) => {
+        saveSession(sessionId, engine.getHistory(), currentModel, initialCwd)
+        archiveSession(sessionId, summary)
+      }
 
       // 自动保存会话 + 自动沉淀 skill + 动态注入扩展 prompt
       const originalSend = engine.send.bind(engine)

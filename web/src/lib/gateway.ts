@@ -7,6 +7,7 @@ import type {
   CronJob,
   Skill,
   UploadResponse,
+  CompactArchive,
 } from './types.js'
 
 // ─── 内部配置（避免直接 import connectionStore 导致循环依赖） ──────────────
@@ -96,6 +97,16 @@ export async function getSessionTodos(sessionId: string): Promise<Todo[]> {
 export async function getSessionMessages(sessionId: string): Promise<DisplayMessage[]> {
   const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/messages`)
   return res.json()
+}
+
+/** 获取指定会话的压缩归档段列表 */
+export async function getHistorySegments(sessionId: string): Promise<CompactArchive[]> {
+  try {
+    const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/history-segments`)
+    return res.json()
+  } catch {
+    return []
+  }
 }
 
 // ─── 会话文件树 ────────────────────────────────────────────────────────────

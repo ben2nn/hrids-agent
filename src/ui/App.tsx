@@ -6,7 +6,7 @@ import type { CommandRegistry } from '../core/CommandRegistry.js'
 import type { CommandContext } from '../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js'
 import type { CronJob } from '../tools/ScheduleCronTool.js'
-import { listSessions, loadSession, generateSessionId, saveSession } from '../core/SessionStore.js'
+import { listSessions, loadSession, generateSessionId, saveSession, archiveSession, listArchives } from '../core/SessionStore.js'
 import { getSessionWorkDir } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js'
@@ -187,7 +187,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           case 'permission_denied': push({ role: 'system', text: `⚠ 已拒绝: ${ev.description}`, color: 'yellow' }); break
           case 'usage': setCostInfo({ inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, costUsd: ev.costUsd }); break
           case 'compact_start': push({ role: 'system', text: '⟳ 上下文过长，正在自动压缩历史...' }); break
-          case 'compact_done': push({ role: 'system', text: `✓ 历史已压缩（约 ${engine.getEstimatedTokens().toLocaleString()} tokens）` }); break
+          case 'compact_done': {
+            const archives = listArchives(sessionId)
+            const archiveCount = archives.length
+            const lastArchive = archives[archiveCount - 1]
+            const msgCount = lastArchive?.messageCount ?? 0
+            push({ role: 'system', text: `✓ 历史已压缩（归档了 ${msgCount} 条消息，当前约 ${engine.getEstimatedTokens().toLocaleString()} tokens）\n  输入 /history 查看归档历史` })
+            break
+          }
           case 'budget_exceeded': push({ role: 'error', text: `⚠ 已超出成本预算 ${ev.limitUsd.toFixed(2)}（当前 ${ev.costUsd.toFixed(4)}），任务已停止` }); break
           case 'continuation_needed':
             // 非自动模式：LLM 表达了继续意图，提示用户确认
@@ -238,6 +245,15 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     })
   }, [runEngine])
 
+  // 注册压缩前归档回调：保留完整历史，workDir 不变
+  useEffect(() => {
+    engine.onBeforeCompact = async (summary: string) => {
+      saveSession(sessionId, engine.getHistory(), modelRef.current)
+      archiveSession(sessionId, summary)
+    }
+    return () => { engine.onBeforeCompact = null }
+  }, [engine, sessionId])
+
   // 构建命令上下文
   const cmdCtx: CommandContext = {
     clearHistory: () => engine.clearHistory(),
@@ -260,6 +276,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     getMode: () => 'ask',
     sessionId,
     listSessions: () => listSessions(),
+    listArchives: () => listArchives(sessionId),
     newSession: () => {
       const newId = generateSessionId()
       engine.clearHistory()
