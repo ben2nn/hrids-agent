@@ -7,6 +7,8 @@ const inputSchema = z.object({
   raw: z.boolean().optional().describe('返回原始 HTML 而非提取的文本，默认 false'),
 })
 
+// 代理由 proxySetup.ts 在启动时注入为全局 dispatcher，fetch 无需手动传 dispatcher
+
 // 从 HTML 中提取可读文本，比简单 regex 更干净
 function extractTextFromHtml(html: string): string {
   // 1. 移除 script / style / noscript 块（含内容）

@@ -267,6 +267,22 @@ export async function uninstallMarketSkill(slug: string): Promise<{ ok: boolean;
   return res.json()
 }
 
+// ─── 图片访问 ──────────────────────────────────────────────────────────────
+
+/**
+ * 获取会话工作目录中图片文件的访问 URL。
+ * 直接返回后端图片端点 URL，供 <img src="..."> 使用。
+ */
+export function getImageUrl(sessionId: string, filename: string): string {
+  return `${_gatewayUrl}/sessions/${encodeURIComponent(sessionId)}/image?path=${encodeURIComponent(filename)}`
+}
+
+/** 判断文件名是否为图片 */
+export function isImageFile(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif'].includes(ext)
+}
+
 // ─── 配置 ──────────────────────────────────────────────────────────────────
 
 export interface AgentConfigSummary {

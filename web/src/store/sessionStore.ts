@@ -54,8 +54,9 @@ interface SessionState {
 
   /**
    * 通过对应会话的 WS 发送用户消息。
+   * attachments 为可选的图片/PDF 附件列表（base64 编码）。
    */
-  sendMessage: (sessionId: string, content: string) => void
+  sendMessage: (sessionId: string, content: string, attachments?: import('../lib/types.js').MessageAttachment[]) => void
 
   /**
    * 通过对应会话的 WS 发送中止指令。
@@ -133,9 +134,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ),
       }))
 
-      // 建立 WS 连接并设为活跃会话
+      // 建立 WS 连接
       _connectWs(session.id, set, get)
-      set({ activeSessionId: session.id })
+
+      // 只在仍是活跃会话时才设置 activeSessionId（避免快速切换后被强制跳回）
+      if (get().activeSessionId === id) {
+        set({ activeSessionId: session.id })
+      }
     } catch (err) {
       console.error('[sessionStore] resumeSession 失败', { id, error: String(err) })
       // 会话不存在或恢复失败时，从列表中移除该条目
@@ -176,27 +181,52 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     // 立即设为活跃会话，无论是否需要 resume，界面立刻切换
     set({ activeSessionId: id })
-
-    // 立即加载历史消息（stopped 会话也先展示历史记录）
-    import('./messageStore.js').then(({ useMessageStore }) => {
-      void useMessageStore.getState().loadHistoryMessages(id)
-    }).catch(console.error)
+    // 持久化到 localStorage，页面刷新后可恢复
+    try { localStorage.setItem('hrids_active_session_id', id) } catch { /* 忽略 */ }
 
     if (session?.status === 'stopped') {
-      // 历史会话：后台 resume，完成后更新状态和 WS 连接
-      void get().resumeSession(id)
+      // 历史会话：先加载历史消息，再后台 resume（resume 内部会建立 WS 连接）
+      // 顺序执行避免竞态：WS 回放的消息会触发 loadHistoryMessages 的去重保护
+      import('./messageStore.js').then(({ useMessageStore }) => {
+        return useMessageStore.getState().loadHistoryMessages(id)
+      }).then(() => {
+        // 用户可能已切换到其他会话，只在仍是活跃会话时才 resume
+        if (get().activeSessionId !== id) return
+        void get().resumeSession(id)
+      }).catch((err) => {
+        console.error('[sessionStore] setActive loadHistoryMessages 失败:', err)
+        if (get().activeSessionId !== id) return
+        void get().resumeSession(id)
+      })
       return
     }
 
-    // 活跃会话（ready/busy）：确保有 WS 连接
-    if (session && !get().wsClients.has(id)) {
-      _connectWs(id, set, get)
-    }
+    // 活跃会话（ready/busy）：先加载历史消息，再建立 WS 连接
+    // 顺序执行避免竞态：WS 回放的 tool_start 会向 messages 追加数据，
+    // 若 WS 先建立，loadHistoryMessages 的去重保护会误判为已有消息而跳过加载
+    import('./messageStore.js').then(({ useMessageStore }) => {
+      return useMessageStore.getState().loadHistoryMessages(id)
+    }).then(() => {
+      // 用户可能已切换到其他会话，但 WS 连接仍需建立（后台保持连接，切回时即用）
+      if (!get().wsClients.has(id)) {
+        _connectWs(id, set, get)
+      }
+    }).catch((err) => {
+      console.error('[sessionStore] setActive loadHistoryMessages 失败:', err)
+      if (!get().wsClients.has(id)) {
+        _connectWs(id, set, get)
+      }
+    })
   },
 
-  sendMessage(sessionId: string, content: string) {
+  sendMessage(sessionId: string, content: string, attachments?: import('../lib/types.js').MessageAttachment[]) {
     const client = get().wsClients.get(sessionId)
-    client?.send({ type: 'message', content })
+    if (!client) {
+      console.error('[sessionStore] sendMessage: 找不到 WsClient', { sessionId })
+      return
+    }
+    console.debug('[sessionStore] sendMessage', { sessionId, contentLength: content.length, attachmentCount: attachments?.length ?? 0 })
+    client.send({ type: 'message', content, ...(attachments && attachments.length > 0 ? { attachments } : {}) })
   },
 
   sendAbort(sessionId: string) {
@@ -291,6 +321,10 @@ function _handleWsMessage(
   msg: ServerMessage,
   set: SetFn,
 ): void {
+  // 只对关键消息打 debug（text_delta 太频繁，跳过）
+  if (msg.type !== 'text_delta' && msg.type !== 'tool_log') {
+    console.debug('[sessionStore] _handleWsMessage', { sessionId, type: msg.type })
+  }
   // 1. 所有消息都转发给 messageStore（懒加载，避免循环依赖）
   import('./messageStore.js').then(({ useMessageStore }) => {
     useMessageStore.getState().handleServerMessage(sessionId, msg)

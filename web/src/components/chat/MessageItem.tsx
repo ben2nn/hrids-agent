@@ -2,6 +2,7 @@ import type { DisplayMessage, ToolCardState } from '../../lib/types.js'
 import { MarkdownRenderer } from '../../lib/markdown.js'
 import { ToolCard } from './ToolCard.js'
 import { useMessageStore } from '../../store/messageStore.js'
+import { getImageUrl } from '../../lib/gateway.js'
 
 // ─── 工具名称简单中文化（用于 fallback pending 状态） ───────────────────────
 
@@ -62,18 +63,36 @@ export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompa
   // ── user 消息：右对齐，头像+名称在上，内容在下 ────────────────────────
   if (message.type === 'user') {
     return (
-      <div className="flex flex-col items-end px-4 pt-4 pb-1 animate-fade-in">
+      <div className="flex flex-col items-end px-4 pt-4 pb-2 animate-fade-in">
         {/* 头像 + 名称（右对齐） */}
-        <div className="flex items-center gap-2 mb-1.5 flex-row-reverse">
+        <div className="flex items-center gap-2 mb-2 flex-row-reverse">
           <UserAvatar />
-          <span className="text-xs font-semibold text-[var(--text-secondary)]">我</span>
+          <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">我</span>
         </div>
-        {/* 内容气泡，右对齐，右边缘与头像对齐 */}
-        <div className="mr-10 flex justify-end">
-          <div className="bg-[var(--accent)] text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed break-words shadow-sm max-w-full">
-            {message.content}
+        {/* 图片预览（若有） */}
+        {message.images && message.images.length > 0 && sessionId && (
+          <div className="mr-10 mb-2 flex flex-wrap gap-2 justify-end">
+            {message.images.map((imgName) => (
+              <div key={imgName} className="relative group">
+                <img
+                  src={getImageUrl(sessionId, imgName)}
+                  alt={imgName}
+                  className="max-w-[200px] max-h-[200px] rounded-xl object-cover border border-[var(--border-subtle)] cursor-pointer hover:opacity-90 transition-opacity"
+                  title={imgName}
+                  onClick={() => window.open(getImageUrl(sessionId, imgName), '_blank')}
+                />
+              </div>
+            ))}
           </div>
-        </div>
+        )}
+        {/* 内容气泡，右对齐，右边缘与头像对齐 */}
+        {message.content && (
+          <div className="mr-10 flex justify-end">
+            <div className="user-bubble px-4 py-2.5 text-sm leading-relaxed break-words max-w-full">
+              {message.content}
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -81,15 +100,15 @@ export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompa
   // ── assistant 消息：头像+名称在上，内容在下 ──────────────────────────
   if (message.type === 'assistant') {
     return (
-      <div className="flex flex-col px-4 py-1 animate-fade-in">
+      <div className="flex flex-col px-4 py-2 animate-fade-in">
         {showAvatar && (
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-2">
             <AgentAvatar />
-            <span className="text-xs font-semibold text-[var(--text-secondary)]">知了</span>
+            <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
           </div>
         )}
-        <div className={`ml-10 mr-10 ${CONTENT_COL}`}>
-          <div className="bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-2xl rounded-tl-sm px-4 py-3">
+        <div className={`ml-10 mr-6 ${CONTENT_COL}`}>
+          <div className="agent-bubble px-4 py-3.5">
             <MarkdownRenderer content={message.content} />
           </div>
         </div>
@@ -100,7 +119,7 @@ export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompa
   // ── tool 消息：与 assistant 同列对齐 ──────────────────────────────────
   if (message.type === 'tool') {
     const cardContent = !toolCard ? (
-      <div className="bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-xl px-3 py-2">
+      <div className="tool-card-base px-3 py-2">
         <div className="flex items-center gap-2">
           <svg className="animate-spin text-amber-400 shrink-0" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <path d="M21 12a9 9 0 1 1-6.219-8.56" />
@@ -128,12 +147,12 @@ export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompa
     return (
       <div className="flex flex-col px-4 py-0.5 animate-fade-in">
         {showAvatar && (
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-2">
             <AgentAvatar />
-            <span className="text-xs font-semibold text-[var(--text-secondary)]">知了</span>
+            <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
           </div>
         )}
-        <div className={`ml-10 mr-10 ${CONTENT_COL}`}>
+        <div className={`ml-10 mr-6 ${CONTENT_COL}`}>
           {cardContent}
         </div>
       </div>

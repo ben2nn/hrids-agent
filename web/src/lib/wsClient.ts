@@ -43,8 +43,10 @@ export class WsClient {
   /** 发送消息；若当前未连接则加入队列，重连后自动发送 */
   send(msg: ClientMessage): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      console.debug('[WsClient] ▶ send', msg)
       this.ws.send(JSON.stringify(msg))
     } else {
+      console.warn('[WsClient] 连接未就绪，消息入队', { status: this.status, msg })
       this.pendingQueue.push(msg)
     }
   }
@@ -83,6 +85,8 @@ export class WsClient {
       ? `${this.url}?token=${encodeURIComponent(this.token)}`
       : this.url
 
+    console.debug('[WsClient] 🔗 正在连接...', { wsUrl, attempt: this.reconnectAttempt })
+
     try {
       this.ws = new WebSocket(wsUrl)
     } catch (err) {
@@ -95,12 +99,14 @@ export class WsClient {
     this.ws.onopen = () => {
       this.reconnectAttempt = 0
       this.setStatus('connected')
+      console.debug('[WsClient] ✅ 连接已建立', { url: this.url })
       this.flushPendingQueue()
     }
 
     this.ws.onmessage = (event: MessageEvent) => {
       try {
         const msg = JSON.parse(event.data as string) as ServerMessage
+        console.debug('[WsClient] ◀ recv', msg)
         // 收到"会话不存在"错误时主动关闭，不再重连（避免死循环）
         if (msg.type === 'error' && typeof msg.message === 'string' && msg.message.includes('会话不存在')) {
           console.warn('[WsClient] 会话不存在，停止重连:', msg.message)
@@ -114,14 +120,14 @@ export class WsClient {
     }
 
     this.ws.onerror = (event) => {
-      console.error('[WsClient] WebSocket 错误:', event)
+      console.error('[WsClient] ❌ WebSocket 错误:', event)
     }
 
     this.ws.onclose = (event) => {
       this.ws = null
       if (this.closed) return
 
-      console.warn(`[WsClient] 连接断开 (code=${event.code})，准备重连...`)
+      console.warn(`[WsClient] 🔌 连接断开 (code=${event.code}, reason=${event.reason || '无'})，准备重连...`)
       this.scheduleReconnect()
     }
   }
@@ -158,9 +164,13 @@ export class WsClient {
 
   /** 连接恢复后，将积压队列中的消息依次发送 */
   private flushPendingQueue(): void {
+    if (this.pendingQueue.length > 0) {
+      console.debug('[WsClient] 🚀 刷新积压队列', { count: this.pendingQueue.length })
+    }
     while (this.pendingQueue.length > 0) {
       const msg = this.pendingQueue.shift()!
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        console.debug('[WsClient] ▶ flush send', msg)
         this.ws.send(JSON.stringify(msg))
       } else {
         // 连接再次断开，将消息放回队首

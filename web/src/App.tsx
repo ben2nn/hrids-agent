@@ -42,10 +42,24 @@ export function App() {
     void init()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── 连接成功后：拉取会话列表 ───────────────────────────────────────────
+  // ── 连接成功后：拉取会话列表，并自动恢复上次活跃会话 ─────────────────
   useEffect(() => {
     if (isConnected) {
-      void useSessionStore.getState().fetchSessions()
+      void useSessionStore.getState().fetchSessions().then(() => {
+        const { sessions, activeSessionId, setActive } = useSessionStore.getState()
+        // 过滤掉已停止的会话（stopped 状态需要 resume，不自动恢复）
+        const liveSessions = sessions.filter(s => s.status !== 'stopped')
+        if (liveSessions.length === 0) return
+
+        // 优先恢复上次活跃的会话（内存中或 localStorage 持久化的），否则选第一个
+        const savedId = (() => { try { return localStorage.getItem('hrids_active_session_id') } catch { return null } })()
+        const preferredId = activeSessionId ?? savedId
+        const targetId = (preferredId && liveSessions.some(s => s.id === preferredId))
+          ? preferredId
+          : liveSessions[0].id
+
+        setActive(targetId)
+      })
     }
   }, [isConnected])
 

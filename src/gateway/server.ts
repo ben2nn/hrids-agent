@@ -58,7 +58,7 @@ export function createGateway(config: GatewayConfig = {}) {
   const rateLimiter = new RateLimiter(config.rateLimitPerMinute ?? 10)
 
   const app = express()
-  app.use(express.json())
+  app.use(express.json({ limit: '50mb' }))
 
   // ── CORS 中间件（在所有 API 路由之前）──────────────────────
   const corsOrigin = config.corsOrigin ?? '*'
@@ -298,6 +298,7 @@ export function createGateway(config: GatewayConfig = {}) {
       toolInput?: unknown
       toolStatus?: 'success' | 'error'
       toolResult?: unknown
+      images?: string[]
       timestamp: number
     }> = []
 
@@ -310,7 +311,22 @@ export function createGateway(config: GatewayConfig = {}) {
         if (typeof msg.content === 'string') {
           // 跳过系统内部注入的消息
           if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
-          displayMessages.push({ id: `u-${idx}`, type: 'user', content: msg.content, timestamp })
+          
+          // 从消息内容中提取图片引用（@filename 格式）
+          const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
+          const images: string[] = []
+          let match: RegExpExecArray | null
+          while ((match = imagePattern.exec(msg.content)) !== null) {
+            images.push(match[1])
+          }
+          
+          displayMessages.push({ 
+            id: `u-${idx}`, 
+            type: 'user', 
+            content: msg.content, 
+            timestamp,
+            ...(images.length > 0 ? { images } : {})
+          })
         }
         // tool_result 不单独显示（结果附在 tool 消息上）
       } else if (msg.role === 'assistant') {
@@ -901,6 +917,69 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
+  // GET /sessions/:id/image?path= — 直接返回图片二进制（用于前端 <img> 标签显示）
+  app.get('/sessions/:id/image', (req, res) => {
+    const activeSession = manager.getSession(req.params.id)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+
+    if (!cwd) {
+      res.status(404).json({ error: '会话不存在或无工作目录' })
+      return
+    }
+
+    const relPath = req.query.path as string
+    if (!relPath) {
+      res.status(400).json({ error: '缺少 path 参数' })
+      return
+    }
+
+    const absPath = resolve(cwd, relPath)
+    if (!absPath.startsWith(resolve(cwd))) {
+      res.status(403).json({ error: '禁止访问 cwd 之外的路径' })
+      return
+    }
+
+    try {
+      const stat = statSync(absPath)
+      if (!stat.isFile()) {
+        res.status(400).json({ error: '路径不是文件' })
+        return
+      }
+
+      // 限制图片大小：20MB
+      if (stat.size > 20 * 1024 * 1024) {
+        res.status(413).json({ error: '图片超过 20MB' })
+        return
+      }
+
+      const ext = extname(absPath).toLowerCase()
+      const mimeMap: Record<string, string> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml',
+        '.bmp': 'image/bmp',
+        '.ico': 'image/x-icon',
+        '.tiff': 'image/tiff',
+        '.tif': 'image/tiff',
+      }
+      const mime = mimeMap[ext]
+      if (!mime) {
+        res.status(400).json({ error: '不支持的图片格式' })
+        return
+      }
+
+      res.setHeader('Content-Type', mime)
+      res.setHeader('Cache-Control', 'public, max-age=3600')
+      const buf = readFileSync(absPath)
+      res.send(buf)
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
   // ── WebSocket 服务器 ─────────────────────────────────────────
   const server = http.createServer(app)
   // 不设置 path，由 connection 回调自行匹配 /sessions/:id/stream
@@ -947,10 +1026,10 @@ export function createGateway(config: GatewayConfig = {}) {
     }
 
     log.debug('WebSocket 连接', { sessionId })
-    manager.subscribe(sessionId, ws)
-    // 使用 sessionId（驼峰）与前端类型定义保持一致
+    // 先发 ready，告知前端连接已建立
     ws.send(JSON.stringify({ type: 'ready', sessionId }))
-
+    // 再订阅（会触发回放缓冲区推送，前端已准备好接收）
+    manager.subscribe(sessionId, ws)
     ws.on('message', (data) => {
       manager.handleClientMessage(sessionId, data.toString())
     })
@@ -979,12 +1058,30 @@ export function createGateway(config: GatewayConfig = {}) {
     async stop(gracefulTimeoutMs = 10000): Promise<void> {
       log.info('开始关闭 Gateway')
       await manager.gracefulShutdown(gracefulTimeoutMs)
-      return new Promise((resolve, reject) => {
-        wss.close()
+
+      // 主动关闭所有 WebSocket 连接，否则 server.close() 会因连接保持而一直 pending
+      for (const ws of wss.clients) {
+        try { ws.terminate() } catch { /* 忽略 */ }
+      }
+      wss.close()
+
+      return new Promise((resolve) => {
+        // 尝试使用 Node 18.2+ 的 closeAllConnections() 强制关闭所有 keep-alive 连接
+        if (typeof (server as unknown as { closeAllConnections?: () => void }).closeAllConnections === 'function') {
+          (server as unknown as { closeAllConnections: () => void }).closeAllConnections()
+        }
         server.close(err => {
-          if (err) { log.error('关闭 HTTP 服务失败', { error: String(err) }); reject(err) }
-          else { log.info('Gateway 已关闭'); resolve() }
+          if (err) {
+            log.warn('关闭 HTTP 服务时有错误（忽略）', { error: String(err) })
+          }
+          log.info('Gateway 已关闭')
+          resolve()
         })
+        // 兜底超时：5 秒后强制 resolve，避免残留连接导致进程无法退出
+        setTimeout(() => {
+          log.warn('server.close() 超时，强制完成关闭')
+          resolve()
+        }, 5000)
       })
     },
     manager,

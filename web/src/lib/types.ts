@@ -14,14 +14,22 @@ export type ServerMessage =
   | { type: 'permission_mode_changed'; mode: 'ask' | 'auto' | 'plan' }
   | { type: 'continuation_needed' }
   | { type: 'compact_done'; summary: string }
+  | { type: 'model_switched'; model: string; reason: string }
   | { type: 'done' }
   | { type: 'error'; message: string }
   | { type: 'budget_exceeded'; message: string }
 
 // ─── 客户端发送消息（WebSocket Client → Server） ───────────────────────────
 
+// 附件（图片/PDF）：base64 编码的文件内容
+export interface MessageAttachment {
+  name: string
+  data: string       // base64 编码
+  mediaType: string  // 如 'image/jpeg', 'image/png', 'application/pdf'
+}
+
 export type ClientMessage =
-  | { type: 'message'; content: string }
+  | { type: 'message'; content: string; attachments?: MessageAttachment[] }
   | { type: 'abort' }
   | { type: 'user_reply'; answer: string }
   | { type: 'permission_reply'; key: string; granted: boolean }
@@ -37,6 +45,8 @@ export interface UploadedFile {
   path: string
   /** 文件大小（字节） */
   size: number
+  /** 是否为图片文件 */
+  isImage?: boolean
 }
 
 export interface UploadResponse {
@@ -128,7 +138,7 @@ export interface Skill {
 // ─── 消息列表渲染（DisplayMessage） ───────────────────────────────────────
 
 export type DisplayMessage =
-  | { id: string; type: 'user'; content: string; timestamp: number }
+  | { id: string; type: 'user'; content: string; timestamp: number; images?: string[] }
   | { id: string; type: 'assistant'; content: string; timestamp: number; usage?: CostInfo }
   | {
       id: string; type: 'tool'; toolId: string; toolName: string; timestamp: number

@@ -71,55 +71,47 @@ interface ToolCardProps {
 const STATUS_CONFIG = {
   pending: {
     icon: (
-      <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <svg className="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
         <path d="M21 12a9 9 0 1 1-6.219-8.56" />
       </svg>
     ),
     label: '执行中',
     textColor: 'text-amber-400',
-    bgColor: 'bg-amber-400/8',
-    borderColor: 'border-amber-400/20',
     dotColor: 'bg-amber-400',
-    leftBorder: 'border-l-amber-400/60',
+    accentClass: 'tool-card-pending',
   },
   success: {
     icon: (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <polyline points="20 6 9 17 4 12" />
       </svg>
     ),
     label: '成功',
     textColor: 'text-emerald-400',
-    bgColor: 'bg-emerald-400/8',
-    borderColor: 'border-emerald-400/20',
     dotColor: 'bg-emerald-400',
-    leftBorder: 'border-l-emerald-400/60',
+    accentClass: 'tool-card-success',
   },
   error: {
     icon: (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
         <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
       </svg>
     ),
     label: '失败',
     textColor: 'text-red-400',
-    bgColor: 'bg-red-400/8',
-    borderColor: 'border-red-400/20',
     dotColor: 'bg-red-400',
-    leftBorder: 'border-l-red-400/60',
+    accentClass: 'tool-card-error',
   },
   denied: {
     icon: (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
         <circle cx="12" cy="12" r="10" /><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
       </svg>
     ),
     label: '已拒绝',
     textColor: 'text-orange-400',
-    bgColor: 'bg-orange-400/8',
-    borderColor: 'border-orange-400/20',
     dotColor: 'bg-orange-400',
-    leftBorder: 'border-l-orange-400/60',
+    accentClass: 'tool-card-denied',
   },
 } as const
 
@@ -158,12 +150,10 @@ export function ToolCard({
   const { label: toolLabel, icon: toolIcon, raw: toolRaw } = resolveToolLabel(toolName)
 
   return (
-    <div
-      className={`rounded-xl border border-l-2 ${cfg.borderColor} ${cfg.leftBorder} bg-[var(--bg-secondary)] overflow-hidden transition-all duration-150`}
-    >
+    <div className={`tool-card-base ${cfg.accentClass} overflow-hidden transition-all duration-150`}>
       {/* ── 标题行 ── */}
       <div
-        className={`flex items-center gap-2.5 px-3 py-2 ${isAskUser && status === 'pending' ? 'cursor-default' : 'cursor-pointer'} select-none hover:bg-[var(--bg-tertiary)] transition-colors`}
+        className={`flex items-center gap-2.5 px-3 py-2 ${isAskUser && status === 'pending' ? 'cursor-default' : 'cursor-pointer'} select-none hover:bg-white/[0.03] transition-colors`}
         onClick={isAskUser && status === 'pending' ? undefined : onToggle}
         role={isAskUser && status === 'pending' ? undefined : 'button'}
         aria-expanded={isAskUser && status === 'pending' ? undefined : isExpanded}
@@ -187,10 +177,10 @@ export function ToolCard({
             ? <span className="font-sans text-[var(--text-secondary)]">💬 {askQuestion}</span>
             : (
               <>
-                <span>{toolIcon}</span>
-                <span className="font-medium">{toolLabel}</span>
+                <span className="text-[13px] leading-none">{toolIcon}</span>
+                <span className="font-medium text-[var(--text-primary)]">{toolLabel}</span>
                 {toolLabel !== toolRaw && (
-                  <span className="font-mono text-[10px] text-[var(--text-muted)] shrink-0">
+                  <span className="font-mono text-[10px] text-[var(--text-muted)] shrink-0 opacity-70">
                     {toolRaw}
                   </span>
                 )}
@@ -200,14 +190,14 @@ export function ToolCard({
         </span>
 
         {/* 状态标签 */}
-        <span className={`text-[10px] font-semibold ${cfg.textColor} shrink-0`}>
+        <span className={`text-[10px] font-semibold ${cfg.textColor} shrink-0 tracking-wide`}>
           {cfg.label}
         </span>
 
         {/* ask_user pending 时不显示折叠箭头（InputBar 已展示问题） */}
         {!(isAskUser && status === 'pending') && (
           <svg
-            className={`text-[var(--text-muted)] transition-transform duration-150 shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
+            className={`text-[var(--text-muted)] transition-transform duration-200 shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
             width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
             aria-hidden="true"
           >
@@ -218,20 +208,20 @@ export function ToolCard({
 
       {/* ── 折叠内容（ask_user pending 时不展开） ── */}
       {isExpanded && !(isAskUser && status === 'pending') && (
-        <div className="border-t border-[var(--border-subtle)] px-3 pb-3 flex flex-col gap-2.5">
+        <div className="border-t border-white/[0.06] px-3 pb-3 flex flex-col gap-2.5">
           {/* 输入参数区块 */}
           <div className="mt-2.5">
-            <p className="text-[10px] font-semibold text-[var(--text-muted)] mb-1.5 uppercase tracking-wider">
+            <p className="text-[10px] font-semibold text-[var(--text-muted)] mb-1.5 uppercase tracking-widest">
               输入参数
             </p>
-            <pre className="bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg text-xs font-mono p-2.5 overflow-x-auto text-[var(--text-secondary)] whitespace-pre-wrap break-all leading-relaxed">
+            <pre className="bg-black/20 border border-white/[0.06] rounded-lg text-xs font-mono p-2.5 overflow-x-auto text-[var(--text-secondary)] whitespace-pre-wrap break-all leading-relaxed">
               {JSON.stringify(input, null, 2)}
             </pre>
           </div>
 
           {/* 执行日志区块 */}
           <div>
-            <p className="text-[10px] font-semibold text-[var(--text-muted)] mb-1.5 uppercase tracking-wider">
+            <p className="text-[10px] font-semibold text-[var(--text-muted)] mb-1.5 uppercase tracking-widest">
               执行日志
               {logs.length > 30 && (
                 <span className="ml-1 normal-case font-normal">
@@ -239,7 +229,7 @@ export function ToolCard({
                 </span>
               )}
             </p>
-            <div className="bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg p-2.5 max-h-36 overflow-y-auto">
+            <div className="bg-black/20 border border-white/[0.06] rounded-lg p-2.5 max-h-36 overflow-y-auto">
               {visibleLogs.length === 0 ? (
                 <p className="text-xs text-[var(--text-muted)] italic">暂无日志</p>
               ) : (
@@ -258,10 +248,10 @@ export function ToolCard({
           {/* 执行结果区块 */}
           {result !== undefined && (
             <div>
-              <p className="text-[10px] font-semibold text-[var(--text-muted)] mb-1.5 uppercase tracking-wider">
+              <p className="text-[10px] font-semibold text-[var(--text-muted)] mb-1.5 uppercase tracking-widest">
                 执行结果
               </p>
-              <pre className="bg-[var(--bg-primary)] border border-[var(--border-subtle)] rounded-lg text-xs font-mono p-2.5 overflow-x-auto text-[var(--text-primary)] whitespace-pre-wrap break-all leading-relaxed">
+              <pre className="bg-black/20 border border-white/[0.06] rounded-lg text-xs font-mono p-2.5 overflow-x-auto text-[var(--text-primary)] whitespace-pre-wrap break-all leading-relaxed">
                 {truncateResult(result)}
               </pre>
             </div>

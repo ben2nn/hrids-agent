@@ -1,4 +1,6 @@
 import 'dotenv/config'
+import { setupSystemProxy } from './core/proxySetup.js'
+setupSystemProxy()
 import { existsSync, mkdirSync } from 'fs'
 import { Command } from 'commander'
 import { render } from 'ink'

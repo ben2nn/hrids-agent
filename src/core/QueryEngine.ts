@@ -17,6 +17,14 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: 'image'; source: ImageSource }
+
+export interface ImageSource {
+  type: 'base64' | 'url'
+  mediaType?: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | 'application/pdf'
+  data?: string   // base64 编码的图像/PDF 数据
+  url?: string    // 图像 URL
+}
 
 export interface QueryEngineConfig {
   provider: LLMProvider
@@ -49,6 +57,7 @@ export type StreamEvent =
   | { type: 'error'; message: string }
 
 // 估算历史消息的大致 token 数（粗略：4字符≈1token）
+// 图片内容块不计入 token 估算，避免 base64 数据虚高触发误压缩
 function estimateTokens(messages: Message[]): number {
   let chars = 0
   for (const m of messages) {
@@ -58,6 +67,7 @@ function estimateTokens(messages: Message[]): number {
       for (const b of m.content) {
         if (b.type === 'text') chars += b.text.length
         else if (b.type === 'tool_result') chars += b.content.length
+        else if (b.type === 'image') chars += 100  // 图片固定计 100 字符，不算 base64
         else chars += JSON.stringify(b).length
       }
     }
@@ -333,17 +343,29 @@ ${contentToSummarize}
     return QUERY_PATTERNS.some(p => p.test(message))
   }
 
-  async *send(userMessage: string): AsyncGenerator<StreamEvent> {
+  async *send(userMessage: string | Message): AsyncGenerator<StreamEvent> {
     // 并发保护：如果已有任务在运行，拒绝新任务
     if (this.running) {
+      log.warn('并发保护触发：上一个任务仍在执行中', { historyLength: this.history.length })
       yield { type: 'error', message: '上一个任务仍在执行中，请等待完成后再发送新消息' }
       return
     }
     this.running = true
     this.abortController = new AbortController()
+    // 规范化用户消息为 Message 对象
+    const userMsg: Message = typeof userMessage === 'string'
+      ? { role: 'user', content: userMessage }
+      : userMessage
     // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行
-    const isQueryMode = this.isQueryIntent(userMessage)
-    this.history.push({ role: 'user', content: userMessage })
+    const msgText = typeof userMsg.content === 'string'
+      ? userMsg.content
+      : (userMsg.content as ContentBlock[])
+          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+          .map(b => b.text)
+          .join('')
+    const isQueryMode = this.isQueryIntent(msgText)
+    log.debug('send 开始', { historyLength: this.history.length, isQueryMode, estimatedTokens: this.getEstimatedTokens() })
+    this.history.push(userMsg)
 
     const maxTurns = this.config.maxTurns ?? 50
     const maxBudgetUsd = this.config.maxBudgetUsd
@@ -357,6 +379,8 @@ ${contentToSummarize}
         if (this.abortController.signal.aborted) break
         turns++
 
+        log.debug(`第 ${turns}/${maxTurns} 轮开始`, { historyLength: this.history.length, estimatedTokens: estimateTokens(this.history) })
+
         // 成本预算检查（每轮开始前）
         if (maxBudgetUsd !== undefined && this.costs.getCostUsd() >= maxBudgetUsd) {
           yield { type: 'budget_exceeded', costUsd: this.costs.getCostUsd(), limitUsd: maxBudgetUsd }
@@ -364,7 +388,11 @@ ${contentToSummarize}
         }
 
         // 自动压缩：历史过长时在发送前压缩
-        if (estimateTokens(this.history) > autoCompactThreshold) {
+        // 注意：跳过包含图片内容块的轮次，避免压缩时丢失图片数据
+        const latestMsg = this.history[this.history.length - 1]
+        const latestHasImage = Array.isArray(latestMsg?.content) &&
+          (latestMsg.content as ContentBlock[]).some(b => b.type === 'image')
+        if (!latestHasImage && estimateTokens(this.history) > autoCompactThreshold) {
           yield { type: 'compact_start' }
           const summary = await this.generateCompactSummary()
           // 压缩前先归档（如果注册了归档回调）
@@ -387,6 +415,7 @@ ${contentToSummarize}
             this.config.systemPrompt,
             this.config.maxTokens ?? 8096,
           )
+          log.debug('调用 LLM stream', { model: this.config.provider.model, turn: turns })
           for await (const chunk of streamFn()) {
             if (this.abortController.signal.aborted) break
 
@@ -416,6 +445,7 @@ ${contentToSummarize}
           }
         } catch (err) {
           const errMsg = String(err)
+          log.error('LLM 请求失败', { turn: turns, error: errMsg })
           yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` }
           yield { type: 'error', message: errMsg }
           // 将中断原因写入 history，方便恢复时 LLM 知道上次发生了什么
@@ -435,6 +465,7 @@ ${contentToSummarize}
 
         // 没有工具调用，检查是否是中途停止（任务未完成）
         if (toolCalls.length === 0) {
+          log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length, isQueryMode })
           // 查询/回忆类意图：直接结束，不触发 continuation 检测
           if (isQueryMode) {
             break
@@ -483,6 +514,7 @@ ${contentToSummarize}
 
         // 执行工具调用（串行，保证历史顺序正确）
         const toolResults: ContentBlock[] = []
+        log.debug('本轮工具调用', { turn: turns, tools: toolCalls.map(tc => tc.name) })
         for (const tc of toolCalls) {
           // 实时日志队列：工具执行期间持续 yield 日志
           const logQueue: string[] = []
@@ -499,6 +531,7 @@ ${contentToSummarize}
 
           const description = tool.describe?.(tc.input) ?? tc.name
           yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description }
+          log.debug('工具开始执行', { toolName: tc.name, toolId: tc.id, description })
           const filePath = tool.getFilePath?.(tc.input as never)
           const allowed = await this.config.permissions.check({
             toolName: tc.name,
@@ -582,6 +615,7 @@ ${contentToSummarize}
           }
 
           yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult }
+          log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type })
           const result = finalResult
           const resultContent = result.type === 'success' ? result.output : `错误: ${result.message}`
           // 截断过长的工具输出，防止单条结果撑爆 history
@@ -622,6 +656,8 @@ ${contentToSummarize}
 
   abort() {
     this.abortController.abort()
+    // 强制释放锁，防止 generator 未被消费时 running 永久为 true
+    this.running = false
   }
 
   isRunning(): boolean {
@@ -632,6 +668,7 @@ ${contentToSummarize}
   getHistory(): readonly Message[] { return this.history }
   setHistory(messages: Message[]) { this.history = [...messages] }
   setSystemPrompt(prompt: string) { this.config.systemPrompt = prompt }
+  setProvider(provider: LLMProvider) { this.config.provider = provider }
 
   compactHistory(summary: string) {
     this.history = [

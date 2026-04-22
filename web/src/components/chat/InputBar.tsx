@@ -8,7 +8,7 @@ import React, {
 } from 'react'
 import { useSessionStore } from '../../store/sessionStore.js'
 import { useMessageStore } from '../../store/messageStore.js'
-import { getAvailableModels, uploadFiles } from '../../lib/gateway.js'
+import { getAvailableModels, uploadFiles, isImageFile } from '../../lib/gateway.js'
 import type { ModelEntry } from '../../lib/gateway.js'
 import type { UploadedFile } from '../../lib/types.js'
 
@@ -298,6 +298,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
     const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
     const [isUploading, setIsUploading] = useState(false)
     const [uploadError, setUploadError] = useState<string | null>(null)
+    // 图片本地预览 URL（objectURL），key 为文件名
+    const [imagePreviews, setImagePreviews] = useState<Map<string, string>>(new Map())
 
     const sessions = useSessionStore((s) => s.sessions)
     const sendMessage = useSessionStore((s) => s.sendMessage)
@@ -362,12 +364,20 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
         content = trimmed ? `${trimmed} ${fileRefs}` : fileRefs
       }
 
-      appendUserMessage(sessionId, content)
+      // 收集图片文件名，用于消息气泡中显示预览
+      const imageNames = uploadedFiles.filter(f => isImageFile(f.name)).map(f => f.name)
+
+      appendUserMessage(sessionId, content, imageNames.length > 0 ? imageNames : undefined)
       sendMessage(sessionId, content)
       setText('')
       setUploadedFiles([])
       setPendingFiles([])
       setUploadError(null)
+      // 清理图片预览 objectURL
+      setImagePreviews(prev => {
+        prev.forEach(url => URL.revokeObjectURL(url))
+        return new Map()
+      })
     }, [text, isBusy, permissionMode, sessionId, appendUserMessage, sendMessage, uploadedFiles])
 
     // ── 附件处理 ──────────────────────────────────────────────────────────
@@ -383,13 +393,26 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
       // 重置 input，允许重复选择同一文件
       e.target.value = ''
 
+      // 为图片文件生成本地预览 objectURL
+      const newPreviews = new Map<string, string>()
+      for (const file of files) {
+        if (isImageFile(file.name)) {
+          newPreviews.set(file.name, URL.createObjectURL(file))
+        }
+      }
+      if (newPreviews.size > 0) {
+        setImagePreviews(prev => new Map([...prev, ...newPreviews]))
+      }
+
       setPendingFiles(prev => [...prev, ...files])
       setUploadError(null)
       setIsUploading(true)
 
       try {
         const result = await uploadFiles(sessionId, files)
-        setUploadedFiles(prev => [...prev, ...result.files])
+        // 标记图片文件
+        const enriched = result.files.map(f => ({ ...f, isImage: isImageFile(f.name) }))
+        setUploadedFiles(prev => [...prev, ...enriched])
         setPendingFiles(prev => {
           const uploadedNames = new Set(result.files.map(f => f.name))
           return prev.filter(f => !uploadedNames.has(f.name))
@@ -397,6 +420,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
       } catch (err) {
         setUploadError(`上传失败: ${String(err)}`)
         setPendingFiles([])
+        // 清理预览 URL
+        newPreviews.forEach(url => URL.revokeObjectURL(url))
+        setImagePreviews(prev => {
+          const next = new Map(prev)
+          newPreviews.forEach((_, name) => next.delete(name))
+          return next
+        })
       } finally {
         setIsUploading(false)
       }
@@ -404,6 +434,14 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
     const handleRemoveUploadedFile = useCallback((name: string) => {
       setUploadedFiles(prev => prev.filter(f => f.name !== name))
+      // 清理图片预览 objectURL
+      setImagePreviews(prev => {
+        const url = prev.get(name)
+        if (url) URL.revokeObjectURL(url)
+        const next = new Map(prev)
+        next.delete(name)
+        return next
+      })
     }, [])
     const handleReply = useCallback((answer: string) => {
       const trimmed = answer.trim()
@@ -442,12 +480,18 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
         content = trimmed ? `${trimmed} ${fileRefs}` : fileRefs
       }
 
-      appendUserMessage(sessionId, content)
+      const imageNames = uploadedFiles.filter(f => isImageFile(f.name)).map(f => f.name)
+
+      appendUserMessage(sessionId, content, imageNames.length > 0 ? imageNames : undefined)
       sendMessage(sessionId, content)
       setText('')
       setUploadedFiles([])
       setPendingFiles([])
       setUploadError(null)
+      setImagePreviews(prev => {
+        prev.forEach(url => URL.revokeObjectURL(url))
+        return new Map()
+      })
     }, [text, sessionId, setPermissionMode, appendUserMessage, sendMessage, uploadedFiles])
 
     const handleDismissPlanWarning = useCallback(() => {
@@ -472,6 +516,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
           ref={fileInputRef}
           type="file"
           multiple
+          accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt,.md,.json,.csv"
           onChange={handleFileSelect}
           style={{ display: 'none' }}
           aria-hidden="true"
@@ -601,27 +646,84 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
                   </div>
                 ))}
 
-                {/* 已上传的文件 */}
-                {uploadedFiles.map((file) => (
-                  <div key={file.name} className="flex items-center gap-2 text-xs text-[var(--text-secondary)] bg-[var(--bg-tertiary)] rounded-lg px-2.5 py-1.5">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0 text-[var(--success)]">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                    <span className="flex-1 truncate" title={file.path}>{file.name}</span>
-                    <span className="shrink-0 text-[var(--text-muted)]">{formatFileSize(file.size)}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveUploadedFile(file.name)}
-                      className="shrink-0 text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
-                      title="移除"
-                      aria-label={`移除 ${file.name}`}
-                    >
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                        <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                      </svg>
-                    </button>
-                  </div>
-                ))}
+                {/* 已上传的文件：图片显示缩略图，普通文件显示文件名 */}
+                {(() => {
+                  const imageFiles = uploadedFiles.filter(f => f.isImage)
+                  const otherFiles = uploadedFiles.filter(f => !f.isImage)
+                  return (
+                    <>
+                      {/* 图片缩略图网格 */}
+                      {imageFiles.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {imageFiles.map((file) => {
+                            const previewUrl = imagePreviews.get(file.name)
+                            return (
+                              <div key={file.name} className="relative group">
+                                <div className="w-16 h-16 rounded-lg overflow-hidden border border-[var(--border)] bg-[var(--bg-tertiary)]">
+                                  {previewUrl ? (
+                                    <img
+                                      src={previewUrl}
+                                      alt={file.name}
+                                      className="w-full h-full object-cover"
+                                    />
+                                  ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-[var(--text-muted)]">
+                                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                                        <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" />
+                                      </svg>
+                                    </div>
+                                  )}
+                                </div>
+                                {/* 悬停时显示文件名和删除按钮 */}
+                                <div className="absolute inset-0 rounded-lg bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveUploadedFile(file.name)}
+                                    className="text-white hover:text-red-300 transition-colors"
+                                    title={`移除 ${file.name}`}
+                                    aria-label={`移除 ${file.name}`}
+                                  >
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                                    </svg>
+                                  </button>
+                                </div>
+                                {/* 图片名称 tooltip */}
+                                <div className="absolute -bottom-5 left-0 right-0 text-center text-[9px] text-[var(--text-muted)] truncate px-0.5" title={file.name}>
+                                  {file.name.length > 10 ? file.name.slice(0, 8) + '…' : file.name}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                      {/* 图片缩略图下方留出空间 */}
+                      {imageFiles.length > 0 && <div className="h-4" />}
+
+                      {/* 普通文件列表 */}
+                      {otherFiles.map((file) => (
+                        <div key={file.name} className="flex items-center gap-2 text-xs text-[var(--text-secondary)] bg-[var(--bg-tertiary)] rounded-lg px-2.5 py-1.5">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0 text-[var(--success)]">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                          <span className="flex-1 truncate" title={file.path}>{file.name}</span>
+                          <span className="shrink-0 text-[var(--text-muted)]">{formatFileSize(file.size)}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveUploadedFile(file.name)}
+                            className="shrink-0 text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
+                            title="移除"
+                            aria-label={`移除 ${file.name}`}
+                          >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  )
+                })()}
               </div>
             )}
 

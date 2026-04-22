@@ -40,8 +40,9 @@ interface MessageState {
 
   /**
    * 追加一条用户消息到指定会话。
+   * images 为可选的图片文件名列表（已上传到工作目录）。
    */
-  appendUserMessage: (sessionId: string, content: string) => void
+  appendUserMessage: (sessionId: string, content: string, images?: string[]) => void
 
   /**
    * 清空指定会话的所有状态。
@@ -125,8 +126,12 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         break
       }
 
-      // ── 工具开始：创建 ToolCard + 追加 tool 类型消息 ─────────────────
+      // ── 工具开始：先固化当前流式文字，再创建 ToolCard + 追加 tool 消息 ──
       case 'tool_start': {
+        // 去重：回放场景下同一 toolId 可能已存在
+        const existingCards = getToolCards(state.toolCards, sessionId)
+        if (existingCards.has(msg.toolId)) break
+
         // 创建新 ToolCard
         const newCard: ToolCardState = {
           toolId: msg.toolId,
@@ -137,24 +142,52 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           isExpanded: false,
         }
 
-        const sessionCards = new Map(getToolCards(state.toolCards, sessionId))
+        const sessionCards = new Map(existingCards)
         sessionCards.set(msg.toolId, newCard)
 
         const newToolCards = new Map(state.toolCards)
         newToolCards.set(sessionId, sessionCards)
 
-        // 追加 tool 类型消息到消息列表
-        const toolMsg: DisplayMessage = {
-          id: genId(),
-          type: 'tool',
-          toolId: msg.toolId,
-          toolName: msg.toolName,
-          timestamp: Date.now(),
-        }
-        const newMessages = new Map(state.messages)
-        newMessages.set(sessionId, [...getMessages(state.messages, sessionId), toolMsg])
+        // 有流式文字时，先固化为 assistant 消息，再追加工具消息
+        // 这样消息列表就能保持"文字 → 工具"的真实交错顺序
+        const pendingText = state.streamingText.get(sessionId) ?? ''
+        const newStreamingText = new Map(state.streamingText)
+        newStreamingText.delete(sessionId)
 
-        set({ toolCards: newToolCards, messages: newMessages })
+        const existingMsgs = getMessages(state.messages, sessionId)
+        const msgsWithText: DisplayMessage[] = pendingText.trim().length > 0
+          ? (() => {
+              // 去重：避免回放时重复追加相同内容
+              const lastMsg = existingMsgs[existingMsgs.length - 1]
+              const isDuplicate = lastMsg?.type === 'assistant' && (lastMsg as { content: string }).content === pendingText
+              if (isDuplicate) return existingMsgs
+              const assistantMsg: DisplayMessage = {
+                id: genId(),
+                type: 'assistant',
+                content: pendingText,
+                timestamp: Date.now(),
+              }
+              return [...existingMsgs, assistantMsg]
+            })()
+          : existingMsgs
+
+        // 追加 tool 类型消息（去重：避免回放时重复追加）
+        const alreadyHasTool = msgsWithText.some(m => m.type === 'tool' && (m as { toolId?: string }).toolId === msg.toolId)
+        const newMessages = new Map(state.messages)
+        if (!alreadyHasTool) {
+          const toolMsg: DisplayMessage = {
+            id: genId(),
+            type: 'tool',
+            toolId: msg.toolId,
+            toolName: msg.toolName,
+            timestamp: Date.now(),
+          }
+          newMessages.set(sessionId, [...msgsWithText, toolMsg])
+        } else {
+          newMessages.set(sessionId, msgsWithText)
+        }
+
+        set({ toolCards: newToolCards, messages: newMessages, streamingText: newStreamingText })
         break
       }
 
@@ -217,16 +250,25 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
         // 只有有内容时才追加消息
         if (text.trim().length > 0) {
-          const assistantMsg: DisplayMessage = {
-            id: genId(),
-            type: 'assistant',
-            content: text,
-            timestamp: Date.now(),
-            usage: state.costInfo.get(sessionId),
+          // 去重：若最后一条消息已是相同内容的 assistant 消息（重连回放场景），跳过追加
+          const existingMsgs = getMessages(state.messages, sessionId)
+          const lastMsg = existingMsgs[existingMsgs.length - 1]
+          const isDuplicate = lastMsg?.type === 'assistant' && lastMsg.content === text
+
+          if (!isDuplicate) {
+            const assistantMsg: DisplayMessage = {
+              id: genId(),
+              type: 'assistant',
+              content: text,
+              timestamp: Date.now(),
+              usage: state.costInfo.get(sessionId),
+            }
+            const newMessages = new Map(state.messages)
+            newMessages.set(sessionId, [...existingMsgs, assistantMsg])
+            set({ streamingText: newStreamingText, pendingAskUser: newPendingAskUser, pendingContinuation: newPendingContinuation, messages: newMessages })
+          } else {
+            set({ streamingText: newStreamingText, pendingAskUser: newPendingAskUser, pendingContinuation: newPendingContinuation })
           }
-          const newMessages = new Map(state.messages)
-          newMessages.set(sessionId, [...getMessages(state.messages, sessionId), assistantMsg])
-          set({ streamingText: newStreamingText, pendingAskUser: newPendingAskUser, pendingContinuation: newPendingContinuation, messages: newMessages })
         } else {
           set({ streamingText: newStreamingText, pendingAskUser: newPendingAskUser, pendingContinuation: newPendingContinuation })
         }
@@ -315,9 +357,35 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         break
       }
 
-      // ── ready：不处理（由 sessionStore 处理） ─────────────────────────
+      // ── ready：清空流式状态，准备接收回放或新消息 ───────────────────
       case 'ready': {
-        // 由 sessionStore 处理会话状态更新，此处忽略
+        // 清空流式缓冲和进行中的工具卡片，避免重连后状态残留
+        // 若 agent 正在运行（busy），后端会紧接着推送回放缓冲区重建流式状态
+        const newStreamingText = new Map(state.streamingText)
+        newStreamingText.delete(sessionId)
+
+        // 清除 pending 状态的工具卡片（进行中的工具，重连后由回放重建）
+        const sessionCards = getToolCards(state.toolCards, sessionId)
+        const cleanedCards = new Map(sessionCards)
+        for (const [toolId, card] of cleanedCards) {
+          if (card.status === 'pending') cleanedCards.delete(toolId)
+        }
+        const newToolCards = new Map(state.toolCards)
+        newToolCards.set(sessionId, cleanedCards)
+
+        // 清除 pending 的权限请求和 ask_user（重连后由回放重建）
+        const newPendingPermission = new Map(state.pendingPermission)
+        newPendingPermission.delete(sessionId)
+        const newPendingAskUser = new Map(state.pendingAskUser)
+        newPendingAskUser.delete(sessionId)
+
+        set({
+          streamingText: newStreamingText,
+          toolCards: newToolCards,
+          pendingPermission: newPendingPermission,
+          pendingAskUser: newPendingAskUser,
+        })
+        // sessionStore 处理 session.status 更新，此处不重复处理
         break
       }
 
@@ -352,13 +420,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     }
   },
 
-  appendUserMessage(sessionId: string, content: string) {
+  appendUserMessage(sessionId: string, content: string, images?: string[]) {
     const state = get()
     const userMsg: DisplayMessage = {
       id: genId(),
       type: 'user',
       content,
       timestamp: Date.now(),
+      ...(images && images.length > 0 ? { images } : {}),
     }
     const newMessages = new Map(state.messages)
     newMessages.set(sessionId, [...getMessages(state.messages, sessionId), userMsg])

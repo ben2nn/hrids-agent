@@ -27,7 +27,8 @@ type VirtualEntry =
 // ─── 消息分组逻辑 ──────────────────────────────────────────────────────────
 // 将扁平的消息列表转换为虚拟列表条目：
 // - user 消息：独立条目
-// - 连续的 tool / assistant 消息：合并为一个 agent-turn 条目
+// - assistant 消息 + 紧随其后的连续 tool 消息：合并为一个 agent-turn 条目
+// - 单独的 tool 消息（前面没有 assistant）：独立的 agent-turn 条目
 // - system / error / compact：独立条目（不渲染或特殊渲染）
 
 function groupMessages(messages: DisplayMessage[]): VirtualEntry[] {
@@ -43,16 +44,28 @@ function groupMessages(messages: DisplayMessage[]): VirtualEntry[] {
       continue
     }
 
-    if (msg.type === 'tool' || msg.type === 'assistant') {
-      // 收集连续的 tool / assistant 消息作为一个 agent 回合
+    if (msg.type === 'assistant' || msg.type === 'tool') {
+      // 以当前消息为起点，收集一个 agent-turn：
+      // - 如果是 assistant，先收它，再收紧随其后的连续 tool
+      // - 如果是 tool（前面没有 assistant），直接收连续 tool
       const turnMsgs: DisplayMessage[] = []
-      while (
-        i < messages.length &&
-        (messages[i].type === 'tool' || messages[i].type === 'assistant')
-      ) {
-        turnMsgs.push(messages[i])
+
+      if (msg.type === 'assistant') {
+        turnMsgs.push(msg)
         i++
+        // 收集紧随其后的连续 tool 消息
+        while (i < messages.length && messages[i].type === 'tool') {
+          turnMsgs.push(messages[i])
+          i++
+        }
+      } else {
+        // 连续 tool 消息（没有前置 assistant）
+        while (i < messages.length && messages[i].type === 'tool') {
+          turnMsgs.push(messages[i])
+          i++
+        }
       }
+
       entries.push({ kind: 'agent-turn', messages: turnMsgs })
       continue
     }
@@ -112,15 +125,12 @@ export function MessageList({ sessionId }: MessageListProps) {
   const entries = useMemo(() => groupMessages(messages), [messages])
 
   // 判断流式输出是否应该合并到最后一个 agent-turn 里
-  const lastEntry = entries.length > 0 ? entries[entries.length - 1] : null
-  const streamingMergesIntoLastTurn = hasStreaming && lastEntry?.kind === 'agent-turn'
+  // 新逻辑：流式文字始终作为独立的新 turn，不合并到已有 turn
+  // （因为 tool_start 时已经把文字切断固化了，流式缓冲里只有"当前段"的文字）
+  const streamingMergesIntoLastTurn = false
 
-  // 虚拟列表总条目数：
-  // - 流式合并到最后一个 agent-turn：条目数不变（流式占位替换最后一个 agent-turn）
-  // - 否则：条目数 + 1（独立的流式占位）
-  const totalCount = streamingMergesIntoLastTurn
-    ? entries.length          // 最后一个 agent-turn 会被流式版本替换
-    : entries.length + (hasStreaming ? 1 : 0)
+  // 虚拟列表总条目数：有流式文字时追加一个独立的流式占位
+  const totalCount = entries.length + (hasStreaming ? 1 : 0)
 
   // 虚拟滚动容器 ref
   const parentRef = useRef<HTMLDivElement>(null)
@@ -216,10 +226,11 @@ export function MessageList({ sessionId }: MessageListProps) {
           const isStreamingItem = !streamingMergesIntoLastTurn && virtualItem.index === entries.length
           const entry = entries[virtualItem.index]
 
-          // ── 独立流式占位（前面没有 agent-turn 可合并） ──────────────
+          // ── 独立流式占位 ──────────────────────────────────────────────
           if (isStreamingItem) {
             const lastEnt = entries.length > 0 ? entries[entries.length - 1] : null
-            const streamingShowAvatar = !lastEnt || lastEnt.kind === 'user'
+            // 前一个是 agent-turn 时不显示头像（连续回合）
+            const streamingShowAvatar = !lastEnt || lastEnt.kind !== 'agent-turn'
 
             return (
               <div
@@ -234,17 +245,17 @@ export function MessageList({ sessionId }: MessageListProps) {
                   transform: `translateY(${virtualItem.start}px)`,
                 }}
               >
-                <div className="flex flex-col px-4 py-1 animate-fade-in">
+              <div className="flex flex-col px-4 py-2 animate-fade-in">
                   {streamingShowAvatar && (
-                    <div className="flex items-center gap-2 mb-1.5">
+                    <div className="flex items-center gap-2 mb-2">
                       <div className="w-8 h-8 rounded-full overflow-hidden border border-[var(--border-subtle)] shrink-0">
                         <img src="/avatar.png" alt="知了" className="w-full h-full object-cover" />
                       </div>
-                      <span className="text-xs font-semibold text-[var(--text-secondary)]">知了</span>
+                      <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
                     </div>
                   )}
-                  <div className="ml-10 w-[calc(100%-2.5rem)]">
-                    <div className="bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-2xl rounded-tl-sm px-4 py-3">
+                  <div className="ml-10 w-[calc(100%-2.5rem)] mr-6">
+                    <div className="agent-bubble px-4 py-3.5">
                       <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
                         {streamingText}
                       </span>
@@ -259,49 +270,11 @@ export function MessageList({ sessionId }: MessageListProps) {
           if (!entry) return null
 
           // ── 判断是否显示头像 ────────────────────────────────────────
+          // 连续的 agent-turn 只在第一个显示头像
           let showAvatar = false
           if (entry.kind === 'agent-turn') {
             const prevEntry = virtualItem.index > 0 ? entries[virtualItem.index - 1] : null
-            showAvatar = !prevEntry || prevEntry.kind === 'user' || prevEntry.kind === 'single'
-          }
-
-          // ── 最后一个 agent-turn + 流式合并：把流式文字附加进去渲染 ──
-          const isLastTurnWithStreaming =
-            streamingMergesIntoLastTurn &&
-            entry.kind === 'agent-turn' &&
-            virtualItem.index === entries.length - 1
-
-          if (isLastTurnWithStreaming && entry.kind === 'agent-turn') {
-            const streamingAsAssistant: DisplayMessage = {
-              id: '__streaming__',
-              type: 'assistant',
-              content: streamingText,
-              timestamp: Date.now(),
-            }
-            const mergedMessages = [...entry.messages, streamingAsAssistant]
-
-            return (
-              <div
-                key={virtualItem.key}
-                data-index={virtualItem.index}
-                ref={virtualizer.measureElement}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  transform: `translateY(${virtualItem.start}px)`,
-                }}
-              >
-                <AgentTurn
-                  messages={mergedMessages}
-                  toolCardsMap={toolCardsMap}
-                  sessionId={sessionId}
-                  showAvatar={showAvatar}
-                  streamingMessageId="__streaming__"
-                />
-              </div>
-            )
+            showAvatar = !prevEntry || prevEntry.kind !== 'agent-turn'
           }
 
           return (

@@ -43,7 +43,7 @@ function StreamingCursor() {
 
 // ─── AgentTurn 组件 ────────────────────────────────────────────────────────
 // 将一个 Agent 回合（若干工具调用 + 可选说明文字）合并渲染在同一个容器内，
-// 工具卡片在上，说明文字在下，视觉上与 Kiro 保持一致。
+// 说明文字在上，工具卡片在下，视觉上与 Kiro 保持一致。
 
 export function AgentTurn({ messages, toolCardsMap, sessionId, showAvatar, streamingMessageId }: AgentTurnProps) {
   const toolMsgs = messages.filter((m) => m.type === 'tool')
@@ -57,15 +57,15 @@ export function AgentTurn({ messages, toolCardsMap, sessionId, showAvatar, strea
     const content = (assistantMsg as { content: string }).content
     const isStreaming = streamingMessageId && assistantMsg?.id === streamingMessageId
     return (
-      <div className="flex flex-col px-4 py-1 animate-fade-in">
+      <div className="flex flex-col px-4 py-2 animate-fade-in">
         {showAvatar && (
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-2">
             <AgentAvatar />
-            <span className="text-xs font-semibold text-[var(--text-secondary)]">知了</span>
+            <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
           </div>
         )}
-        <div className="ml-10 mr-10">
-          <div className="bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-2xl rounded-tl-sm px-4 py-3">
+        <div className="ml-10 mr-6">
+          <div className="agent-bubble px-4 py-3.5">
             {isStreaming ? (
               <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
                 {content}
@@ -81,16 +81,35 @@ export function AgentTurn({ messages, toolCardsMap, sessionId, showAvatar, strea
   }
 
   // 纯工具调用（无说明文字）或工具 + 说明文字
+  // 说明文字在上，工具卡片在下（与 Kiro 保持一致）
   return (
-    <div className="flex flex-col px-4 py-1 animate-fade-in">
+    <div className="flex flex-col px-4 py-2 animate-fade-in">
       {showAvatar && (
-        <div className="flex items-center gap-2 mb-1.5">
+        <div className="flex items-center gap-2 mb-2">
           <AgentAvatar />
-          <span className="text-xs font-semibold text-[var(--text-secondary)]">知了</span>
+          <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
         </div>
       )}
-      <div className="ml-10 mr-10 flex flex-col gap-1">
-        {/* 工具调用卡片列表 */}
+      <div className="ml-10 mr-6 flex flex-col gap-1.5">
+        {/* 说明文字（在工具卡片上方） */}
+        {hasText && (() => {
+          const content = (assistantMsg as { content: string }).content
+          const isStreaming = streamingMessageId && assistantMsg?.id === streamingMessageId
+          return (
+            <div className="agent-bubble px-4 py-3.5 mb-1">
+              {isStreaming ? (
+                <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
+                  {content}
+                  <StreamingCursor />
+                </span>
+              ) : (
+                <MarkdownRenderer content={content} />
+              )}
+            </div>
+          )
+        })()}
+
+        {/* 工具调用卡片列表（在说明文字下方） */}
         {toolMsgs.map((msg) => {
           if (msg.type !== 'tool') return null
           const toolCard = toolCardsMap?.get(msg.toolId)
@@ -100,7 +119,7 @@ export function AgentTurn({ messages, toolCardsMap, sessionId, showAvatar, strea
             return (
               <div
                 key={msg.id}
-                className="bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-xl px-3 py-2"
+                className="tool-card-base px-3 py-2"
               >
                 <div className="flex items-center gap-2">
                   <svg
@@ -131,24 +150,6 @@ export function AgentTurn({ messages, toolCardsMap, sessionId, showAvatar, strea
             />
           )
         })}
-
-        {/* 说明文字（紧接在工具卡片下方） */}
-        {hasText && (() => {
-          const content = (assistantMsg as { content: string }).content
-          const isStreaming = streamingMessageId && assistantMsg?.id === streamingMessageId
-          return (
-            <div className="bg-[var(--bg-secondary)] border border-[var(--border-subtle)] rounded-2xl rounded-tl-sm px-4 py-3 mt-0.5">
-              {isStreaming ? (
-                <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
-                  {content}
-                  <StreamingCursor />
-                </span>
-              ) : (
-                <MarkdownRenderer content={content} />
-              )}
-            </div>
-          )
-        })()}
       </div>
     </div>
   )

@@ -1,6 +1,7 @@
 // 会话管理器 —— 管理 agent 进程的生命周期
-import { createProvider, createProviderFromEnv } from '../core/providers/index.js'
+import { createProvider, createProviderFromEnv, createVisionProviderFromEnv } from '../core/providers/index.js'
 import { QueryEngine } from '../core/QueryEngine.js'
+import type { Message, ContentBlock, ImageSource } from '../core/QueryEngine.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { createAgentTool } from '../tools/AgentTool.js'
@@ -19,20 +20,27 @@ import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import type { LLMProvider } from '../core/providers/types.js'
 import type { CreateSessionRequest, SessionInfo } from './types.js'
 import type WebSocket from 'ws'
+import { readFileSync, existsSync } from 'fs'
+import { resolve, extname } from 'path'
 
 const log = logger.child({ component: 'gateway' })
+
+// 事件回放缓冲区容量（每个 session 最多缓存多少条事件）
+const REPLAY_BUFFER_SIZE = 200
 
 export interface ManagedSession {
   info: SessionInfo
   engine: QueryEngine
   provider: LLMProvider
   permissions: PermissionManager
-  // 当前连接的 WebSocket 客户端（同一会话可被多个客户端订阅）
+  // 当前连接的 WebSocket 客户端（同一会话可被多个客户端订阅，支持多标签页/多设备）
   subscribers: Set<WebSocket>
-  // 空闲超时计时器
+  // 空闲超时计时器（仅基于 lastActiveAt，与订阅者数量无关）
   idleTimer: ReturnType<typeof setTimeout> | null
   // 待处理的权限询问（key = toolName+description，value = resolve 函数）
   pendingPermissions: Map<string, (granted: boolean) => void>
+  // 事件回放缓冲区：新客户端连接时回放进行中的输出，不错过任何事件
+  replayBuffer: object[]
 }
 
 export interface SessionManagerConfig {
@@ -105,6 +113,7 @@ export class SessionManager {
       subscribers: new Set(),
       idleTimer: null,
       pendingPermissions: new Map(),
+      replayBuffer: [],
     }
 
     const permissions = new PermissionManager(
@@ -279,26 +288,56 @@ export class SessionManager {
     const session = this.sessions.get(sessionId)
     if (!session) return
     session.subscribers.add(ws)
-    this.resetIdleTimer(session)
+    log.debug('WS 订阅', { sessionId, subscriberCount: session.subscribers.size })
+
+    // 只在 agent 正在运行时才回放缓冲区（busy 状态）
+    // ready 状态下历史消息通过 REST API /sessions/:id/messages 加载，无需回放
+    if (session.info.status === 'busy' && session.replayBuffer.length > 0) {
+      log.debug('回放缓冲区（agent 运行中）', { sessionId, events: session.replayBuffer.length })
+      for (const msg of session.replayBuffer) {
+        try { ws.send(JSON.stringify(msg)) } catch { /* 忽略 */ }
+      }
+    }
   }
 
   unsubscribe(sessionId: string, ws: WebSocket): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
     session.subscribers.delete(ws)
-    this.resetIdleTimer(session)
+    log.debug('WS 取消订阅', { sessionId, subscriberCount: session.subscribers.size })
+    // 注意：不重置空闲计时器 —— session 生命周期与订阅者数量无关
   }
 
-  // 向会话的所有订阅者广播消息
+  // 向会话的所有订阅者广播消息，同时写入回放缓冲区
   broadcast(session: ManagedSession, msg: object): void {
     const text = JSON.stringify(msg)
+    const msgType = (msg as Record<string, unknown>).type
+    if (msgType !== 'text_delta' && msgType !== 'tool_log') {
+      log.debug('广播消息', { sessionId: session.info.id, type: msgType, subscribers: session.subscribers.size })
+    }
+
+    // 写入回放缓冲区（done/error 事件后清空，避免新客户端重复看到旧轮次的输出）
+    if (msgType === 'done' || msgType === 'error' || msgType === 'interrupted') {
+      // 保留这条终止事件，然后在下一轮开始时清空
+      session.replayBuffer.push(msg)
+    } else if (msgType === 'message') {
+      // 新一轮开始（用户消息）：清空上一轮的缓冲区
+      session.replayBuffer = [msg]
+    } else {
+      session.replayBuffer.push(msg)
+      // 超出容量时丢弃最旧的事件（保留最新的）
+      if (session.replayBuffer.length > REPLAY_BUFFER_SIZE) {
+        session.replayBuffer.shift()
+      }
+    }
+
     for (const ws of session.subscribers) {
       try { ws.send(text) } catch { /* 忽略断开的连接 */ }
     }
   }
 
   // 执行用户消息，流式广播事件
-  async runMessage(sessionId: string, content: string): Promise<void> {
+  async runMessage(sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
     if (session.info.status === 'busy') throw new Error('会话正忙，请等待当前任务完成')
@@ -307,7 +346,98 @@ export class SessionManager {
     session.info.lastActiveAt = Date.now()
     this.resetIdleTimer(session)
 
-    log.debug('处理消息', { sessionId, contentLength: content.length })
+    // 新一轮开始：清空上一轮的回放缓冲区，避免新客户端看到旧轮次的输出
+    session.replayBuffer = []
+
+    log.debug('处理消息', { sessionId, contentLength: content.length, attachmentCount: attachments?.length ?? 0 })
+    log.info('开始执行消息', { sessionId, model: session.info.model, permissionMode: session.permissions.getMode(), contentPreview: content.slice(0, 100) })
+
+    // 检测是否包含图片或 PDF 附件
+    const visionMediaTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
+    const hasVisionAttachment = attachments?.some(a => visionMediaTypes.includes(a.mediaType)) ?? false
+
+    // 如果没有显式附件，尝试从消息文本中提取 @filename 引用的图片/PDF
+    const inlineAttachments: Array<{ name: string; data: string; mediaType: string }> = []
+    if (!hasVisionAttachment) {
+      const cwd = session.info.cwd
+      const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|pdf))/gi
+      let match: RegExpExecArray | null
+      while ((match = imagePattern.exec(content)) !== null) {
+        const filename = match[1]
+        const absPath = resolve(cwd, filename)
+        if (existsSync(absPath)) {
+          try {
+            const data = readFileSync(absPath).toString('base64')
+            const ext = extname(filename).toLowerCase()
+            const mediaTypeMap: Record<string, string> = {
+              '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+              '.png': 'image/png', '.gif': 'image/gif',
+              '.webp': 'image/webp', '.pdf': 'application/pdf',
+            }
+            const mediaType = mediaTypeMap[ext] ?? 'image/jpeg'
+            inlineAttachments.push({ name: filename, data, mediaType })
+          } catch (err) {
+            log.warn('读取内联图片失败', { filename, error: String(err) })
+          }
+        }
+      }
+    }
+
+    // 如果仍然没有附件，检测消息是否有视觉意图，并从历史中找最近上传的图片
+    if (!hasVisionAttachment && inlineAttachments.length === 0) {
+      const hasVisionIntent = isVisionIntent(content)
+      if (hasVisionIntent) {
+        const recentImages = extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd)
+        inlineAttachments.push(...recentImages)
+        if (recentImages.length > 0) {
+          log.info('检测到视觉意图，从历史中提取最近图片', { sessionId, count: recentImages.length, files: recentImages.map(a => a.name) })
+        }
+      }
+    }
+
+    const effectiveAttachments = attachments ?? inlineAttachments
+    const hasEffectiveVision = effectiveAttachments.some(a => visionMediaTypes.includes(a.mediaType))
+
+    // 如果有视觉内容，尝试切换到视觉模型
+    let originalProvider: LLMProvider | null = null
+    if (hasEffectiveVision) {
+      const visionProvider = createVisionProviderFromEnv()
+      if (visionProvider) {
+        log.info('检测到图片/PDF，切换到视觉模型', { sessionId, model: visionProvider.model })
+        originalProvider = session.provider  // 保存原始 provider 以便恢复
+        session.engine.setProvider(visionProvider)
+        // 广播模型切换通知
+        this.broadcast(session, { type: 'model_switched', model: visionProvider.model, reason: 'vision_content' })
+      } else {
+        log.warn('检测到图片/PDF，但未配置视觉模型（VISION_MODEL 或 VISION_FALLBACK_N），使用当前模型', { sessionId })
+      }
+    }
+
+    // 构建用户消息（支持多模态内容块）
+    let userMsg: Message | string
+    if (effectiveAttachments.length > 0) {
+      const contentBlocks: ContentBlock[] = []
+      // 先添加文本内容
+      if (content.trim()) {
+        contentBlocks.push({ type: 'text', text: content })
+      }
+      // 添加附件内容块
+      for (const att of effectiveAttachments) {
+        if (visionMediaTypes.includes(att.mediaType)) {
+          contentBlocks.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              mediaType: att.mediaType as ImageSource['mediaType'],
+              data: att.data,
+            },
+          })
+        }
+      }
+      userMsg = { role: 'user', content: contentBlocks }
+    } else {
+      userMsg = content
+    }
 
     // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
     const coordinatorPrompt = getCoordinatorSystemPrompt(content)
@@ -329,22 +459,82 @@ export class SessionManager {
       session.engine.setSystemPrompt(coordinatorPrompt)
     }
 
-    const msgWithCtx = content
+    const msgWithCtx = userMsg
 
+    // 保存 generator 引用，以便在异常时显式关闭，确保 QueryEngine 内部 finally 执行
+    const gen = session.engine.send(msgWithCtx)
+    let hitTurnLimit = false
     try {
-      for await (const ev of session.engine.send(msgWithCtx)) {
+      for await (const ev of gen) {
+        // 检测轮次上限，标记后根据 todo 状态决定处理方式
+        if (ev.type === 'turn_limit') {
+          hitTurnLimit = true
+        }
         // 将 QueryEngine 内部事件格式转换为前端协议格式
         const clientMsg = toClientMessage(ev)
-        if (clientMsg) this.broadcast(session, clientMsg)
+        if (clientMsg) {
+          // 过滤高频事件，避免日志爆炸
+          if (ev.type !== 'text_delta' && ev.type !== 'tool_log') {
+            log.debug('QueryEngine 事件 → 广播', { sessionId, evType: ev.type })
+          }
+          this.broadcast(session, clientMsg)
+        } else if (ev.type !== 'text_delta' && ev.type !== 'tool_log') {
+          log.debug('QueryEngine 事件（无对应客户端消息，跳过广播）', { sessionId, evType: ev.type })
+        }
 
         // 每次工具调用结束后增量保存，减少崩溃时的数据丢失
         if (ev.type === 'tool_end' || ev.type === 'done') {
           saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
         }
       }
+    } catch (err) {
+      log.error('runMessage 事件循环异常', { sessionId, error: String(err) })
+      // 显式关闭 generator，触发 QueryEngine.send() 的 finally 块，释放 running 锁
+      await gen.return(undefined)
+      throw err
     } finally {
+      // 视觉模型切换后恢复原始 provider
+      if (originalProvider) {
+        session.engine.setProvider(originalProvider)
+        log.debug('视觉模型任务完成，恢复原始模型', { sessionId, model: originalProvider.model })
+      }
       session.info.status = 'ready'
       session.info.lastActiveAt = Date.now()
+      // 任务完成后重置空闲计时器，从此刻开始计算空闲时间
+      this.resetIdleTimer(session)
+      log.debug('runMessage 完成', { sessionId })
+    }
+
+    // 达到轮次上限：根据 todo 状态决定自动续跑还是询问用户
+    if (hitTurnLimit) {
+      // 直接从 history 中找最后一次 todo_write 的 input，无需额外读文件
+      let hasUnfinishedTodos = false
+      const history = session.engine.getHistory()
+      for (let i = history.length - 1; i >= 0; i--) {
+        const msg = history[i]
+        if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+        const todoCall = (msg.content as Array<{ type: string; name?: string; input?: unknown }>)
+          .find(b => b.type === 'tool_use' && b.name === 'todo_write')
+        if (todoCall) {
+          const todos = (todoCall.input as { todos?: Array<{ status: string }> })?.todos ?? []
+          hasUnfinishedTodos = todos.some(t => t.status === 'pending' || t.status === 'in_progress')
+          break
+        }
+      }
+
+      if (hasUnfinishedTodos) {
+        // 有未完成的 todo 任务：自动续跑，无需用户干预
+        log.info('轮次上限，todo 未完成，自动续跑', { sessionId })
+        void this.runMessage(sessionId, '请继续执行之前未完成的任务，从中断处接着做。').catch((err) => {
+          log.error('轮次上限续跑失败', { sessionId, error: String(err) })
+          this.broadcast(session, { type: 'error', message: `自动续跑失败: ${String(err)}` })
+        })
+        return
+      } else {
+        // 无 todo 或全部完成（纯对话中执行的任务）：通知前端询问用户是否继续
+        log.info('轮次上限，无未完成 todo，通知前端询问用户', { sessionId })
+        this.broadcast(session, { type: 'continuation_needed' })
+      }
     }
 
     // 后台钩子：记忆提炼 + Skill 自动沉淀（不阻塞响应）
@@ -361,14 +551,21 @@ export class SessionManager {
     let msg: Record<string, unknown>
     try { msg = JSON.parse(raw) } catch { return }
 
+    log.debug('收到客户端消息', { sessionId, type: msg.type, contentLength: typeof msg.content === 'string' ? msg.content.length : undefined })
+
     switch (msg.type) {
-      case 'message':
-        void this.runMessage(sessionId, String(msg.content ?? '')).catch((err) => {
+      case 'message': {
+        // 支持附件（图片/PDF）：attachments 为 Array<{ name, data, mediaType }>
+        const attachments = Array.isArray(msg.attachments)
+          ? (msg.attachments as Array<{ name: string; data: string; mediaType: string }>)
+          : undefined
+        void this.runMessage(sessionId, String(msg.content ?? ''), attachments).catch((err) => {
           log.error('runMessage 未捕获异常', { sessionId, error: String(err) })
           this.broadcast(session, { type: 'error', message: `执行失败: ${String(err)}` })
           session.info.status = 'ready'
         })
         break
+      }
       // 恢复中断的任务：直接注入"继续执行"指令，history 里已有中断上下文
       case 'resume':
         void this.runMessage(sessionId, String(msg.content ?? '请继续执行之前未完成的任务，从中断处接着做。')).catch((err) => {
@@ -418,14 +615,28 @@ export class SessionManager {
 
   private resetIdleTimer(session: ManagedSession): void {
     if (session.idleTimer) clearTimeout(session.idleTimer)
-    if (this.config.idleTimeoutMs === 0) return
+    if (!this.config.idleTimeoutMs) return
 
+    const timeoutMs = this.config.idleTimeoutMs
     session.idleTimer = setTimeout(() => {
-      if (session.subscribers.size === 0) {
-        log.info('会话空闲超时，自动销毁', { sessionId: session.info.id })
-        void this.destroySession(session.info.id)
+      // 空闲超时：基于 lastActiveAt，与订阅者数量无关
+      // agent 运行中（busy）不销毁，等任务完成后下一次计时器触发再判断
+      if (session.info.status === 'busy') {
+        this.resetIdleTimer(session)
+        return
       }
-    }, this.config.idleTimeoutMs)
+      const idleMs = Date.now() - session.info.lastActiveAt
+      if (idleMs >= timeoutMs) {
+        log.info('会话空闲超时，自动销毁', { sessionId: session.info.id, idleMs })
+        void this.destroySession(session.info.id)
+      } else {
+        // 还没到超时时间（可能 lastActiveAt 被更新过），重新调度
+        session.idleTimer = setTimeout(() => {
+          log.info('会话空闲超时，自动销毁', { sessionId: session.info.id })
+          void this.destroySession(session.info.id)
+        }, timeoutMs - idleMs)
+      }
+    }, timeoutMs)
   }
 }
 
@@ -490,4 +701,90 @@ function toClientMessage(ev: StreamEvent): object | null {
     default:
       return null
   }
+}
+
+// ── 视觉意图检测 ──────────────────────────────────────────────────────────────
+// 判断用户消息是否在请求分析/查看图片或 PDF
+function isVisionIntent(message: string): boolean {
+  const VISION_PATTERNS = [
+    // 中文：分析/解析/识别/描述/看/读/理解 + 图片/图像/照片/截图/PDF
+    /分析.{0,10}(图|照片|截图|图片|图像|pdf)/i,
+    /解析.{0,10}(图|照片|截图|图片|图像|pdf)/i,
+    /识别.{0,10}(图|照片|截图|图片|图像)/i,
+    /描述.{0,10}(图|照片|截图|图片|图像)/i,
+    /(看|读|理解|查看|检查).{0,10}(图|照片|截图|图片|图像|pdf)/i,
+    /这(张|幅|个|份).{0,5}(图|照片|截图|图片|图像|pdf)/i,
+    /图(片|像|中|上|里).{0,20}(是|有|写|显示|包含)/i,
+    /图(片|像)是什么/i,
+    /图(片|像)里/i,
+    /照片(里|中|上)/i,
+    /截图(里|中|上)/i,
+    /pdf(里|中|内容)/i,
+    // 英文
+    /analyze.{0,10}(image|photo|picture|screenshot|pdf)/i,
+    /describe.{0,10}(image|photo|picture|screenshot)/i,
+    /what.{0,10}(image|photo|picture|screenshot)/i,
+    /read.{0,10}(image|photo|picture|pdf)/i,
+    /this (image|photo|picture|screenshot|pdf)/i,
+  ]
+  return VISION_PATTERNS.some(p => p.test(message))
+}
+
+// ── 从历史消息中提取最近上传的图片文件 ──────────────────────────────────────
+// 扫描历史中最近的用户消息，找到 @filename 引用的图片，读取文件内容
+function extractRecentImagesFromHistory(
+  history: readonly import('../core/QueryEngine.js').Message[],
+  cwd: string,
+): Array<{ name: string; data: string; mediaType: string }> {
+  const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf']
+  const MEDIA_TYPE_MAP: Record<string, string> = {
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.png': 'image/png', '.gif': 'image/gif',
+    '.webp': 'image/webp', '.pdf': 'application/pdf',
+  }
+  const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|pdf))/gi
+
+  // 从最新消息往前扫描，找到第一批图片引用（最近一次上传的图片）
+  const result: Array<{ name: string; data: string; mediaType: string }> = []
+  const seen = new Set<string>()
+
+  // 只扫描最近 20 条消息，避免性能问题
+  const recentHistory = history.slice(-20)
+  for (let i = recentHistory.length - 1; i >= 0; i--) {
+    const msg = recentHistory[i]
+    if (msg.role !== 'user') continue
+
+    const text = typeof msg.content === 'string'
+      ? msg.content
+      : (msg.content as Array<{ type: string; text?: string }>)
+          .filter(b => b.type === 'text')
+          .map(b => b.text ?? '')
+          .join('')
+
+    let match: RegExpExecArray | null
+    imagePattern.lastIndex = 0
+    while ((match = imagePattern.exec(text)) !== null) {
+      const filename = match[1]
+      if (seen.has(filename)) continue
+      seen.add(filename)
+
+      const ext = extname(filename).toLowerCase()
+      if (!IMAGE_EXTS.includes(ext)) continue
+
+      const absPath = resolve(cwd, filename)
+      if (!existsSync(absPath)) continue
+
+      try {
+        const data = readFileSync(absPath).toString('base64')
+        result.push({ name: filename, data, mediaType: MEDIA_TYPE_MAP[ext] ?? 'image/jpeg' })
+      } catch {
+        // 文件读取失败，跳过
+      }
+    }
+
+    // 找到图片就停止（只取最近一次上传的那批）
+    if (result.length > 0) break
+  }
+
+  return result
 }

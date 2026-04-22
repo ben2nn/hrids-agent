@@ -32,5 +32,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    // 生产构建时移除所有 console.* 调用，开发环境保留 debug 日志
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        drop_console: false,
+        drop_debugger: false,
+      },
+    },
   },
 })

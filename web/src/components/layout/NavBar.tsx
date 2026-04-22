@@ -201,11 +201,13 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
     return client.getStatus()
   })()
 
+  const sortedSessions = [...sessions].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+
   const filteredSessions = searchQuery.trim()
-    ? sessions.filter((s) =>
+    ? sortedSessions.filter((s) =>
         (s.title || s.id).toLowerCase().includes(searchQuery.toLowerCase()),
       )
-    : sessions
+    : sortedSessions
 
   // ── 收起状态（图标栏） ─────────────────────────────────────────────────
   if (collapsed) {

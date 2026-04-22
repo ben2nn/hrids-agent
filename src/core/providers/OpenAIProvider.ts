@@ -146,15 +146,41 @@ function toOAIMessages(messages: ChatMessage[], systemPrompt: string): OAIMessag
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
           })
         } else {
-          // user 消息中的 tool_result
-          const toolResults = (msg.content as Array<{ type: string; tool_use_id?: string; content?: string }>)
-            .filter(b => b.type === 'tool_result')
-          for (const tr of toolResults) {
-            result.push({
-              role: 'tool',
-              content: tr.content ?? '',
-              tool_call_id: tr.tool_use_id ?? '',
-            })
+          // user 消息：处理 tool_result 和图片内容块
+          const blocks = msg.content as Array<{ type: string; tool_use_id?: string; content?: string; source?: { type: string; mediaType?: string; data?: string; url?: string } }>
+
+          // 检查是否有图片块
+          const imageBlocks = blocks.filter(b => b.type === 'image')
+          const toolResults = blocks.filter(b => b.type === 'tool_result')
+
+          if (imageBlocks.length > 0) {
+            // 包含图片：构建多模态内容数组（OpenAI vision 格式）
+            const multiContent: Array<unknown> = []
+            for (const b of blocks) {
+              if (b.type === 'text') {
+                multiContent.push({ type: 'text', text: (b as { type: 'text'; text?: string }).text ?? '' })
+              } else if (b.type === 'image' && b.source) {
+                if (b.source.type === 'base64' && b.source.data) {
+                  multiContent.push({
+                    type: 'image_url',
+                    image_url: { url: `data:${b.source.mediaType ?? 'image/jpeg'};base64,${b.source.data}` },
+                  })
+                } else if (b.source.type === 'url' && b.source.url) {
+                  multiContent.push({ type: 'image_url', image_url: { url: b.source.url } })
+                }
+              }
+            }
+            if (multiContent.length > 0) {
+              result.push({ role: 'user', content: multiContent as unknown as string })
+            }
+          } else if (toolResults.length > 0) {
+            for (const tr of toolResults) {
+              result.push({
+                role: 'tool',
+                content: tr.content ?? '',
+                tool_call_id: tr.tool_use_id ?? '',
+              })
+            }
           }
         }
       }
