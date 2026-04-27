@@ -169,9 +169,20 @@ function parseWebSearchResult(raw: string): SearchResultItem[] | null {
   return items.length > 0 ? items : null
 }
 
-function WebSearchResult({ result }: { result: unknown }) {
+/** 从 URL 提取可读域名，如 "docs.example.com" */
+function extractDomain(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, '') } catch { return '' }
+}
+
+/** 根据域名返回一个简单的 favicon URL */
+function faviconUrl(domain: string): string {
+  return `https://www.google.com/s2/favicons?domain=${domain}&sz=16`
+}
+
+function WebSearchResult({ result, query }: { result: unknown; query?: string }) {
   const raw = typeof result === 'string' ? result : JSON.stringify(result)
   const items = parseWebSearchResult(raw)
+
   if (!items) {
     return (
       <p className="text-xs leading-relaxed whitespace-pre-wrap break-words" style={{ color: 'var(--text-secondary)' }}>
@@ -179,24 +190,53 @@ function WebSearchResult({ result }: { result: unknown }) {
       </p>
     )
   }
+
   return (
     <div className="flex flex-col gap-1.5">
-      {items.map((item, i) => (
-        <div key={i} className="flex gap-2 py-1.5 border-b last:border-b-0" style={{ borderColor: 'var(--border-subtle)' }}>
-          <span className="text-[10px] tabular-nums mt-0.5 shrink-0 w-3" style={{ color: 'var(--text-muted)' }}>{i + 1}</span>
-          <div className="flex flex-col gap-0.5 min-w-0">
-            <span className="text-xs font-medium leading-snug" style={{ color: 'var(--text-primary)' }}>{item.title}</span>
-            {item.snippet && <span className="text-[11px] leading-relaxed line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{item.snippet}</span>}
-            {item.url && (
-              <a href={item.url} target="_blank" rel="noopener noreferrer"
-                className="text-[10px] truncate hover:underline"
-                style={{ color: 'var(--accent)' }} title={item.url}>
-                {item.url}
-              </a>
-            )}
+      {/* 结果数量 */}
+      <p className="text-[10px] mb-0.5" style={{ color: 'var(--text-muted)' }}>
+        共 {items.length} 条{query ? `，关键词：${query}` : ''}
+      </p>
+
+      {/* 结果列表 */}
+      {items.map((item, i) => {
+        const domain = extractDomain(item.url)
+        return (
+          <div key={i} className="flex gap-2.5 rounded-md px-2.5 py-2"
+            style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border-subtle)' }}>
+            {/* 序号 */}
+            <span className="text-[10px] tabular-nums shrink-0 mt-0.5 w-3 text-right" style={{ color: 'var(--text-muted)' }}>{i + 1}</span>
+            {/* 内容 */}
+            <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+              {/* 标题 */}
+              {item.url ? (
+                <a href={item.url} target="_blank" rel="noopener noreferrer"
+                  className="text-[12px] font-medium leading-snug hover:underline break-words"
+                  style={{ color: 'var(--text-primary)' }} title={item.url}>
+                  {item.title}
+                </a>
+              ) : (
+                <span className="text-[12px] font-medium leading-snug break-words" style={{ color: 'var(--text-primary)' }}>{item.title}</span>
+              )}
+              {/* 摘要 */}
+              {item.snippet && (
+                <p className="text-[11px] leading-relaxed line-clamp-2" style={{ color: 'var(--text-secondary)' }}>
+                  {item.snippet}
+                </p>
+              )}
+              {/* 来源：favicon + 域名 */}
+              {domain && (
+                <div className="flex items-center gap-1 mt-0.5">
+                  <img src={faviconUrl(domain)} alt="" width={11} height={11}
+                    className="shrink-0 rounded-sm opacity-60"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }} />
+                  <span className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>{domain}</span>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -205,25 +245,49 @@ function WebSearchResult({ result }: { result: unknown }) {
 
 function WebFetchResult({ result, input }: { result: unknown; input: unknown }) {
   const raw = typeof result === 'string' ? result : JSON.stringify(result)
-  const url = (input && typeof input === 'object') ? (input as Record<string, unknown>).url as string : ''
-  const isTruncated = raw.includes('[内容已截断，共')
-  const bodyEnd = raw.lastIndexOf('\n\n[内容已截断')
+  const inp = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
+  const url = String(inp.url ?? '')
+  const domain = (() => { try { return new URL(url).hostname.replace(/^www\./, '') } catch { return '' } })()
+
+  // 截断提示兼容中英文
+  const truncateMatch = raw.match(/\[内容已截断[，,]共\s*([\d,，]+)\s*字符\]/)
+  const isTruncated = !!truncateMatch
+  const totalChars = truncateMatch ? parseInt(truncateMatch[1].replace(/[,，]/g, '')) : raw.length
+  const bodyEnd = raw.search(/\n\n\[内容已截断/)
   const body = bodyEnd > 0 ? raw.slice(0, bodyEnd) : raw
+
+  // 粗略判断内容类型
+  const isHtml = body.trimStart().startsWith('<')
+  const previewText = body.slice(0, 800)
+
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 flex-wrap">
-        {url && (
-          <a href={url} target="_blank" rel="noopener noreferrer"
-            className="text-[11px] truncate max-w-[280px] hover:underline"
-            style={{ color: 'var(--accent)' }} title={url}>{url}</a>
+      {/* 来源信息行 */}
+      <div className="flex items-center gap-2 flex-wrap rounded-md px-2.5 py-2"
+        style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border-subtle)' }}>
+        {domain && (
+          <img src={`https://www.google.com/s2/favicons?domain=${domain}&sz=16`} alt="" width={13} height={13}
+            className="shrink-0 rounded-sm opacity-70"
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }} />
         )}
-        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-          {raw.length.toLocaleString()} 字符{isTruncated ? '（已截断）' : ''}
+        {url ? (
+          <a href={url} target="_blank" rel="noopener noreferrer"
+            className="text-[11px] truncate flex-1 min-w-0 hover:underline"
+            style={{ color: 'var(--accent)' }} title={url}>{url}</a>
+        ) : (
+          <span className="flex-1" />
+        )}
+        <span className="text-[10px] shrink-0 tabular-nums" style={{ color: 'var(--text-muted)' }}>
+          {isTruncated
+            ? `${body.length.toLocaleString()} / ${totalChars.toLocaleString()} 字符（已截断）`
+            : `${raw.length.toLocaleString()} 字符`}
         </span>
       </div>
-      <pre className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words max-h-40 overflow-y-auto rounded-md px-2.5 py-2"
-        style={{ color: 'var(--text-secondary)', background: 'rgba(0,0,0,0.15)' }}>
-        {body.slice(0, 600)}{body.length > 600 ? `\n…（共 ${body.length.toLocaleString()} 字符）` : ''}
+
+      {/* 内容预览 */}
+      <pre className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words max-h-48 overflow-y-auto rounded-md px-2.5 py-2"
+        style={{ color: isHtml ? 'var(--text-muted)' : 'var(--text-secondary)', background: 'rgba(0,0,0,0.15)' }}>
+        {previewText}{body.length > 800 ? `\n…（共 ${body.length.toLocaleString()} 字符）` : ''}
       </pre>
     </div>
   )
@@ -1064,6 +1128,7 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
   const [diffOpen, setDiffOpen] = useState(false)
   const { label, iconName } = resolveToolMeta(toolName)
   const summary = summarizeInput(toolName, input)
+
   const isAskUser = toolName === 'ask_user'
   const isInteractive = !(isAskUser && status === 'pending')
   const visibleLogs = logs.slice(0, 50)
@@ -1208,8 +1273,8 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
             </div>
           ) : (
             <>
-              {/* 输入参数（glob / grep / todo 不显示原始 JSON） */}
-              {toolName !== 'glob' && toolName !== 'grep' && toolName !== 'todo_write' && toolName !== 'todo_read' && (
+              {/* 输入参数（glob / grep / todo / web_search / web_fetch 不显示原始 JSON） */}
+              {toolName !== 'glob' && toolName !== 'grep' && toolName !== 'todo_write' && toolName !== 'todo_read' && toolName !== 'web_search' && toolName !== 'web_fetch' && (
               <div className="pt-2.5">
                 <p className="text-[10px] uppercase tracking-widest mb-1.5 font-medium" style={{ color: 'var(--text-muted)' }}>输入</p>
                 <pre className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words rounded-md px-2.5 py-2 overflow-x-auto"
@@ -1223,9 +1288,9 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
               {result !== undefined && (
                 <div>
                   {toolName !== 'grep' && toolName !== 'glob' && toolName !== 'todo_write' && toolName !== 'todo_read' && (
-                    <p className="text-[10px] uppercase tracking-widest mb-1.5 font-medium" style={{ color: 'var(--text-muted)' }}>结果</p>
+                    <p className="text-[10px] uppercase tracking-widest mb-1.5 font-medium" style={{ color: 'var(--text-muted)' }}></p>
                   )}
-                  {toolName === 'web_search'                    ? <WebSearchResult result={result} /> :
+                  {toolName === 'web_search'                    ? <WebSearchResult result={result} query={String((input as Record<string, unknown>)?.query ?? '')} /> :
                    toolName === 'web_fetch'                     ? <WebFetchResult result={result} input={input} /> :
                    toolName === 'glob'                          ? <GlobResult result={result} input={input} /> :
                    toolName === 'grep'                          ? <GrepResult result={result} input={input} /> :
