@@ -89,7 +89,14 @@ function summarizeInput(toolName: string, input: unknown): string {
       return cmd.length > 60 ? cmd.slice(0, 60) + '…' : cmd
     }
     case 'ask_user':    return String(inp.question ?? '')
-    case 'todo_write':  return ''
+    case 'todo_write': {
+      const todos = Array.isArray(inp.todos) ? inp.todos as Array<Record<string, unknown>> : []
+      if (todos.length === 0) return ''
+      const done = todos.filter(t => t.status === 'completed').length
+      const active = todos.filter(t => t.status === 'in_progress').length
+      return `${todos.length} 项 · ${done} 已完成${active ? ` · ${active} 进行中` : ''}`
+    }
+    case 'todo_read':   return ''
     default:            return ''
   }
 }
@@ -452,6 +459,127 @@ function GrepResult({ result, input }: { result: unknown; input: unknown }) {
                   </span>
                 </div>
               ))}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─── todo_write / todo_read 任务列表展示 ──────────────────────────────────
+
+interface TodoItem {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  priority: 'high' | 'medium' | 'low'
+}
+
+function parseTodos(input: unknown, result: unknown): TodoItem[] | null {
+  // 优先从 input.todos 解析（最准确）
+  if (input && typeof input === 'object') {
+    const inp = input as Record<string, unknown>
+    if (Array.isArray(inp.todos)) {
+      return inp.todos.map((t: Record<string, unknown>) => ({
+        id: String(t.id ?? ''),
+        content: String(t.content ?? t.task ?? ''),
+        status: (t.status as TodoItem['status']) ?? 'pending',
+        priority: (t.priority as TodoItem['priority']) ?? 'medium',
+      }))
+    }
+  }
+  // 降级：从 result 文本解析
+  const raw = typeof result === 'string' ? result : JSON.stringify(result)
+  const lines = raw.split('\n').filter(l => /^[✓▸○]/.test(l.trim()))
+  if (lines.length === 0) return null
+  return lines.map((line, i) => {
+    const completed = line.includes('✓')
+    const inProgress = line.includes('▸')
+    const status: TodoItem['status'] = completed ? 'completed' : inProgress ? 'in_progress' : 'pending'
+    const priorityMatch = line.match(/\[(high|medium|low)\]/)
+    const priority = (priorityMatch?.[1] as TodoItem['priority']) ?? 'medium'
+    const content = line.replace(/^[✓▸○]\s*/, '').replace(/\[(high|medium|low)\]\s*/, '').trim()
+    return { id: String(i + 1), content, status, priority }
+  })
+}
+
+const PRIORITY_LABEL: Record<string, string> = { high: '高', medium: '中', low: '低' }
+const PRIORITY_COLOR: Record<string, string> = {
+  high: 'var(--error, #f87171)',
+  medium: 'var(--warning, #fb923c)',
+  low: 'var(--text-muted)',
+}
+
+function TodoResult({ input, result }: { input: unknown; result: unknown }) {
+  const todos = parseTodos(input, result)
+  if (!todos || todos.length === 0) return <GenericResult result={result} />
+
+  const completed = todos.filter(t => t.status === 'completed').length
+  const inProgress = todos.filter(t => t.status === 'in_progress').length
+  const pending = todos.filter(t => t.status === 'pending').length
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* 进度统计 */}
+      <div className="flex items-center gap-3 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+        <span>{todos.length} 项任务</span>
+        {completed > 0 && <span style={{ color: 'var(--success)' }}>✓ {completed} 已完成</span>}
+        {inProgress > 0 && <span style={{ color: 'var(--accent)' }}>▸ {inProgress} 进行中</span>}
+        {pending > 0 && <span>{pending} 待处理</span>}
+      </div>
+
+      {/* 进度条 */}
+      {todos.length > 0 && (
+        <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+          <div
+            className="h-full rounded-full transition-all"
+            style={{ width: `${Math.round((completed / todos.length) * 100)}%`, background: 'var(--success)' }}
+          />
+        </div>
+      )}
+
+      {/* 任务列表 */}
+      <div className="rounded-md overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
+        {todos.map((todo) => {
+          const isDone = todo.status === 'completed'
+          const isActive = todo.status === 'in_progress'
+          return (
+            <div
+              key={todo.id}
+              className="flex items-start gap-2.5 px-2.5 py-2 border-b last:border-b-0"
+              style={{ borderColor: 'var(--border-subtle)', opacity: isDone ? 0.55 : 1 }}
+            >
+              {/* 状态图标 */}
+              <span className="shrink-0 mt-0.5 text-[12px] leading-none select-none" style={{
+                color: isDone ? 'var(--success)' : isActive ? 'var(--accent)' : 'var(--text-muted)'
+              }}>
+                {isDone ? '✓' : isActive ? '▸' : '○'}
+              </span>
+
+              {/* 内容 */}
+              <span
+                className="text-[11px] leading-relaxed flex-1 min-w-0"
+                style={{
+                  color: isDone ? 'var(--text-muted)' : 'var(--text-primary)',
+                  textDecoration: isDone ? 'line-through' : 'none',
+                }}
+              >
+                {todo.content}
+              </span>
+
+              {/* 优先级标签 */}
+              <span
+                className="shrink-0 text-[9px] font-medium px-1 py-0.5 rounded"
+                style={{
+                  color: PRIORITY_COLOR[todo.priority],
+                  border: `1px solid ${PRIORITY_COLOR[todo.priority]}`,
+                  opacity: 0.75,
+                  lineHeight: 1,
+                }}
+              >
+                {PRIORITY_LABEL[todo.priority]}
+              </span>
             </div>
           )
         })}
@@ -1080,8 +1208,8 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
             </div>
           ) : (
             <>
-              {/* 输入参数（glob / grep 不显示原始 JSON） */}
-              {toolName !== 'glob' && toolName !== 'grep' && (
+              {/* 输入参数（glob / grep / todo 不显示原始 JSON） */}
+              {toolName !== 'glob' && toolName !== 'grep' && toolName !== 'todo_write' && toolName !== 'todo_read' && (
               <div className="pt-2.5">
                 <p className="text-[10px] uppercase tracking-widest mb-1.5 font-medium" style={{ color: 'var(--text-muted)' }}>输入</p>
                 <pre className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words rounded-md px-2.5 py-2 overflow-x-auto"
@@ -1094,13 +1222,14 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
               {/* 执行结果 */}
               {result !== undefined && (
                 <div>
-                  {toolName !== 'grep' && toolName !== 'glob' && (
+                  {toolName !== 'grep' && toolName !== 'glob' && toolName !== 'todo_write' && toolName !== 'todo_read' && (
                     <p className="text-[10px] uppercase tracking-widest mb-1.5 font-medium" style={{ color: 'var(--text-muted)' }}>结果</p>
                   )}
-                  {toolName === 'web_search' ? <WebSearchResult result={result} /> :
-                   toolName === 'web_fetch'  ? <WebFetchResult result={result} input={input} /> :
-                   toolName === 'glob'       ? <GlobResult result={result} input={input} /> :
-                   toolName === 'grep'       ? <GrepResult result={result} input={input} /> :
+                  {toolName === 'web_search'                    ? <WebSearchResult result={result} /> :
+                   toolName === 'web_fetch'                     ? <WebFetchResult result={result} input={input} /> :
+                   toolName === 'glob'                          ? <GlobResult result={result} input={input} /> :
+                   toolName === 'grep'                          ? <GrepResult result={result} input={input} /> :
+                   toolName === 'todo_write' || toolName === 'todo_read' ? <TodoResult input={input} result={result} /> :
                    <GenericResult result={result} />}
                 </div>
               )}
