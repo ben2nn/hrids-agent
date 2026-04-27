@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import { z } from 'zod';
 import { auditLog } from '../core/audit.js';
+import { checkWritePath } from '../core/pathSafety.js';
 import { getGlobalCwd } from './BashTool.js';
 const inputSchema = z.object({
     path: z.string().describe('要编辑的文件路径'),
@@ -19,9 +20,19 @@ export const FileEditTool = {
     getFilePath(input) {
         return input.path;
     },
+    getRuleContent(input) {
+        return input.path;
+    },
     async execute(input) {
+        const cwd = getGlobalCwd();
+        // 路径安全检查
+        const safety = checkWritePath(input.path, cwd);
+        if (!safety.safe) {
+            auditLog({ action: 'file_edit', resource: input.path, result: 'error', details: { error: safety.reason } });
+            return { type: 'error', message: safety.reason };
+        }
         // 相对路径基于当前工作目录（persistentCwd）解析，绝对路径保持不变
-        const filePath = resolve(getGlobalCwd(), input.path);
+        const filePath = resolve(cwd, input.path);
         if (!existsSync(filePath)) {
             return { type: 'error', message: `文件不存在: ${filePath}` };
         }

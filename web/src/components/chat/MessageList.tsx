@@ -20,16 +20,16 @@ interface MessageListProps {
 
 type VirtualEntry =
   | { kind: 'user'; message: DisplayMessage }
-  | { kind: 'agent-turn'; messages: DisplayMessage[] }
+  | { kind: 'agent-turn'; messages: DisplayMessage[]; cronDescription?: string }
   | { kind: 'single'; message: DisplayMessage }   // system / error / compact
   | { kind: 'streaming' }
 
 // ─── 消息分组逻辑 ──────────────────────────────────────────────────────────
-// 将扁平的消息列表转换为虚拟列表条目：
+// 将扁平的消息列表转换为虚拟列表条目，按 requestId 分组：
 // - user 消息：独立条目
-// - assistant 消息 + 紧随其后的连续 tool 消息：合并为一个 agent-turn 条目
-// - 单独的 tool 消息（前面没有 assistant）：独立的 agent-turn 条目
-// - system / error / compact：独立条目（不渲染或特殊渲染）
+// - 同一 requestId 的 assistant 和 tool 消息：合并为一个 agent-turn 条目
+// - cron_trigger 消息：不单独显示，将描述附加到紧随其后的 agent-turn
+// - compact / error / system：独立条目
 
 function groupMessages(messages: DisplayMessage[]): VirtualEntry[] {
   const entries: VirtualEntry[] = []
@@ -38,39 +38,82 @@ function groupMessages(messages: DisplayMessage[]): VirtualEntry[] {
   while (i < messages.length) {
     const msg = messages[i]
 
+    // user 消息：独立条目
     if (msg.type === 'user') {
       entries.push({ kind: 'user', message: msg })
       i++
       continue
     }
 
-    if (msg.type === 'assistant' || msg.type === 'tool') {
-      // 以当前消息为起点，收集一个 agent-turn：
-      // - 如果是 assistant，先收它，再收紧随其后的连续 tool
-      // - 如果是 tool（前面没有 assistant），直接收连续 tool
-      const turnMsgs: DisplayMessage[] = []
-
-      if (msg.type === 'assistant') {
-        turnMsgs.push(msg)
-        i++
-        // 收集紧随其后的连续 tool 消息
-        while (i < messages.length && messages[i].type === 'tool') {
-          turnMsgs.push(messages[i])
-          i++
-        }
-      } else {
-        // 连续 tool 消息（没有前置 assistant）
-        while (i < messages.length && messages[i].type === 'tool') {
-          turnMsgs.push(messages[i])
-          i++
-        }
-      }
-
-      entries.push({ kind: 'agent-turn', messages: turnMsgs })
+    // request_start 消息：跳过，不显示
+    if (msg.type === 'request_start') {
+      i++
       continue
     }
 
-    // system / error / compact
+    // cron_trigger 消息：记录描述，附加到下一个 agent-turn（实时消息路径）
+    if (msg.type === 'cron_trigger') {
+      const cronDescription = msg.description
+      i++
+      // 收集紧随其后同一 requestId 的 assistant/tool 消息
+      if (i < messages.length && (messages[i].type === 'assistant' || messages[i].type === 'tool')) {
+        const requestId = (messages[i] as { requestId?: string }).requestId
+        const turnMsgs: DisplayMessage[] = []
+        while (
+          i < messages.length &&
+          (messages[i].type === 'assistant' || messages[i].type === 'tool') &&
+          (messages[i] as { requestId?: string }).requestId === requestId
+        ) {
+          turnMsgs.push(messages[i])
+          i++
+        }
+        entries.push({ kind: 'agent-turn', messages: turnMsgs, cronDescription })
+      }
+      continue
+    }
+
+    // assistant 或 tool 消息：按 requestId 分组
+    // 历史消息路径：通过消息自身的 isCron/cronDescription 字段识别定时任务
+    if (msg.type === 'assistant' || msg.type === 'tool') {
+      const requestId = msg.requestId
+      const turnMsgs: DisplayMessage[] = []
+
+      while (
+        i < messages.length &&
+        (messages[i].type === 'assistant' || messages[i].type === 'tool') &&
+        (messages[i] as { requestId?: string }).requestId === requestId
+      ) {
+        turnMsgs.push(messages[i])
+        i++
+      }
+
+      // 检测是否为 cron 触发：任意一条消息带 isCron 标记即可
+      const isCron = turnMsgs.some((m) => (m as { isCron?: boolean }).isCron)
+      const cronDescription = isCron
+        ? turnMsgs.reduce<string | undefined>((acc, m) => {
+            if (acc) return acc
+            return (m as { cronDescription?: string }).cronDescription
+          }, undefined)
+        : undefined
+
+      entries.push({ kind: 'agent-turn', messages: turnMsgs, ...(isCron ? { cronDescription: cronDescription ?? '' } : {}) })
+      continue
+    }
+
+    // compact 消息：归档分隔线
+    if (msg.type === 'compact') {
+      entries.push({ kind: 'single', message: msg })
+      i++
+      if (!(msg as { expanded?: boolean }).expanded) {
+        const prefix = `arc-msg-${msg.id}-`
+        while (i < messages.length && (messages[i].id ?? '').startsWith(prefix)) {
+          i++
+        }
+      }
+      continue
+    }
+
+    // system / error / 其他 single 类型
     entries.push({ kind: 'single', message: msg })
     i++
   }
@@ -228,9 +271,8 @@ export function MessageList({ sessionId }: MessageListProps) {
 
           // ── 独立流式占位 ──────────────────────────────────────────────
           if (isStreamingItem) {
-            const lastEnt = entries.length > 0 ? entries[entries.length - 1] : null
-            // 前一个是 agent-turn 时不显示头像（连续回合）
-            const streamingShowAvatar = !lastEnt || lastEnt.kind !== 'agent-turn'
+            // 流式输出始终显示头像（独立的新回合）
+            const streamingShowAvatar = true
 
             return (
               <div
@@ -270,11 +312,10 @@ export function MessageList({ sessionId }: MessageListProps) {
           if (!entry) return null
 
           // ── 判断是否显示头像 ────────────────────────────────────────
-          // 连续的 agent-turn 只在第一个显示头像
+          // 每个 agent-turn 都独立显示头像（不同 requestId 不合并）
           let showAvatar = false
           if (entry.kind === 'agent-turn') {
-            const prevEntry = virtualItem.index > 0 ? entries[virtualItem.index - 1] : null
-            showAvatar = !prevEntry || prevEntry.kind !== 'agent-turn'
+            showAvatar = true
           }
 
           return (
@@ -296,6 +337,7 @@ export function MessageList({ sessionId }: MessageListProps) {
                   toolCardsMap={toolCardsMap}
                   sessionId={sessionId}
                   showAvatar={showAvatar}
+                  cronDescription={entry.cronDescription}
                 />
               ) : (entry.kind === 'user' || entry.kind === 'single') ? (
                 <MessageItem

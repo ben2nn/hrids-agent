@@ -7,9 +7,11 @@ import { z } from 'zod'
 import type { ToolDef, ToolContext } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { logger } from '../core/logger.js'
-import { getGlobalCwd, setGlobalCwd } from './BashTool.js'
+import { getGlobalCwd, setGlobalCwd } from '../core/cwd.js'
 
 const log = logger.child({ component: 'powershell-tool' })
+
+import { isDangerousRemovalPath } from '../core/pathSafety.js'
 
 const inputSchema = z.object({
   command: z.string().describe('要执行的 PowerShell 命令'),
@@ -29,14 +31,25 @@ const BLOCKED_PATTERNS = [
   /shutdown\s+\/[srh]/i,                            // cmd 风格关机
 ]
 
+// 提取 Remove-Item 命令的目标路径，用于危险路径检测
+function extractRemovalTarget(command: string): string | null {
+  const match = command.match(/Remove-Item\s+(?:-[a-zA-Z]+\s+)*(.+?)(?:\s+-|$)/i)
+  if (match) return match[1].trim().replace(/^["']|["']$/g, '')
+  return null
+}
+
 export const PowerShellTool: ToolDef<typeof inputSchema> = {
-  name: 'powershell',
-  description: '在 Windows PowerShell 环境中执行命令，返回 stdout 和 stderr。仅适用于 Windows 系统。',
+  name: 'bash',  // 对外统一命名为 bash，LLM 无需感知平台差异；实际由 powershell.exe 执行
+  description: '执行 shell 命令（当前平台：Windows PowerShell），返回 stdout 和 stderr。',
   inputSchema,
   readonly: false,
 
   describe(input) {
     return `执行 PowerShell 命令: ${input.command}`
+  },
+
+  getRuleContent(input) {
+    return input.command
   },
 
   async checkPermission(input) {
@@ -45,15 +58,15 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
         return { granted: false, reason: `命令包含危险模式: ${pattern}` }
       }
     }
+    // 危险删除路径检测
+    const removalTarget = extractRemovalTarget(input.command)
+    if (removalTarget && isDangerousRemovalPath(removalTarget)) {
+      return { granted: false, reason: `危险的删除目标路径: ${removalTarget}` }
+    }
     return { granted: true }
   },
 
   async execute(input, ctx?: ToolContext) {
-    const permCheck = await PowerShellTool.checkPermission!(input)
-    if (!permCheck.granted) {
-      return { type: 'error', message: permCheck.reason }
-    }
-
     const persistentCwd = getGlobalCwd()
 
     // 记录审计日志

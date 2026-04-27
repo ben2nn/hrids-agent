@@ -22,37 +22,145 @@ function saveCrons(crons) {
         mkdirSync(dir, { recursive: true });
     writeFileSync(CRON_FILE, JSON.stringify(crons, null, 2), 'utf-8');
 }
-// ── 简单 cron 表达式解析（计算下次执行时间）────────────────────────────────
-function parseNextRun(expression) {
-    // 支持常用格式：分 时 日 月 周
-    // 这里用简单估算，生产环境建议引入 cron-parser
+// ── cron 表达式解析（计算下次执行时间）────────────────────────────────────
+//
+// 支持格式（5位：分 时 日 月 周）：
+//   固定值：  "0 9 * * *"      每天 09:00
+//   步进值：  "*/30 * * * *"   每 30 分钟
+//             "0 */2 * * *"    每 2 小时
+//   范围：    "0 9 * * 1-5"    工作日 09:00
+//   列表：    "0 9 * * 1,3,5"  周一三五 09:00
+//   具体日期："0 15 15 4 *"    4 月 15 日 15:00
+/** 解析单个 cron 字段，返回该字段在 [min, max] 范围内、大于 current 的最小合法值。
+ *  若当前值已合法则返回 current，否则返回下一个合法值（可能需要进位）。
+ *  返回 null 表示该字段无法在当前范围内满足（需要进位到上一级字段）。
+ */
+function nextValueInField(field, current, min, max) {
+    // 收集所有合法值
+    const valid = [];
+    for (const part of field.split(',')) {
+        if (part === '*') {
+            for (let i = min; i <= max; i++)
+                valid.push(i);
+        }
+        else if (part.startsWith('*/')) {
+            const step = parseInt(part.slice(2), 10);
+            if (isNaN(step) || step <= 0)
+                continue;
+            for (let i = min; i <= max; i += step)
+                valid.push(i);
+        }
+        else if (part.includes('/')) {
+            const [rangeStr, stepStr] = part.split('/');
+            const step = parseInt(stepStr, 10);
+            const [rangeMin, rangeMax] = (rangeStr ?? '').includes('-')
+                ? (rangeStr ?? '').split('-').map(Number)
+                : [parseInt(rangeStr ?? '', 10), max];
+            if (isNaN(step) || step <= 0)
+                continue;
+            for (let i = (rangeMin ?? min); i <= (rangeMax ?? max); i += step)
+                valid.push(i);
+        }
+        else if (part.includes('-')) {
+            const [lo, hi] = part.split('-').map(Number);
+            for (let i = (lo ?? min); i <= (hi ?? max); i++)
+                valid.push(i);
+        }
+        else {
+            const v = parseInt(part, 10);
+            if (!isNaN(v))
+                valid.push(v);
+        }
+    }
+    // 去重排序
+    const sorted = [...new Set(valid)].sort((a, b) => a - b);
+    if (sorted.length === 0)
+        return null;
+    // 找到 >= current 的最小值
+    const found = sorted.find(v => v >= current);
+    return found ?? null;
+}
+function parseNextRun(expression, fromTime) {
     try {
         const parts = expression.trim().split(/\s+/);
         if (parts.length !== 5)
             return undefined;
-        const now = new Date();
-        const next = new Date(now);
-        next.setSeconds(0, 0);
-        next.setMinutes(next.getMinutes() + 1); // 至少1分钟后
-        // 简单处理：只解析固定值（非 * 的情况）
-        const [min, hour, , , weekday] = parts;
-        if (hour !== '*' && !isNaN(Number(hour))) {
-            const h = Number(hour);
-            if (next.getHours() > h || (next.getHours() === h && next.getMinutes() > Number(min))) {
-                next.setDate(next.getDate() + 1);
+        const [minField, hourField, domField, monField, dowField] = parts;
+        // 从 fromTime（默认 now+1分钟）开始向前搜索，最多搜索 366 天
+        const start = new Date(fromTime ?? Date.now());
+        start.setSeconds(0, 0);
+        start.setMinutes(start.getMinutes() + 1);
+        const candidate = new Date(start);
+        const deadline = new Date(start);
+        deadline.setDate(deadline.getDate() + 366);
+        // 最多迭代 366*24*60 次（分钟级步进），实际上会快得多
+        for (let iter = 0; iter < 366 * 24 * 60; iter++) {
+            if (candidate >= deadline)
+                return undefined;
+            // 检查月份（1-12）
+            const mon = nextValueInField(monField, candidate.getMonth() + 1, 1, 12);
+            if (mon === null)
+                return undefined;
+            if (mon !== candidate.getMonth() + 1) {
+                // 跳到下个合法月份的第一天 00:00
+                candidate.setMonth(mon - 1, 1);
+                candidate.setHours(0, 0, 0, 0);
+                continue;
             }
-            next.setHours(h);
+            // 检查日期（1-31）
+            const daysInMonth = new Date(candidate.getFullYear(), candidate.getMonth() + 1, 0).getDate();
+            const dom = nextValueInField(domField, candidate.getDate(), 1, daysInMonth);
+            if (dom === null || dom > daysInMonth) {
+                // 跳到下个月
+                candidate.setMonth(candidate.getMonth() + 1, 1);
+                candidate.setHours(0, 0, 0, 0);
+                continue;
+            }
+            if (dom !== candidate.getDate()) {
+                candidate.setDate(dom);
+                candidate.setHours(0, 0, 0, 0);
+                continue;
+            }
+            // 检查星期（0=周日，1=周一，...，6=周六；cron 中 7 也表示周日）
+            if (dowField !== '*') {
+                const dow = candidate.getDay(); // 0=周日
+                // 将 cron 的 7 映射为 0
+                const normalizedField = dowField.replace(/\b7\b/g, '0');
+                const validDow = nextValueInField(normalizedField, dow, 0, 6);
+                if (validDow === null || validDow !== dow) {
+                    // 跳到明天
+                    candidate.setDate(candidate.getDate() + 1);
+                    candidate.setHours(0, 0, 0, 0);
+                    continue;
+                }
+            }
+            // 检查小时（0-23）
+            const hour = nextValueInField(hourField, candidate.getHours(), 0, 23);
+            if (hour === null) {
+                // 跳到明天
+                candidate.setDate(candidate.getDate() + 1);
+                candidate.setHours(0, 0, 0, 0);
+                continue;
+            }
+            if (hour !== candidate.getHours()) {
+                candidate.setHours(hour, 0, 0, 0);
+                continue;
+            }
+            // 检查分钟（0-59）
+            const min = nextValueInField(minField, candidate.getMinutes(), 0, 59);
+            if (min === null) {
+                // 跳到下一小时
+                candidate.setHours(candidate.getHours() + 1, 0, 0, 0);
+                continue;
+            }
+            if (min !== candidate.getMinutes()) {
+                candidate.setMinutes(min, 0, 0);
+                continue;
+            }
+            // 所有字段都匹配，找到了
+            return candidate.getTime();
         }
-        if (min !== '*' && !isNaN(Number(min))) {
-            next.setMinutes(Number(min));
-        }
-        if (weekday !== '*' && !isNaN(Number(weekday))) {
-            const targetDay = Number(weekday) % 7;
-            const currentDay = next.getDay();
-            const daysUntil = (targetDay - currentDay + 7) % 7 || 7;
-            next.setDate(next.getDate() + daysUntil);
-        }
-        return next.getTime();
+        return undefined;
     }
     catch {
         return undefined;
@@ -81,15 +189,38 @@ let onTrigger = null;
 export function setCronTriggerCallback(cb) {
     onTrigger = cb;
 }
+/** 导出 parseNextRun 供外部（server.ts）复用 */
+export { parseNextRun as parseCronNextRun };
+/** 供外部（server.ts POST /crons）调用，注册新创建的任务到调度器 */
+export function scheduleNewJob(job) {
+    scheduleJob(job);
+}
 function scheduleJob(job) {
     if (!job.enabled)
         return;
-    const nextRun = job.nextRunAt ?? parseNextRun(job.expression);
-    if (!nextRun)
+    // 计算下次执行时间：优先使用已保存的 nextRunAt，若已过期则重新计算
+    let nextRun = job.nextRunAt;
+    let delay = nextRun ? nextRun - Date.now() : -1;
+    if (delay <= 0) {
+        // 已过期或未设置，重新计算
+        nextRun = parseNextRun(job.expression);
+        if (!nextRun) {
+            console.warn(`[cron] 无法解析 cron 表达式，跳过任务: ${job.id} (${job.expression})`);
+            return;
+        }
+        delay = nextRun - Date.now();
+        // 更新到磁盘，避免下次重启再次过期
+        const crons = loadCrons();
+        const idx = crons.findIndex(c => c.id === job.id);
+        if (idx >= 0) {
+            crons[idx].nextRunAt = nextRun;
+            saveCrons(crons);
+        }
+    }
+    if (delay <= 0) {
+        console.warn(`[cron] 计算出的下次执行时间仍然过期，跳过任务: ${job.id}`);
         return;
-    const delay = nextRun - Date.now();
-    if (delay <= 0)
-        return;
+    }
     const timer = setTimeout(() => {
         activeTimers.delete(job.id);
         const crons = loadCrons();

@@ -55,7 +55,7 @@ async function searchViaDuckDuckGo(query: string): Promise<string> {
     if (href.includes('duckduckgo.com/l/') && href.includes('uddg=')) {
       const uddgMatch = href.match(/[?&]uddg=([^&]+)/)
       if (uddgMatch) {
-        try { realUrl = decodeURIComponent(uddgMatch[1]) } catch { realUrl = href }
+        try { realUrl = decodeURIComponent(uddgMatch[1]) } catch { realUrl = uddgMatch[1] }
       }
     }
     // 跳过无法解析的 duckduckgo 内部链接

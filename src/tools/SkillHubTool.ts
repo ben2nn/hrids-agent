@@ -8,7 +8,7 @@ import { resolve, join } from 'path'
 import { homedir } from 'os'
 import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getGlobalCwd } from '../core/cwd.js'
 
 // ─────────────────────────────────────────────
 // 常量与辅助

@@ -63,9 +63,15 @@ export class AnthropicProvider implements LLMProvider {
           yield {
             type: 'usage',
             usage: {
-              inputTokens: u.input_tokens + (usageAny['cache_read_input_tokens'] ?? 0),
+              inputTokens: u.input_tokens,
               outputTokens: u.output_tokens,
+              cacheReadTokens: usageAny['cache_read_input_tokens'] ?? 0,
+              cacheWriteTokens: usageAny['cache_creation_input_tokens'] ?? 0,
             },
+          }
+          // 输出 stop_reason，供 QueryEngine 检测输出截断（max_tokens）
+          if (final.stop_reason) {
+            yield { type: 'stop_reason', stopReason: final.stop_reason }
           }
         }
       }

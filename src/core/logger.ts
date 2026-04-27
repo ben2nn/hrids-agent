@@ -1,5 +1,5 @@
 // 结构化日志系统 —— 支持级别控制、JSON 格式、文件持久化
-import { existsSync, mkdirSync, appendFileSync } from 'fs'
+import { existsSync, mkdirSync, appendFileSync, statSync, renameSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -25,9 +25,7 @@ function ensureLogDir() {
 
 function rotateIfNeeded() {
   try {
-    const { statSync } = require('fs') as typeof import('fs')
     if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > MAX_LOG_BYTES) {
-      const { renameSync } = require('fs') as typeof import('fs')
       renameSync(LOG_FILE, LOG_FILE + '.' + Date.now() + '.bak')
     }
   } catch { /* 轮转失败不影响主流程 */ }

@@ -4,7 +4,7 @@ import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { buildSkillRegistry } from '../skills/registry.js'
 import { registerAllBundledSkills, getBundledSkills } from '../skills/index.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getGlobalCwd } from '../core/cwd.js'
 
 // 确保内置 skills 已注册（子智能体环境里可能未初始化）
 function ensureBundledSkillsRegistered() {

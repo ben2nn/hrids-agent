@@ -147,6 +147,38 @@ export function createBuiltinCommands(apiKey, model) {
                 return { type: 'exit' };
             },
         },
+        // ── 历史归档命令 ──────────────────────────────────────────
+        {
+            name: 'history',
+            description: '查看当前会话的压缩归档历史',
+            argumentHint: '[段序号]',
+            async execute(args, ctx) {
+                const archives = ctx.listArchives();
+                if (archives.length === 0) {
+                    return { type: 'message', text: '当前会话尚未进行过上下文压缩，没有归档历史。' };
+                }
+                const idx = parseInt(args.trim());
+                if (!isNaN(idx) && idx >= 1 && idx <= archives.length) {
+                    // 显示指定段的摘要详情
+                    const arc = archives[idx - 1];
+                    const time = new Date(arc.archivedAt).toLocaleString('zh-CN');
+                    return {
+                        type: 'message',
+                        text: `归档段 ${idx}（${time}，共 ${arc.messageCount} 条消息）:\n\n${arc.summary}`,
+                    };
+                }
+                // 列出所有归档段
+                const lines = archives.map((arc, i) => {
+                    const time = new Date(arc.archivedAt).toLocaleString('zh-CN');
+                    const preview = arc.summary.split('\n').find(l => l.trim())?.slice(0, 60) ?? '';
+                    return `  ${i + 1}. [${time}] ${arc.messageCount} 条消息 — ${preview}...`;
+                });
+                return {
+                    type: 'message',
+                    text: `压缩归档历史（共 ${archives.length} 段）:\n${lines.join('\n')}\n\n输入 /history <序号> 查看某段摘要详情`,
+                };
+            },
+        },
         // ── 会话管理命令 ──────────────────────────────────────────
         {
             name: 'new-session',

@@ -1,32 +1,17 @@
 import { spawn } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
-import { homedir } from 'os'
 import { z } from 'zod'
 import type { ToolDef, ToolContext } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { logger } from '../core/logger.js'
+import { isDangerousRemovalPath } from '../core/pathSafety.js'
+
+// cwd 管理已迁移到 src/core/cwd.ts，此处重新导出保持向后兼容
+export { getGlobalCwd, setGlobalCwd, runWithCwd } from '../core/cwd.js'
+import { getGlobalCwd, setGlobalCwd } from '../core/cwd.js'
 
 const log = logger.child({ component: 'bash-tool' })
-
-// 持久化工作目录，在当前 session 进程内跨命令调用保持 cd 状态
-// 默认使用 ~/.hrids-agent/work/，由 setGlobalCwd 覆盖
-function initDefaultCwd(): string {
-  const dir = path.join(homedir(), '.hrids-agent', 'work')
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  return dir
-}
-
-let persistentCwd: string = initDefaultCwd()
-
-// 供 main.ts server 模式在处理 set_cwd 指令时同步更新
-export function setGlobalCwd(dir: string) {
-  persistentCwd = dir
-}
-
-export function getGlobalCwd(): string {
-  return persistentCwd
-}
 
 const inputSchema = z.object({
   command: z.string().describe('要执行的 shell 命令（bash/sh 语法）'),
@@ -49,9 +34,16 @@ const BLOCKED_PATTERNS = [
   /wget.*\|\s*(ba)?sh/,            // 管道执行远程脚本
 ]
 
+// 提取 rm/rmdir 命令的目标路径，用于危险路径检测
+function extractRemovalTarget(command: string): string | null {
+  const match = command.match(/\brm\s+(?:-[a-zA-Z]*\s+)*(.+)$/)
+  if (match) return match[1].trim().split(/\s+/)[0]
+  return null
+}
+
 export const BashTool: ToolDef<typeof inputSchema> = {
   name: 'bash',
-  description: '在 Linux/macOS 的 bash/sh 环境中执行命令，返回 stdout 和 stderr。仅适用于 Unix 系统。',
+  description: '执行 shell 命令（当前平台：Linux/macOS bash/sh），返回 stdout 和 stderr。',
   inputSchema,
   readonly: false,
 
@@ -59,24 +51,30 @@ export const BashTool: ToolDef<typeof inputSchema> = {
     return `执行命令: ${input.command}`
   },
 
+  getRuleContent(input) {
+    return input.command
+  },
+
   async checkPermission(input) {
+    // 危险命令黑名单
     for (const pattern of BLOCKED_PATTERNS) {
       if (pattern.test(input.command)) {
         return { granted: false, reason: `命令包含危险模式: ${pattern}` }
       }
     }
+    // 危险删除路径检测
+    const removalTarget = extractRemovalTarget(input.command)
+    if (removalTarget && isDangerousRemovalPath(removalTarget)) {
+      return { granted: false, reason: `危险的删除目标路径: ${removalTarget}` }
+    }
     return { granted: true }
   },
 
   async execute(input, ctx?: ToolContext) {
-    const permCheck = await BashTool.checkPermission!(input)
-    if (!permCheck.granted) {
-      return { type: 'error', message: permCheck.reason }
-    }
-
     // 记录 bash 执行审计日志
     auditLog({ action: 'bash_execute', resource: input.command.slice(0, 200), result: 'allowed' })
-    log.info('执行命令', { command: input.command.slice(0, 200), cwd: persistentCwd })
+    const cwd = getGlobalCwd()
+    log.info('执行命令', { command: input.command.slice(0, 200), cwd })
 
     const logLine = (line: string, isStderr = false) => {
       // server 模式下 stdout 是 JSON 通信通道，不能直接写明文
@@ -93,11 +91,11 @@ export const BashTool: ToolDef<typeof inputSchema> = {
     const cdMatch = input.command.trim().match(/^cd\s+(.+)$/)
     if (cdMatch) {
       const target = cdMatch[1].trim().replace(/^["']|["']$/g, '').trim()
-      const newDir = path.resolve(persistentCwd, target)
+      const newDir = path.resolve(cwd, target)
       if (fs.existsSync(newDir) && fs.statSync(newDir).isDirectory()) {
-        persistentCwd = newDir
-        logLine(`[bash] 切换目录: ${persistentCwd}`)
-        return { type: 'success', output: persistentCwd }
+        setGlobalCwd(newDir)
+        logLine(`[bash] 切换目录: ${newDir}`)
+        return { type: 'success', output: newDir }
       } else {
         return { type: 'error', message: `目录不存在: ${newDir}` }
       }
@@ -106,11 +104,11 @@ export const BashTool: ToolDef<typeof inputSchema> = {
     const timeout = input.timeout ?? 60000
     const startTime = Date.now()
     logLine(`[bash] 开始执行: ${input.command}`)
-    logLine(`[bash] 工作目录: ${persistentCwd}`)
+    logLine(`[bash] 工作目录: ${cwd}`)
 
     return new Promise<ReturnType<typeof BashTool.execute> extends Promise<infer R> ? R : never>((resolve) => {
       const child = spawn('/bin/sh', ['-c', input.command], {
-        cwd: persistentCwd,
+        cwd,
         env: {
           ...process.env,
           PYTHONIOENCODING: 'utf-8',

@@ -1,5 +1,5 @@
 // 配置系统 —— 读写 ~/.hrids-agent/config.json
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { McpServerConfig } from '../tools/McpTool.js'
@@ -12,13 +12,14 @@ export interface AgentConfig {
   provider?: string
   apiKey?: string
   baseUrl?: string
-  permissionMode: 'ask' | 'auto' | 'plan'
+  permissionMode: 'ask' | 'craft' | 'plan'
   maxTokens: number
   maxTurns: number
   maxBudgetUsd?: number          // 单次会话成本上限（USD），不设则无限制
   autoCompactThreshold?: number  // 自动压缩触发的 token 估算阈值
   agentCwd?: string              // 持久化工作目录（不设则使用 ~/.hrids-agent/work/）
   memoryCondense?: boolean       // 会话结束后是否用 LLM 提炼记忆（消耗少量 token，默认 false）
+  autoDistillSkill?: boolean     // 会话结束后是否自动沉淀 skill（消耗少量 token，默认 false）
   mcpServers: McpServerConfig[]
   theme: 'default' | 'minimal'
 }
@@ -87,7 +88,10 @@ export function saveConfig(config: Partial<AgentConfig>) {
   ensureConfigDir()
   const current = loadConfig()
   const updated = { ...current, ...config }
-  writeFileSync(CONFIG_FILE, JSON.stringify(updated, null, 2), 'utf-8')
+  // 原子写入：先写临时文件，再 rename，避免并发写入时配置文件损坏
+  const tmpFile = CONFIG_FILE + '.tmp'
+  writeFileSync(tmpFile, JSON.stringify(updated, null, 2), 'utf-8')
+  renameSync(tmpFile, CONFIG_FILE)
 }
 
 export function getConfigDir(): string {

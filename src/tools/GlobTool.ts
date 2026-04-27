@@ -1,7 +1,7 @@
 import { glob } from 'glob'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
   pattern: z.string().describe('glob 匹配模式，如 src/**/*.ts'),

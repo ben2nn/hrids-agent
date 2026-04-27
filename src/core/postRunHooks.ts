@@ -6,6 +6,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { runMemoryPipeline } from '../memory/index.js'
 import { logger } from './logger.js'
+import { getCurrentSessionId } from './sessionContext.js'
 import type { QueryEngine, ContentBlock } from './QueryEngine.js'
 import type { LLMProvider } from './providers/types.js'
 
@@ -26,6 +27,7 @@ export async function autoExtractMemories(
   try {
     const history = engine.getHistory()
     if (condense) log.info('记忆总结：开始 LLM 提炼', { sessionId, caller: 'memory-pipeline' })
+    // Gateway 模式下 runWithSession 上下文已存在，pipeline 内部通过 getCurrentSessionId 获取会话级 store
     await runMemoryPipeline(history as never, {
       condense,
       provider: condense ? provider : undefined,
@@ -42,11 +44,14 @@ export async function autoExtractMemories(
 /**
  * 会话结束后自动提炼 skill（后台静默执行，不阻塞主流程）
  * 启发式判断：工具调用次数 >= 5 且会话有实质内容，才尝试提炼
+ * 需要显式传入 enabled=true 才会执行（避免隐性 LLM 费用）
  */
 export async function autoDistillSkill(
   engine: QueryEngine,
   provider: LLMProvider,
+  enabled = false,
 ): Promise<void> {
+  if (!enabled) return
   try {
     const history = engine.getHistory()
 

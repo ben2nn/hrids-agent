@@ -1,7 +1,8 @@
 // 记忆提炼管道：提取 → LLM 提炼 → 向量去重 → 动态评分 → 写入
 // 流程：extractFromConversation → [condense via LLM] → dedup → addMemory
 import { extractFromConversation } from './extractor.js'
-import { getMemoryStore } from './store.js'
+import { getMemoryStore, getMemoryStoreForSession } from './store.js'
+import { getCurrentSessionId } from '../core/sessionContext.js'
 import type { Memory } from './types.js'
 import type { LLMProvider } from '../core/providers/types.js'
 
@@ -48,7 +49,9 @@ export async function runMemoryPipeline(
   )
   if (extracted.length === 0) return result
 
-  const store = getMemoryStore()
+  // 优先使用会话级 store（Gateway 模式），否则用全局单例（CLI 模式）
+  const ctxSessionId = sessionId ?? getCurrentSessionId()
+  const store = ctxSessionId ? getMemoryStoreForSession(ctxSessionId) : getMemoryStore()
 
   // ② LLM 批量提炼：一次调用压缩所有需要提炼的条目
   let condensedContents: (string | null)[] = extracted.map(() => null)

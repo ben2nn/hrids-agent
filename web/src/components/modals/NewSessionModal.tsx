@@ -10,7 +10,7 @@ interface NewSessionModalProps {
 
 // ─── 权限模式配置 ──────────────────────────────────────────────────────────
 
-type PermissionMode = 'ask' | 'plan' | 'auto'
+type PermissionMode = 'ask' | 'plan' | 'craft'
 
 const PERMISSION_MODES: Array<{
   value: PermissionMode
@@ -34,9 +34,9 @@ const PERMISSION_MODES: Array<{
     color: 'border-purple-500/40 bg-purple-500/10 text-purple-400',
   },
   {
-    value: 'auto',
-    label: 'Auto',
-    desc: '自动允许所有操作',
+    value: 'craft',
+    label: 'Craft',
+    desc: '自主执行，无需确认',
     icon: '⚡',
     color: 'border-amber-500/40 bg-amber-500/10 text-amber-400',
   },

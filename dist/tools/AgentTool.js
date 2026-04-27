@@ -65,7 +65,7 @@ export function createAgentTool(apiKey, model) {
                 const tools = input.allowed_tools
                     ? allTools.filter(t => input.allowed_tools.includes(t.name))
                     : allTools;
-                const permissions = new PermissionManager('auto', async () => true);
+                const permissions = new PermissionManager('craft', async () => true);
                 subEngine = new QueryEngine({
                     provider: mgr.getProvider(),
                     systemPrompt,
@@ -96,7 +96,7 @@ export function createAgentTool(apiKey, model) {
                 const tools = input.allowed_tools
                     ? allFallbackTools.filter(t => input.allowed_tools.includes(t.name))
                     : allFallbackTools;
-                const permissions = new PermissionManager('auto', async () => true);
+                const permissions = new PermissionManager('craft', async () => true);
                 subEngine = new QueryEngine({
                     provider,
                     systemPrompt,

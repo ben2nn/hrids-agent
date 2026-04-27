@@ -18,6 +18,7 @@ export interface ChatMessage {
   content: string | ContentPart[]
   tool_call_id?: string   // tool 角色时使用
   tool_calls?: ToolCall[] // assistant 角色时使用
+  requestId?: string      // 关联到请求 ID，用于前端消息分组
 }
 
 export type ContentPart =
@@ -40,10 +41,11 @@ export interface ToolCall {
 }
 
 export interface StreamChunk {
-  type: 'text_delta' | 'tool_call' | 'usage' | 'done'
+  type: 'text_delta' | 'tool_call' | 'usage' | 'stop_reason' | 'done'
   delta?: string
   toolCall?: ToolCall
-  usage?: { inputTokens: number; outputTokens: number }
+  stopReason?: string  // 'end_turn' | 'max_tokens' | 'tool_use' | 'stop_sequence'
+  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
 }
 
 export interface ProviderConfig {
@@ -63,6 +65,7 @@ export interface LLMProvider {
     tools: ToolDef[],
     systemPrompt: string,
     maxTokens: number,
+    signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk>
 }
 

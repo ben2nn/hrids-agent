@@ -3,7 +3,7 @@ import http from 'http';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { SessionManager } from './SessionManager.js';
-import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta } from '../core/SessionStore.js';
+import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js';
 import { logger } from '../core/logger.js';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from 'fs';
 import { resolve, join, basename, extname } from 'path';
@@ -45,7 +45,7 @@ export function createGateway(config = {}) {
     });
     const rateLimiter = new RateLimiter(config.rateLimitPerMinute ?? 10);
     const app = express();
-    app.use(express.json());
+    app.use(express.json({ limit: '50mb' }));
     // ── CORS 中间件（在所有 API 路由之前）──────────────────────
     const corsOrigin = config.corsOrigin ?? '*';
     app.use((req, res, next) => {
@@ -90,6 +90,7 @@ export function createGateway(config = {}) {
                 model: s.model ?? '',
                 cwd: s.workDir ?? '',
                 title: s.title ?? '',
+                lastUserMessage: s.lastUserMessage,
             }));
             res.json([...activeSessions, ...history]);
         }
@@ -126,7 +127,12 @@ export function createGateway(config = {}) {
     });
     // 销毁会话
     app.delete('/sessions/:id', async (req, res) => {
-        await manager.destroySession(req.params.id);
+        const id = req.params.id;
+        // 在 destroySession 之前先取内存中的 cwd（destroySession 会把 session 从 Map 删掉）
+        const inMemoryCwd = manager.getSession(id)?.info.cwd;
+        await manager.destroySession(id);
+        // 同时删除磁盘上的会话数据和工作目录，避免刷新后重新出现
+        deleteSessionFromDisk(id, inMemoryCwd);
         res.json({ ok: true });
     });
     // 健康检查（增强版：包含运行时指标）
@@ -171,10 +177,40 @@ export function createGateway(config = {}) {
             const patch = {};
             if (body.model)
                 patch.model = body.model;
-            if (body.permissionMode && ['ask', 'auto', 'plan'].includes(body.permissionMode)) {
+            if (body.permissionMode && ['ask', 'craft', 'plan'].includes(body.permissionMode)) {
                 patch.permissionMode = body.permissionMode;
             }
             saveConfig(patch);
+            res.json({ ok: true });
+        }
+        catch (err) {
+            res.status(500).json({ error: String(err) });
+        }
+    });
+    // GET /config/zhile-session — 读取知了专属会话 ID
+    app.get('/config/zhile-session', (_req, res) => {
+        const file = join(homedir(), '.hrids-agent', 'zhile-session.json');
+        if (!existsSync(file)) {
+            res.json({ sessionId: null });
+            return;
+        }
+        try {
+            const data = JSON.parse(readFileSync(file, 'utf-8'));
+            res.json({ sessionId: data.sessionId ?? null });
+        }
+        catch {
+            res.json({ sessionId: null });
+        }
+    });
+    // PUT /config/zhile-session — 保存知了专属会话 ID
+    app.put('/config/zhile-session', (req, res) => {
+        const dir = join(homedir(), '.hrids-agent');
+        const file = join(dir, 'zhile-session.json');
+        try {
+            const body = req.body;
+            if (!existsSync(dir))
+                mkdirSync(dir, { recursive: true });
+            writeFileSync(file, JSON.stringify({ sessionId: body.sessionId ?? null }, null, 2), 'utf-8');
             res.json({ ok: true });
         }
         catch (err) {
@@ -275,7 +311,20 @@ export function createGateway(config = {}) {
                     // 跳过系统内部注入的消息
                     if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]'))
                         continue;
-                    displayMessages.push({ id: `u-${idx}`, type: 'user', content: msg.content, timestamp });
+                    // 从消息内容中提取图片引用（@filename 格式）
+                    const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi;
+                    const images = [];
+                    let match;
+                    while ((match = imagePattern.exec(msg.content)) !== null) {
+                        images.push(match[1]);
+                    }
+                    displayMessages.push({
+                        id: `u-${idx}`,
+                        type: 'user',
+                        content: msg.content,
+                        timestamp,
+                        ...(images.length > 0 ? { images } : {})
+                    });
                 }
                 // tool_result 不单独显示（结果附在 tool 消息上）
             }
@@ -314,6 +363,82 @@ export function createGateway(config = {}) {
             }
         }
         res.json(displayMessages);
+    });
+    // GET /sessions/:id/history-segments — 读取会话的压缩归档段列表
+    app.get('/sessions/:id/history-segments', (req, res) => {
+        try {
+            const archives = listSessionArchives(req.params.id);
+            res.json(archives);
+        }
+        catch (err) {
+            log.warn('读取归档段失败', { error: String(err) });
+            res.json([]);
+        }
+    });
+    // GET /sessions/:id/history-segments/:filename/messages — 读取归档段的实际消息
+    app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
+        try {
+            const rawMessages = loadSessionArchive(req.params.id, req.params.filename);
+            if (!rawMessages) {
+                res.json([]);
+                return;
+            }
+            const toolResults = new Map();
+            for (const msg of rawMessages) {
+                if (msg.role !== 'user' || !Array.isArray(msg.content))
+                    continue;
+                for (const block of msg.content) {
+                    if (block.type === 'tool_result' && block.tool_use_id) {
+                        toolResults.set(block.tool_use_id, { content: block.content, isError: block.is_error === true });
+                    }
+                }
+            }
+            const displayMessages = [];
+            let idx = 0;
+            for (const msg of rawMessages) {
+                const timestamp = Date.now() - (rawMessages.length - idx) * 1000;
+                idx++;
+                if (msg.role === 'user') {
+                    if (typeof msg.content === 'string') {
+                        if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]'))
+                            continue;
+                        const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi;
+                        const images = [];
+                        let match;
+                        while ((match = imagePattern.exec(msg.content)) !== null)
+                            images.push(match[1]);
+                        displayMessages.push({ id: `arc-u-${idx}`, type: 'user', content: msg.content, timestamp, ...(images.length > 0 ? { images } : {}) });
+                    }
+                }
+                else if (msg.role === 'assistant') {
+                    if (typeof msg.content === 'string') {
+                        if (msg.content.trim())
+                            displayMessages.push({ id: `arc-a-${idx}`, type: 'assistant', content: msg.content, timestamp });
+                    }
+                    else if (Array.isArray(msg.content)) {
+                        const textParts = msg.content
+                            .filter(b => b.type === 'text').map(b => b.text ?? '').join('');
+                        if (textParts.trim())
+                            displayMessages.push({ id: `arc-a-${idx}`, type: 'assistant', content: textParts, timestamp });
+                        for (const block of msg.content) {
+                            if (block.type === 'tool_use' && block.id && block.name) {
+                                const resultEntry = toolResults.get(block.id);
+                                displayMessages.push({
+                                    id: `arc-t-${block.id}`, type: 'tool', toolId: block.id, toolName: block.name,
+                                    toolInput: block.input, toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
+                                    toolResult: resultEntry?.content, timestamp: timestamp + 1,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            res.json(displayMessages);
+        }
+        catch (err) {
+            log.warn('读取归档消息失败', { error: String(err) });
+            res.json([]);
+        }
     });
     // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）
     app.get('/sessions/:id/todos', (req, res) => {
@@ -624,6 +749,168 @@ export function createGateway(config = {}) {
             res.status(500).json({ error: String(err) });
         }
     });
+    // POST /crons — 创建定时任务（前端直接创建，不经过 Agent）
+    app.post('/crons', async (req, res) => {
+        const cronDir = join(homedir(), '.hrids-agent');
+        const cronFile = join(cronDir, 'crons.json');
+        try {
+            const body = req.body;
+            if (!body.expression || !body.description || !body.task) {
+                res.status(400).json({ error: '缺少必填字段：expression、description、task' });
+                return;
+            }
+            // 读取现有任务
+            let crons = [];
+            if (existsSync(cronFile)) {
+                try {
+                    crons = JSON.parse(readFileSync(cronFile, 'utf-8'));
+                }
+                catch {
+                    crons = [];
+                }
+            }
+            else {
+                if (!existsSync(cronDir))
+                    mkdirSync(cronDir, { recursive: true });
+            }
+            // 计算下次执行时间（使用 ScheduleCronTool 的完整解析器）
+            let nextRunAt;
+            try {
+                const { parseCronNextRun } = await import('../tools/ScheduleCronTool.js');
+                nextRunAt = parseCronNextRun(body.expression);
+            }
+            catch {
+                nextRunAt = undefined;
+            }
+            // 判断是否为周期性表达式
+            const parts = body.expression.trim().split(/\s+/);
+            const isRecurring = parts.length === 5 && parts.some(p => p.includes('*') || p.includes('/') || p.includes('-') || p.includes(','));
+            const once = isRecurring ? false : (body.once ?? false);
+            const id = `cron-${Date.now().toString(36)}`;
+            const job = {
+                id,
+                expression: body.expression,
+                description: body.description,
+                task: body.task,
+                createdAt: Date.now(),
+                nextRunAt,
+                enabled: true,
+                once,
+                ...(body.startDate ? { startDate: body.startDate } : {}),
+                ...(body.endDate ? { endDate: body.endDate } : {}),
+            };
+            crons.push(job);
+            writeFileSync(cronFile, JSON.stringify(crons, null, 2), 'utf-8');
+            // 通知调度器注册新任务
+            try {
+                const { scheduleNewJob } = await import('../tools/ScheduleCronTool.js');
+                scheduleNewJob(job);
+            }
+            catch { /* 调度器不可用时忽略，重启后会自动恢复 */ }
+            res.json(job);
+        }
+        catch (err) {
+            res.status(500).json({ error: String(err) });
+        }
+    });
+    // ── MCP 服务器配置 API ──────────────────────────────────────────────────
+    // GET /mcp — 读取 MCP 服务器配置列表
+    app.get('/mcp', (_req, res) => {
+        const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json');
+        if (!existsSync(mcpFile)) {
+            res.json({ mcpServers: {} });
+            return;
+        }
+        try {
+            const raw = JSON.parse(readFileSync(mcpFile, 'utf-8'));
+            res.json(raw);
+        }
+        catch {
+            res.json({ mcpServers: {} });
+        }
+    });
+    // PUT /mcp — 保存完整 MCP 配置（覆盖写入）
+    app.put('/mcp', (req, res) => {
+        const mcpDir = join(homedir(), '.hrids-agent');
+        const mcpFile = join(mcpDir, 'mcp.json');
+        try {
+            const body = req.body;
+            if (!body || typeof body !== 'object') {
+                res.status(400).json({ error: '请求体格式错误' });
+                return;
+            }
+            if (!existsSync(mcpDir))
+                mkdirSync(mcpDir, { recursive: true });
+            writeFileSync(mcpFile, JSON.stringify(body, null, 2), 'utf-8');
+            log.info('MCP 配置已保存', { serverCount: Object.keys(body.mcpServers ?? {}).length });
+            res.json({ ok: true });
+        }
+        catch (err) {
+            log.error('MCP 配置保存失败', { error: String(err) });
+            res.status(500).json({ error: String(err) });
+        }
+    });
+    // POST /mcp/:name — 添加或更新单个 MCP 服务器
+    app.post('/mcp/:name', (req, res) => {
+        const mcpDir = join(homedir(), '.hrids-agent');
+        const mcpFile = join(mcpDir, 'mcp.json');
+        try {
+            const serverName = req.params.name;
+            const serverConfig = req.body;
+            if (!serverConfig || typeof serverConfig !== 'object') {
+                res.status(400).json({ error: '请求体格式错误' });
+                return;
+            }
+            let config = { mcpServers: {} };
+            if (existsSync(mcpFile)) {
+                try {
+                    config = JSON.parse(readFileSync(mcpFile, 'utf-8'));
+                }
+                catch {
+                    config = { mcpServers: {} };
+                }
+            }
+            if (!config.mcpServers)
+                config.mcpServers = {};
+            config.mcpServers[serverName] = serverConfig;
+            if (!existsSync(mcpDir))
+                mkdirSync(mcpDir, { recursive: true });
+            writeFileSync(mcpFile, JSON.stringify(config, null, 2), 'utf-8');
+            log.info('MCP 服务器已添加/更新', { name: serverName });
+            res.json({ ok: true });
+        }
+        catch (err) {
+            res.status(500).json({ error: String(err) });
+        }
+    });
+    // DELETE /mcp/:name — 删除单个 MCP 服务器
+    app.delete('/mcp/:name', (req, res) => {
+        const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json');
+        try {
+            const serverName = req.params.name;
+            if (!existsSync(mcpFile)) {
+                res.status(404).json({ error: 'MCP 配置文件不存在' });
+                return;
+            }
+            const config = JSON.parse(readFileSync(mcpFile, 'utf-8'));
+            if (!config.mcpServers || !(serverName in config.mcpServers)) {
+                res.status(404).json({ error: `MCP 服务器 "${serverName}" 不存在` });
+                return;
+            }
+            delete config.mcpServers[serverName];
+            writeFileSync(mcpFile, JSON.stringify(config, null, 2), 'utf-8');
+            log.info('MCP 服务器已删除', { name: serverName });
+            res.json({ ok: true });
+        }
+        catch (err) {
+            res.status(500).json({ error: String(err) });
+        }
+    });
+    // GET /mcp/config-path — 返回 MCP 配置文件路径（供前端展示）
+    app.get('/mcp/config-path', (_req, res) => {
+        const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json');
+        res.json({ path: mcpFile });
+    });
     // GET /skills — 读取已安装技能列表
     app.get('/skills', async (_req, res) => {
         try {
@@ -650,15 +937,15 @@ export function createGateway(config = {}) {
             // 读取禁用列表
             const disabledSet = getDisabledUserSkills();
             // 内置技能（从全局注册表取）
-            const builtinSkills = getBundledSkills()
-                .filter(s => s.userInvocable)
-                .map(s => ({
+            const builtinSkillsRaw = getBundledSkills().filter(s => s.userInvocable);
+            const builtinSkills = await Promise.all(builtinSkillsRaw.map(async (s) => ({
                 name: s.name,
                 description: s.description,
                 source: 'builtin',
                 installed: undefined,
                 enabled: undefined,
-            }));
+                prompt: s.getPrompt ? await s.getPrompt('') : undefined,
+            })));
             // 用户技能：直接从文件系统加载，不经过禁用过滤，确保禁用的技能也能显示
             // 异步读取 SKILL.md 内容作为 prompt（用于前端详情展示）
             const userSkillsRaw = loadSkillsFromDir(userSkillsDir, 'user');
@@ -792,6 +1079,62 @@ export function createGateway(config = {}) {
             res.status(500).json({ error: String(err) });
         }
     });
+    // GET /sessions/:id/image?path= — 直接返回图片二进制（用于前端 <img> 标签显示）
+    app.get('/sessions/:id/image', (req, res) => {
+        const activeSession = manager.getSession(req.params.id);
+        const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null;
+        if (!cwd) {
+            res.status(404).json({ error: '会话不存在或无工作目录' });
+            return;
+        }
+        const relPath = req.query.path;
+        if (!relPath) {
+            res.status(400).json({ error: '缺少 path 参数' });
+            return;
+        }
+        const absPath = resolve(cwd, relPath);
+        if (!absPath.startsWith(resolve(cwd))) {
+            res.status(403).json({ error: '禁止访问 cwd 之外的路径' });
+            return;
+        }
+        try {
+            const stat = statSync(absPath);
+            if (!stat.isFile()) {
+                res.status(400).json({ error: '路径不是文件' });
+                return;
+            }
+            // 限制图片大小：20MB
+            if (stat.size > 20 * 1024 * 1024) {
+                res.status(413).json({ error: '图片超过 20MB' });
+                return;
+            }
+            const ext = extname(absPath).toLowerCase();
+            const mimeMap = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
+                '.svg': 'image/svg+xml',
+                '.bmp': 'image/bmp',
+                '.ico': 'image/x-icon',
+                '.tiff': 'image/tiff',
+                '.tif': 'image/tiff',
+            };
+            const mime = mimeMap[ext];
+            if (!mime) {
+                res.status(400).json({ error: '不支持的图片格式' });
+                return;
+            }
+            res.setHeader('Content-Type', mime);
+            res.setHeader('Cache-Control', 'public, max-age=3600');
+            const buf = readFileSync(absPath);
+            res.send(buf);
+        }
+        catch (err) {
+            res.status(500).json({ error: String(err) });
+        }
+    });
     // ── WebSocket 服务器 ─────────────────────────────────────────
     const server = http.createServer(app);
     // 不设置 path，由 connection 回调自行匹配 /sessions/:id/stream
@@ -833,9 +1176,10 @@ export function createGateway(config = {}) {
             return;
         }
         log.debug('WebSocket 连接', { sessionId });
-        manager.subscribe(sessionId, ws);
-        // 使用 sessionId（驼峰）与前端类型定义保持一致
+        // 先发 ready，告知前端连接已建立
         ws.send(JSON.stringify({ type: 'ready', sessionId }));
+        // 再订阅（会触发回放缓冲区推送，前端已准备好接收）
+        manager.subscribe(sessionId, ws);
         ws.on('message', (data) => {
             manager.handleClientMessage(sessionId, data.toString());
         });
@@ -861,18 +1205,31 @@ export function createGateway(config = {}) {
         async stop(gracefulTimeoutMs = 10000) {
             log.info('开始关闭 Gateway');
             await manager.gracefulShutdown(gracefulTimeoutMs);
-            return new Promise((resolve, reject) => {
-                wss.close();
+            // 主动关闭所有 WebSocket 连接，否则 server.close() 会因连接保持而一直 pending
+            for (const ws of wss.clients) {
+                try {
+                    ws.terminate();
+                }
+                catch { /* 忽略 */ }
+            }
+            wss.close();
+            return new Promise((resolve) => {
+                // 尝试使用 Node 18.2+ 的 closeAllConnections() 强制关闭所有 keep-alive 连接
+                if (typeof server.closeAllConnections === 'function') {
+                    server.closeAllConnections();
+                }
                 server.close(err => {
                     if (err) {
-                        log.error('关闭 HTTP 服务失败', { error: String(err) });
-                        reject(err);
+                        log.warn('关闭 HTTP 服务时有错误（忽略）', { error: String(err) });
                     }
-                    else {
-                        log.info('Gateway 已关闭');
-                        resolve();
-                    }
+                    log.info('Gateway 已关闭');
+                    resolve();
                 });
+                // 兜底超时：5 秒后强制 resolve，避免残留连接导致进程无法退出
+                setTimeout(() => {
+                    log.warn('server.close() 超时，强制完成关闭');
+                    resolve();
+                }, 5000);
             });
         },
         manager,

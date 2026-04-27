@@ -4,16 +4,17 @@ import { homedir } from 'os'
 import { join, dirname } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
+import { getCurrentSessionId } from '../core/sessionContext.js'
 
-let currentSessionId: string | null = null
+// todos_updated 推送回调（Gateway 模式由 SessionManager 注册）
 let todosUpdatedCallback: ((sessionId: string, todos: Todo[]) => void) | null = null
 
-export function setTodoSessionId(id: string | null): void {
-  currentSessionId = id
-}
+/** @deprecated 已无需手动设置 sessionId，由 AsyncLocalStorage 自动获取。保留仅供向后兼容。 */
+export function setTodoSessionId(_id: string | null): void { /* no-op */ }
 
+/** @deprecated 已无需手动获取 sessionId。保留仅供向后兼容。 */
 export function getTodoSessionId(): string | null {
-  return currentSessionId
+  return getCurrentSessionId() ?? null
 }
 
 export function setTodosUpdatedCallback(cb: ((sessionId: string, todos: Todo[]) => void) | null): void {
@@ -21,8 +22,9 @@ export function setTodosUpdatedCallback(cb: ((sessionId: string, todos: Todo[]) 
 }
 
 function getTodoFile(): string {
-  if (currentSessionId) {
-    return join(homedir(), '.hrids-agent', 'sessions', currentSessionId, 'todos.json')
+  const sessionId = getCurrentSessionId()
+  if (sessionId) {
+    return join(homedir(), '.hrids-agent', 'sessions', sessionId, 'todos.json')
   }
   return join(homedir(), '.hrids-agent', 'todos.json')
 }
@@ -66,12 +68,45 @@ const inputSchema = z.object({
     content: z.string().describe('任务内容'),
     status: z.enum(['pending', 'in_progress', 'completed']).describe('任务状态'),
     priority: z.enum(['high', 'medium', 'low']).describe('优先级'),
-  })).describe('完整的 todo 列表（会替换现有列表）'),
+  })).describe('完整的 todo 列表。初次调用时建立完整计划；后续调用只能新增任务或更新状态，不能删除未完成的任务。'),
 })
+
+/**
+ * 保护现有计划的完整性：
+ * - 如果列表为空（初次建立），直接写入
+ * - 如果列表已存在，禁止删除 pending/in_progress 的任务（只能新增或更新状态）
+ * 返回合并后的最终列表，以及被保护的任务数量（用于反馈给 LLM）
+ */
+function mergeWithProtection(existing: Todo[], incoming: Todo[]): { merged: Todo[]; protectedCount: number } {
+  if (existing.length === 0) {
+    return { merged: incoming, protectedCount: 0 }
+  }
+
+  // 以 incoming 为基础（允许新增、状态变更）
+  const incomingMap = new Map(incoming.map(t => [t.id, t]))
+
+  // 找出被删除的未完成任务（在 existing 中存在但 incoming 中不存在，且状态不是 completed）
+  const dropped = existing.filter(t =>
+    !incomingMap.has(t.id) && t.status !== 'completed'
+  )
+
+  if (dropped.length === 0) {
+    return { merged: incoming, protectedCount: 0 }
+  }
+
+  // 将被删除的未完成任务追加回列表末尾，保持原状态
+  const merged = [...incoming, ...dropped]
+  return { merged, protectedCount: dropped.length }
+}
 
 export const TodoWriteTool: ToolDef<typeof inputSchema> = {
   name: 'todo_write',
-  description: '创建和管理任务列表。用于追踪复杂任务的进度，每次调用会替换整个列表。',
+  description: `创建和管理任务列表，用于追踪复杂任务的进度。
+
+规则：
+- 首次调用：建立完整的任务计划（所有步骤一次性列出）
+- 后续调用：只能新增任务或更新已有任务的状态/内容，不能删除未完成（pending/in_progress）的任务
+- 系统会自动保护未完成的任务，防止计划被意外覆盖`,
   inputSchema,
   readonly: false,
 
@@ -91,20 +126,29 @@ export const TodoWriteTool: ToolDef<typeof inputSchema> = {
       }
     }
     if (!Array.isArray(todos)) todos = []
-    input = { ...input, todos }
-    saveTodos(input.todos)
+
+    // 读取现有列表，执行保护性合并
+    const existing = loadTodos()
+    const { merged, protectedCount } = mergeWithProtection(existing, todos)
+
+    saveTodos(merged)
 
     // 若有 sessionId 且有回调，触发 todos_updated 推送
-    if (currentSessionId && todosUpdatedCallback) {
-      todosUpdatedCallback(currentSessionId, input.todos)
+    const sessionId = getCurrentSessionId()
+    if (sessionId && todosUpdatedCallback) {
+      todosUpdatedCallback(sessionId, merged)
     }
 
-    const summary = input.todos.map(t => {
+    const summary = merged.map(t => {
       const icon = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '○'
       return `${icon} [${t.priority}] ${t.content}`
     }).join('\n')
 
-    return { type: 'success', output: `任务列表已更新:\n${summary}` }
+    const protectMsg = protectedCount > 0
+      ? `\n\n⚠️ 注意：${protectedCount} 个未完成任务被自动保留（不允许删除未完成的任务）。`
+      : ''
+
+    return { type: 'success', output: `任务列表已更新:\n${summary}${protectMsg}` }
   },
 }
 

@@ -2,7 +2,7 @@ import { readFileSync, existsSync, statSync } from 'fs'
 import { resolve } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
   path: z.string().describe('要读取的文件路径'),

@@ -136,13 +136,19 @@ export class MemoryStore {
       }
 
       if (dim !== this._dim) {
-        console.error(`[memory] embedding 维度不匹配：期望 ${this._dim}，实际 ${dim}，跳过 id=${id}`)
+        // 维度不匹配：记录到 audit log，不静默丢失
+        const { auditLog } = await import('../core/audit.js')
+        auditLog({ action: 'memory_embed_skip', resource: id, result: 'error', details: { reason: 'dim_mismatch', expected: this._dim, actual: dim } })
         return
       }
 
       await this.vec.upsert(id, vec)
     } catch (err) {
-      console.error(`[memory] embedding 失败 id=${id}:`, err)
+      // embedding 失败：记录到 audit log，向量索引可能不完整
+      try {
+        const { auditLog } = await import('../core/audit.js')
+        auditLog({ action: 'memory_embed_error', resource: id, result: 'error', details: { error: String(err) } })
+      } catch { /* audit 本身失败时静默 */ }
     }
   }
 
@@ -459,9 +465,33 @@ export class MemoryStore {
   }
 }
 
-// 全局单例
+// 全局单例（CLI 模式 / 默认路径）
 let _store: MemoryStore | null = null
 export function getMemoryStore(): MemoryStore {
   if (!_store) _store = new MemoryStore()
   return _store
+}
+
+// 会话级实例注册表（Gateway 多会话模式）
+const _sessionStores = new Map<string, MemoryStore>()
+
+/** Gateway 模式：为指定会话创建独立的 MemoryStore（独立 SQLite 文件） */
+export function getMemoryStoreForSession(sessionId: string): MemoryStore {
+  let store = _sessionStores.get(sessionId)
+  if (!store) {
+    const sessionDir = join(STORE_DIR, 'sessions', sessionId)
+    if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
+    store = new MemoryStore(join(sessionDir, 'palace.db'))
+    _sessionStores.set(sessionId, store)
+  }
+  return store
+}
+
+/** Gateway 模式：销毁会话的 MemoryStore，释放 SQLite 连接 */
+export function destroyMemoryStoreForSession(sessionId: string): void {
+  const store = _sessionStores.get(sessionId)
+  if (store) {
+    try { store.close() } catch { /* 忽略关闭错误 */ }
+    _sessionStores.delete(sessionId)
+  }
 }

@@ -1,5 +1,5 @@
 // 会话持久化 —— 将对话历史保存到本地磁盘
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, rmSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { Message } from './QueryEngine.js'
@@ -25,7 +25,10 @@ export interface SessionMeta {
   messageCount: number
   model: string
   title: string // 第一条用户消息的前 60 字
+  lastUserMessage?: string // 最近一条用户消息的前 80 字
   workDir?: string // 该会话的独立工作目录
+  /** 上次保存时已持久化的消息数，用于增量追加 */
+  savedMessageCount?: number
 }
 
 function ensureDir(dir: string) {
@@ -42,24 +45,51 @@ export function saveSession(
   const sessionDir = join(SESSIONS_DIR, sessionId)
   ensureDir(sessionDir)
 
-  // 保存消息历史（JSONL 格式，每行一条消息）
-  const lines = messages.map(m => JSON.stringify(m)).join('\n')
-  writeFileSync(join(sessionDir, 'transcript.jsonl'), lines, 'utf-8')
+  const transcriptPath = join(sessionDir, 'transcript.jsonl')
+  const existing = loadSessionMeta(sessionId)
+  const savedCount = existing?.savedMessageCount ?? 0
+
+  if (savedCount === 0 || !existsSync(transcriptPath)) {
+    // 首次保存或文件不存在：全量写入
+    const lines = messages.map(m => JSON.stringify(m)).join('\n')
+    writeFileSync(transcriptPath, lines + (lines ? '\n' : ''), 'utf-8')
+  } else if (messages.length > savedCount) {
+    // 增量追加：只写新增的消息
+    const newLines = messages.slice(savedCount).map(m => JSON.stringify(m)).join('\n')
+    appendFileSync(transcriptPath, newLines + '\n', 'utf-8')
+  } else if (messages.length < savedCount) {
+    // 消息数减少（发生了 compact/clearHistory）：全量重写
+    const lines = messages.map(m => JSON.stringify(m)).join('\n')
+    writeFileSync(transcriptPath, lines + (lines ? '\n' : ''), 'utf-8')
+  }
+  // messages.length === savedCount：无变化，跳过写入
 
   // 保存元数据
-  const firstUserMsg = messages.find(m => m.role === 'user')
+  const firstUserMsg = messages.find(
+    m => m.role === 'user' && typeof m.content === 'string' &&
+    !m.content.startsWith('[系统') && !m.content.startsWith('[上下文压缩]')
+  )
   const title = typeof firstUserMsg?.content === 'string'
     ? firstUserMsg.content.slice(0, 60)
-    : '新对话'
+    : (existing?.title ?? '新对话')
 
-  const existing = loadSessionMeta(sessionId)
+  const lastUserMsg = [...messages].reverse().find(
+    m => m.role === 'user' && typeof m.content === 'string' &&
+    !m.content.startsWith('[系统') && !m.content.startsWith('[上下文压缩]')
+  )
+  const lastUserMessage = typeof lastUserMsg?.content === 'string'
+    ? lastUserMsg.content.slice(0, 80)
+    : undefined
+
   const meta: SessionMeta = {
     id: sessionId,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     messageCount: messages.length,
+    savedMessageCount: messages.length,
     model,
     title,
+    lastUserMessage,
     workDir: workDir ?? existing?.workDir,
   }
   writeFileSync(join(sessionDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8')
@@ -175,5 +205,63 @@ export function loadArchive(sessionId: string, filename: string): Message[] | nu
     return lines.map(l => JSON.parse(l) as Message)
   } catch {
     return null
+  }
+}
+
+/**
+ * 清理过期会话（保留最近 N 个，删除超过 maxAgeDays 天的旧会话）
+ * 建议在应用启动时调用一次，避免 sessions/ 目录无限增长。
+ */
+export function pruneOldSessions(opts: {
+  keepCount?: number   // 至少保留的会话数，默认 50
+  maxAgeDays?: number  // 超过此天数的会话将被删除，默认 90 天
+} = {}): number {
+  const keepCount = opts.keepCount ?? 50
+  const maxAgeDays = opts.maxAgeDays ?? 90
+  const cutoff = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString()
+
+  const sessions = listSessions() // 已按 updatedAt 倒序
+  let deleted = 0
+
+  for (let i = 0; i < sessions.length; i++) {
+    const s = sessions[i]
+    // 保留最近 keepCount 个，无论多旧
+    if (i < keepCount) continue
+    // 超过 maxAgeDays 的才删除
+    if (s.updatedAt < cutoff) {
+      deleteSessionFromDisk(s.id)
+      deleted++
+    }
+  }
+
+  return deleted
+}
+
+/**
+ * 删除指定会话的所有数据（transcript、meta、归档文件等全部删除）。
+ * 同时删除该会话的工作目录（~/.hrids-agent/work/<date>-<id>/）。
+ * inMemoryCwd：活跃会话在内存中的 cwd，优先于 meta.json 里的 workDir（防止 meta 未写入的情况）。
+ * 若目录不存在则静默忽略。
+ */
+export function deleteSessionFromDisk(sessionId: string, inMemoryCwd?: string): void {
+  // 先读取 workDir（优先用内存传入的 cwd，其次读 meta.json）
+  const meta = loadSessionMeta(sessionId)
+  const workDir = inMemoryCwd ?? meta?.workDir
+
+  // 删除会话历史目录
+  const sessionDir = join(SESSIONS_DIR, sessionId)
+  if (existsSync(sessionDir)) {
+    rmSync(sessionDir, { recursive: true, force: true })
+  }
+
+  // 删除工作目录（仅删除 ~/.hrids-agent/work/ 下的子目录，防止误删用户自定义路径）
+  if (workDir) {
+    const workBase = join(homedir(), '.hrids-agent', 'work')
+    // 安全检查：只删 work/ 下的目录，且不能是 work/ 本身
+    if (workDir.startsWith(workBase + '/') || workDir.startsWith(workBase + '\\')) {
+      if (existsSync(workDir)) {
+        rmSync(workDir, { recursive: true, force: true })
+      }
+    }
   }
 }

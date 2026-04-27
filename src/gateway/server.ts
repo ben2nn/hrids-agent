@@ -1,12 +1,13 @@
-// Gateway HTTP + WebSocket 服务器
+﻿// Gateway HTTP + WebSocket 服务器
 import http from 'http'
 import express from 'express'
 import { WebSocketServer, WebSocket } from 'ws'
+import { execSync } from 'child_process'
 import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives } from '../core/SessionStore.js'
+import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
 import type { CreateSessionRequest } from './types.js'
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, renameSync } from 'fs'
 import { resolve, join, basename, extname } from 'path'
 import { homedir } from 'os'
 import { loadConfig, saveConfig } from '../core/Config.js'
@@ -14,6 +15,13 @@ import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
 
 const log = logger.child({ component: 'gateway-server' })
+
+/** 原子写入 JSON 文件：先写 .tmp 再 rename，防止并发写入时文件损坏 */
+function atomicWriteJson(filePath: string, data: unknown): void {
+  const tmp = filePath + '.tmp'
+  writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8')
+  renameSync(tmp, filePath)
+}
 
 export interface GatewayConfig {
   port?: number
@@ -35,6 +43,12 @@ class RateLimiter {
     const now = Date.now()
     const entry = this.counts.get(ip)
     if (!entry || now > entry.resetAt) {
+      // 顺手清理已过期的条目，防止长期运行内存泄漏
+      if (this.counts.size > 10_000) {
+        for (const [k, v] of this.counts) {
+          if (now > v.resetAt) this.counts.delete(k)
+        }
+      }
       this.counts.set(ip, { count: 1, resetAt: now + this.windowMs })
       return true
     }
@@ -107,6 +121,7 @@ export function createGateway(config: GatewayConfig = {}) {
           model: s.model ?? '',
           cwd: s.workDir ?? '',
           title: s.title ?? '',
+          lastUserMessage: s.lastUserMessage,
         }))
 
       res.json([...activeSessions, ...history])
@@ -144,7 +159,12 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // 销毁会话
   app.delete('/sessions/:id', async (req, res) => {
-    await manager.destroySession(req.params.id)
+    const id = req.params.id
+    // 在 destroySession 之前先取内存中的 cwd（destroySession 会把 session 从 Map 删掉）
+    const inMemoryCwd = manager.getSession(id)?.info.cwd
+    await manager.destroySession(id)
+    // 同时删除磁盘上的会话数据和工作目录，避免刷新后重新出现
+    deleteSessionFromDisk(id, inMemoryCwd)
     res.json({ ok: true })
   })
 
@@ -190,10 +210,36 @@ export function createGateway(config: GatewayConfig = {}) {
       const body = req.body as { model?: string; permissionMode?: string }
       const patch: Record<string, unknown> = {}
       if (body.model) patch.model = body.model
-      if (body.permissionMode && ['ask', 'auto', 'plan'].includes(body.permissionMode)) {
+      if (body.permissionMode && ['ask', 'craft', 'plan'].includes(body.permissionMode)) {
         patch.permissionMode = body.permissionMode
       }
       saveConfig(patch)
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /config/zhile-session — 读取知了专属会话 ID
+  app.get('/config/zhile-session', (_req, res) => {
+    const file = join(homedir(), '.hrids-agent', 'zhile-session.json')
+    if (!existsSync(file)) { res.json({ sessionId: null }); return }
+    try {
+      const data = JSON.parse(readFileSync(file, 'utf-8')) as { sessionId?: string }
+      res.json({ sessionId: data.sessionId ?? null })
+    } catch {
+      res.json({ sessionId: null })
+    }
+  })
+
+  // PUT /config/zhile-session — 保存知了专属会话 ID
+  app.put('/config/zhile-session', (req, res) => {
+    const dir = join(homedir(), '.hrids-agent')
+    const file = join(dir, 'zhile-session.json')
+    try {
+      const body = req.body as { sessionId?: string | null }
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      writeFileSync(file, JSON.stringify({ sessionId: body.sessionId ?? null }, null, 2), 'utf-8')
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
@@ -243,16 +289,24 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // GET /todos — 读取全局任务列表
+  // GET /todos — 读取所有活跃会话的任务列表（聚合）
+  // 注意：todos 现在按会话存储，此端点聚合所有活跃会话的 todos 供全局视图使用
   app.get('/todos', (_req, res) => {
-    const todoFile = join(homedir(), '.hrids-agent', 'todos.json')
-    if (!existsSync(todoFile)) {
-      res.json([])
-      return
-    }
     try {
-      const raw = JSON.parse(readFileSync(todoFile, 'utf-8'))
-      res.json(Array.isArray(raw) ? raw : [])
+      const allTodos: Array<Record<string, unknown>> = []
+      const activeSessions = manager.listSessions()
+      for (const session of activeSessions) {
+        const todoFile = join(homedir(), '.hrids-agent', 'sessions', session.id, 'todos.json')
+        if (!existsSync(todoFile)) continue
+        try {
+          const raw = JSON.parse(readFileSync(todoFile, 'utf-8'))
+          if (Array.isArray(raw)) {
+            // 附加 sessionId 字段，方便前端区分来源
+            allTodos.push(...raw.map((t: Record<string, unknown>) => ({ ...t, sessionId: session.id })))
+          }
+        } catch { /* 单个文件读取失败不影响整体 */ }
+      }
+      res.json(allTodos)
     } catch {
       res.json([])
     }
@@ -299,6 +353,8 @@ export function createGateway(config: GatewayConfig = {}) {
       toolStatus?: 'success' | 'error'
       toolResult?: unknown
       images?: string[]
+      isCron?: boolean
+      requestId?: string
       timestamp: number
     }> = []
 
@@ -330,9 +386,12 @@ export function createGateway(config: GatewayConfig = {}) {
         }
         // tool_result 不单独显示（结果附在 tool 消息上）
       } else if (msg.role === 'assistant') {
+        const isCron = msg.trigger === 'cron'
+        const requestId = msg.requestId
+        const cronDescription = msg.cronDescription
         if (typeof msg.content === 'string') {
           if (msg.content.trim()) {
-            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: msg.content, timestamp })
+            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: msg.content, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
           }
         } else if (Array.isArray(msg.content)) {
           // 提取 text 块
@@ -341,7 +400,7 @@ export function createGateway(config: GatewayConfig = {}) {
             .map(b => b.text ?? '')
             .join('')
           if (textParts.trim()) {
-            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: textParts, timestamp })
+            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: textParts, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
           }
           // 提取 tool_use 块，附带 input 和对应的 tool_result
           for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
@@ -356,6 +415,7 @@ export function createGateway(config: GatewayConfig = {}) {
                 toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
                 toolResult: resultEntry?.content,
                 timestamp: timestamp + 1,
+                ...(requestId ? { requestId } : {}),
               })
             }
           }
@@ -373,6 +433,73 @@ export function createGateway(config: GatewayConfig = {}) {
       res.json(archives)
     } catch (err) {
       log.warn('读取归档段失败', { error: String(err) })
+      res.json([])
+    }
+  })
+
+  // GET /sessions/:id/history-segments/:filename/messages — 读取归档段的实际消息
+  app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
+    try {
+      const rawMessages = loadSessionArchive(req.params.id, req.params.filename)
+      if (!rawMessages) { res.json([]); return }
+
+      type ToolResultEntry = { content: unknown; isError: boolean }
+      const toolResults = new Map<string, ToolResultEntry>()
+      for (const msg of rawMessages) {
+        if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
+        for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+          if (block.type === 'tool_result' && block.tool_use_id) {
+            toolResults.set(block.tool_use_id, { content: block.content, isError: block.is_error === true })
+          }
+        }
+      }
+
+      const displayMessages: Array<{
+        id: string; type: string; content?: string; toolId?: string; toolName?: string
+        toolInput?: unknown; toolStatus?: 'success' | 'error'; toolResult?: unknown
+        images?: string[]; isCron?: boolean; requestId?: string; timestamp: number
+      }> = []
+
+      let idx = 0
+      for (const msg of rawMessages) {
+        const timestamp = Date.now() - (rawMessages.length - idx) * 1000
+        idx++
+        if (msg.role === 'user') {
+          if (typeof msg.content === 'string') {
+            if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
+            const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
+            const images: string[] = []
+            let match: RegExpExecArray | null
+            while ((match = imagePattern.exec(msg.content)) !== null) images.push(match[1])
+            displayMessages.push({ id: `arc-u-${idx}`, type: 'user', content: msg.content, timestamp, ...(images.length > 0 ? { images } : {}) })
+          }
+        } else if (msg.role === 'assistant') {
+          const isCron = msg.trigger === 'cron'
+          const requestId = msg.requestId
+          const cronDescription = msg.cronDescription
+          if (typeof msg.content === 'string') {
+            if (msg.content.trim()) displayMessages.push({ id: `arc-a-${idx}`, type: 'assistant', content: msg.content, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
+          } else if (Array.isArray(msg.content)) {
+            const textParts = (msg.content as Array<{ type: string; text?: string }>)
+              .filter(b => b.type === 'text').map(b => b.text ?? '').join('')
+            if (textParts.trim()) displayMessages.push({ id: `arc-a-${idx}`, type: 'assistant', content: textParts, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
+            for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
+              if (block.type === 'tool_use' && block.id && block.name) {
+                const resultEntry = toolResults.get(block.id)
+                displayMessages.push({
+                  id: `arc-t-${block.id}`, type: 'tool', toolId: block.id, toolName: block.name,
+                  toolInput: block.input, toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
+                  toolResult: resultEntry?.content, timestamp: timestamp + 1,
+                  ...(requestId ? { requestId } : {}),
+                })
+              }
+            }
+          }
+        }
+      }
+      res.json(displayMessages)
+    } catch (err) {
+      log.warn('读取归档消息失败', { error: String(err) })
       res.json([])
     }
   })
@@ -587,6 +714,37 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
+  // GET /sessions/:id/git-file?path= — 获取文件在 git HEAD 中的原始内容
+  app.get('/sessions/:id/git-file', (req, res) => {
+    const activeSession = manager.getSession(req.params.id)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+
+    if (!cwd) {
+      res.status(404).json({ error: '会话不存在或无工作目录' })
+      return
+    }
+
+    const relPath = req.query.path as string
+    if (!relPath) {
+      res.status(400).json({ error: '缺少 path 参数' })
+      return
+    }
+
+    const absPath = resolve(cwd, relPath)
+    if (!absPath.startsWith(resolve(cwd))) {
+      res.status(403).json({ error: '禁止访问 cwd 之外的路径' })
+      return
+    }
+
+    try {
+      const content = execSync(`git show HEAD:${relPath}`, { cwd, encoding: 'utf-8', timeout: 5000 })
+      res.json({ path: relPath, content })
+    } catch {
+      // 文件在 git 中不存在（新文件）或不在 git 仓库中
+      res.status(404).json({ error: '文件在 git HEAD 中不存在（可能是新文件或不在 git 仓库中）' })
+    }
+  })
+
   // POST /sessions/:id/upload — 上传文件到会话工作目录
   // 请求体：JSON { files: Array<{ name: string; data: string }> }
   // data 为 base64 编码的文件内容
@@ -689,7 +847,7 @@ export function createGateway(config: GatewayConfig = {}) {
       }
       const { enabled } = req.body as { enabled: boolean }
       crons[idx].enabled = enabled
-      writeFileSync(cronFile, JSON.stringify(crons, null, 2), 'utf-8')
+      atomicWriteJson(cronFile, crons)
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
@@ -710,11 +868,174 @@ export function createGateway(config: GatewayConfig = {}) {
         res.status(404).json({ error: '定时任务不存在' })
         return
       }
-      writeFileSync(cronFile, JSON.stringify(filtered, null, 2), 'utf-8')
+      atomicWriteJson(cronFile, filtered)
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
     }
+  })
+
+  // POST /crons — 创建定时任务（前端直接创建，不经过 Agent）
+  app.post('/crons', async (req, res) => {
+    const cronDir = join(homedir(), '.hrids-agent')
+    const cronFile = join(cronDir, 'crons.json')
+    try {
+      const body = req.body as {
+        expression: string
+        description: string
+        task: string
+        once?: boolean
+        startDate?: string
+        endDate?: string
+      }
+      if (!body.expression || !body.description || !body.task) {
+        res.status(400).json({ error: '缺少必填字段：expression、description、task' })
+        return
+      }
+
+      // 读取现有任务
+      let crons: Array<Record<string, unknown>> = []
+      if (existsSync(cronFile)) {
+        try { crons = JSON.parse(readFileSync(cronFile, 'utf-8')) } catch { crons = [] }
+      } else {
+        if (!existsSync(cronDir)) mkdirSync(cronDir, { recursive: true })
+      }
+
+      // 计算下次执行时间（使用 ScheduleCronTool 的完整解析器）
+      let nextRunAt: number | undefined
+      try {
+        const { parseCronNextRun } = await import('../tools/ScheduleCronTool.js')
+        nextRunAt = parseCronNextRun(body.expression)
+      } catch {
+        nextRunAt = undefined
+      }
+
+      // 判断是否为周期性表达式
+      const parts = body.expression.trim().split(/\s+/)
+      const isRecurring = parts.length === 5 && parts.some(p => p.includes('*') || p.includes('/') || p.includes('-') || p.includes(','))
+      const once = isRecurring ? false : (body.once ?? false)
+
+      const id = `cron-${Date.now().toString(36)}`
+      const job = {
+        id,
+        expression: body.expression,
+        description: body.description,
+        task: body.task,
+        createdAt: Date.now(),
+        nextRunAt,
+        enabled: true,
+        once,
+        ...(body.startDate ? { startDate: body.startDate } : {}),
+        ...(body.endDate ? { endDate: body.endDate } : {}),
+      }
+
+      crons.push(job)
+      atomicWriteJson(cronFile, crons)
+
+      // 通知调度器注册新任务
+      try {
+        const { scheduleNewJob } = await import('../tools/ScheduleCronTool.js')
+        scheduleNewJob(job as Parameters<typeof scheduleNewJob>[0])
+      } catch { /* 调度器不可用时忽略，重启后会自动恢复 */ }
+
+      res.json(job)
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // ── MCP 服务器配置 API ──────────────────────────────────────────────────
+
+  // GET /mcp — 读取 MCP 服务器配置列表
+  app.get('/mcp', (_req, res) => {
+    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    if (!existsSync(mcpFile)) {
+      res.json({ mcpServers: {} })
+      return
+    }
+    try {
+      const raw = JSON.parse(readFileSync(mcpFile, 'utf-8'))
+      res.json(raw)
+    } catch {
+      res.json({ mcpServers: {} })
+    }
+  })
+
+  // PUT /mcp — 保存完整 MCP 配置（覆盖写入）
+  app.put('/mcp', (req, res) => {
+    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpFile = join(mcpDir, 'mcp.json')
+    try {
+      const body = req.body as { mcpServers?: Record<string, unknown> }
+      if (!body || typeof body !== 'object') {
+        res.status(400).json({ error: '请求体格式错误' })
+        return
+      }
+      if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true })
+      atomicWriteJson(mcpFile, body)
+      log.info('MCP 配置已保存', { serverCount: Object.keys(body.mcpServers ?? {}).length })
+      res.json({ ok: true })
+    } catch (err) {
+      log.error('MCP 配置保存失败', { error: String(err) })
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // POST /mcp/:name — 添加或更新单个 MCP 服务器
+  app.post('/mcp/:name', (req, res) => {
+    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpFile = join(mcpDir, 'mcp.json')
+    try {
+      const serverName = req.params.name
+      const serverConfig = req.body as Record<string, unknown>
+      if (!serverConfig || typeof serverConfig !== 'object') {
+        res.status(400).json({ error: '请求体格式错误' })
+        return
+      }
+
+      let config: { mcpServers: Record<string, unknown> } = { mcpServers: {} }
+      if (existsSync(mcpFile)) {
+        try { config = JSON.parse(readFileSync(mcpFile, 'utf-8')) } catch { config = { mcpServers: {} } }
+      }
+      if (!config.mcpServers) config.mcpServers = {}
+      config.mcpServers[serverName] = serverConfig
+
+      if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true })
+      atomicWriteJson(mcpFile, config)
+      log.info('MCP 服务器已添加/更新', { name: serverName })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // DELETE /mcp/:name — 删除单个 MCP 服务器
+  app.delete('/mcp/:name', (req, res) => {
+    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    try {
+      const serverName = req.params.name
+      if (!existsSync(mcpFile)) {
+        res.status(404).json({ error: 'MCP 配置文件不存在' })
+        return
+      }
+      const config = JSON.parse(readFileSync(mcpFile, 'utf-8')) as { mcpServers?: Record<string, unknown> }
+      if (!config.mcpServers || !(serverName in config.mcpServers)) {
+        res.status(404).json({ error: `MCP 服务器 "${serverName}" 不存在` })
+        return
+      }
+      delete config.mcpServers[serverName]
+      atomicWriteJson(mcpFile, config)
+      log.info('MCP 服务器已删除', { name: serverName })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /mcp/config-path — 返回 MCP 配置文件路径（供前端展示）
+  app.get('/mcp/config-path', (_req, res) => {
+    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    res.json({ path: mcpFile })
   })
 
   // GET /skills — 读取已安装技能列表
@@ -746,15 +1067,17 @@ export function createGateway(config: GatewayConfig = {}) {
       const disabledSet = getDisabledUserSkills()
 
       // 内置技能（从全局注册表取）
-      const builtinSkills = getBundledSkills()
-        .filter(s => s.userInvocable)
-        .map(s => ({
+      const builtinSkillsRaw = getBundledSkills().filter(s => s.userInvocable)
+      const builtinSkills = await Promise.all(
+        builtinSkillsRaw.map(async s => ({
           name: s.name,
           description: s.description,
           source: 'builtin' as const,
           installed: undefined,
           enabled: undefined,
-        }))
+          prompt: s.getPrompt ? await s.getPrompt('') : undefined,
+        })),
+      )
 
       // 用户技能：直接从文件系统加载，不经过禁用过滤，确保禁用的技能也能显示
       // 异步读取 SKILL.md 内容作为 prompt（用于前端详情展示）
@@ -805,7 +1128,10 @@ export function createGateway(config: GatewayConfig = {}) {
       }
 
       mkdirSync(agentDir, { recursive: true })
-      writeFileSync(disabledPath, JSON.stringify(disabled, null, 2), 'utf-8')
+      const { renameSync: rs } = await import('fs')
+      const tmpPath = disabledPath + '.tmp'
+      writeFileSync(tmpPath, JSON.stringify(disabled, null, 2), 'utf-8')
+      rs(tmpPath, disabledPath)
       res.json({ ok: true, enabled })
     } catch (err) {
       res.status(500).json({ error: String(err) })

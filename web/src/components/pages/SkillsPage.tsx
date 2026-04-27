@@ -1,8 +1,8 @@
-﻿import { useEffect, useRef, useState } from 'react'
-import { getSkills, searchMarketSkills, toggleSkillEnabled, installMarketSkill, uninstallMarketSkill } from '../../lib/gateway.js'
+﻿import { useEffect, useRef, useState, useCallback } from 'react'
+import { getSkills, searchMarketSkills, toggleSkillEnabled, installMarketSkill, uninstallMarketSkill, getMcpConfig, getMcpConfigPath, saveMcpConfig, deleteMcpServer } from '../../lib/gateway.js'
 import { MarkdownRenderer } from '../../lib/markdown.js'
 import type { Skill } from '../../lib/types.js'
-import type { MarketSkill } from '../../lib/gateway.js'
+import type { MarketSkill, McpServerEntry, McpConfig } from '../../lib/gateway.js'
 
 // ─── 顶层 Tab ──────────────────────────────────────────────────────────────
 
@@ -984,22 +984,330 @@ function MarketPanel() {
   )
 }
 
-// ─── MCP 服务 Tab（预留） ──────────────────────────────────────────────────
+// ─── MCP 服务 Tab ──────────────────────────────────────────────────────────
+
+// ── MCP 添加/编辑弹窗 ─────────────────────────────────────────────────────
+
+interface McpServerFormData {
+  name: string
+  command: string
+  args: string
+  envText: string
+  disabled: boolean
+  autoApprove: string
+}
+
+interface McpServerModalProps {
+  initial?: { name: string; config: McpServerEntry }
+  onClose: () => void
+  onSave: (name: string, config: McpServerEntry) => Promise<void>
+}
+
+function McpServerModal({ initial, onClose, onSave }: McpServerModalProps) {
+  const isEdit = !!initial
+  const [form, setForm] = useState<McpServerFormData>(() => {
+    if (initial) {
+      const { config } = initial
+      return {
+        name: initial.name,
+        command: config.command,
+        args: (config.args ?? []).join(' '),
+        envText: config.env ? Object.entries(config.env).map(([k, v]) => `${k}=${v}`).join('\n') : '',
+        disabled: config.disabled ?? false,
+        autoApprove: (config.autoApprove ?? []).join(', '),
+      }
+    }
+    return { name: '', command: '', args: '', envText: '', disabled: false, autoApprove: '' }
+  })
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  function setField<K extends keyof McpServerFormData>(key: K, value: McpServerFormData[K]) {
+    setForm(prev => ({ ...prev, [key]: value }))
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!form.name.trim()) { setError('请填写服务器名称'); return }
+    if (!form.command.trim()) { setError('请填写启动命令'); return }
+
+    const env: Record<string, string> = {}
+    for (const line of form.envText.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      const eqIdx = trimmed.indexOf('=')
+      if (eqIdx <= 0) continue
+      env[trimmed.slice(0, eqIdx).trim()] = trimmed.slice(eqIdx + 1)
+    }
+    const args = form.args.trim() ? form.args.trim().split(/\s+/) : []
+    const autoApprove = form.autoApprove.trim()
+      ? form.autoApprove.split(',').map(s => s.trim()).filter(Boolean)
+      : []
+
+    const config: McpServerEntry = {
+      command: form.command.trim(),
+      ...(args.length > 0 ? { args } : {}),
+      ...(Object.keys(env).length > 0 ? { env } : {}),
+      ...(form.disabled ? { disabled: true } : {}),
+      ...(autoApprove.length > 0 ? { autoApprove } : {}),
+    }
+
+    setSubmitting(true)
+    setError('')
+    try {
+      await onSave(form.name.trim(), config)
+      onClose()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl w-full max-w-lg mx-4 shadow-2xl flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)] shrink-0">
+          <h2 className="text-base font-semibold text-[var(--text-primary)]">{isEdit ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h2>
+          <button type="button" onClick={onClose} className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors text-lg leading-none" aria-label="关闭">✕</button>
+        </div>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4 px-5 py-4 overflow-y-auto flex-1">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm text-[var(--text-primary)]">服务器名称 <span className="text-red-400">*</span></label>
+            <input type="text" value={form.name} onChange={e => setField('name', e.target.value)} disabled={isEdit} placeholder="例如: filesystem、github、sqlite" className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm text-[var(--text-primary)]">启动命令 <span className="text-red-400">*</span></label>
+            <input type="text" value={form.command} onChange={e => setField('command', e.target.value)} placeholder="例如: uvx、npx、node、python" className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] transition-colors font-mono" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm text-[var(--text-primary)]">参数 <span className="text-xs text-[var(--text-muted)]">(空格分隔)</span></label>
+            <input type="text" value={form.args} onChange={e => setField('args', e.target.value)} placeholder="例如: mcp-server-filesystem /path/to/dir" className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] transition-colors font-mono" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm text-[var(--text-primary)]">环境变量 <span className="text-xs text-[var(--text-muted)]">(每行一个 KEY=VALUE)</span></label>
+            <textarea value={form.envText} onChange={e => setField('envText', e.target.value)} placeholder={'GITHUB_TOKEN=ghp_xxx\nAPI_KEY=sk-xxx'} rows={3} className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] transition-colors resize-none font-mono" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm text-[var(--text-primary)]">自动批准工具 <span className="text-xs text-[var(--text-muted)]">(逗号分隔，留空则全部需确认)</span></label>
+            <input type="text" value={form.autoApprove} onChange={e => setField('autoApprove', e.target.value)} placeholder="例如: read_file, list_directory" className="w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] transition-colors" />
+          </div>
+          <div className="flex items-center gap-3">
+            <button type="button" role="switch" aria-checked={!form.disabled} onClick={() => setField('disabled', !form.disabled)} className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${!form.disabled ? 'bg-[var(--accent)]' : 'bg-[var(--bg-tertiary)]'}`}>
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${!form.disabled ? 'translate-x-4' : 'translate-x-0'}`} />
+            </button>
+            <span className="text-sm text-[var(--text-primary)]">启用此服务器</span>
+          </div>
+          {error && <p className="text-sm text-red-400">{error}</p>}
+        </form>
+        <div className="flex justify-end gap-2 px-5 py-4 border-t border-[var(--border)] shrink-0">
+          <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors">取消</button>
+          <button type="button" onClick={handleSubmit as unknown as React.MouseEventHandler} disabled={submitting} className="px-5 py-2 text-sm bg-[var(--accent)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">{submitting ? '保存中...' : '保存'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── MCP JSON 编辑器弹窗 ───────────────────────────────────────────────────
+
+interface McpJsonEditorModalProps {
+  config: McpConfig
+  configPath: string
+  onClose: () => void
+  onSave: (config: McpConfig) => Promise<void>
+}
+
+function McpJsonEditorModal({ config, configPath, onClose, onSave }: McpJsonEditorModalProps) {
+  const [text, setText] = useState(() => JSON.stringify(config, null, 2))
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleSave() {
+    setError('')
+    let parsed: McpConfig
+    try { parsed = JSON.parse(text) as McpConfig } catch (e) { setError(`JSON 格式错误: ${String(e)}`); return }
+    if (!parsed.mcpServers || typeof parsed.mcpServers !== 'object') { setError('配置必须包含 "mcpServers" 对象'); return }
+    setSubmitting(true)
+    try { await onSave(parsed); onClose() } catch (err) { setError(String(err)) } finally { setSubmitting(false) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl w-full max-w-2xl mx-4 shadow-2xl flex flex-col" style={{ height: '80vh' }}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)] shrink-0">
+          <div>
+            <h2 className="text-base font-semibold text-[var(--text-primary)]">配置 MCP</h2>
+            <p className="text-xs text-[var(--text-muted)] mt-0.5 font-mono">{configPath}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors border border-[var(--border)] rounded-lg">取消</button>
+            <button type="button" onClick={handleSave} disabled={submitting} className="px-4 py-1.5 text-sm bg-[var(--accent)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">{submitting ? '保存中...' : '保存'}</button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-hidden flex flex-col px-5 py-4 gap-2">
+          {error && <p className="text-sm text-red-400 shrink-0">{error}</p>}
+          <textarea value={text} onChange={e => setText(e.target.value)} spellCheck={false} className="flex-1 w-full bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg px-4 py-3 text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:border-[var(--accent)] transition-colors resize-none leading-relaxed" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── MCP 服务器卡片 ────────────────────────────────────────────────────────
+
+interface McpServerCardProps {
+  name: string
+  config: McpServerEntry
+  onEdit: () => void
+  onDelete: () => void
+}
+
+function McpServerCard({ name, config, onEdit, onDelete }: McpServerCardProps) {
+  const isDisabled = config.disabled === true
+  const cmdPreview = [config.command, ...(config.args ?? [])].join(' ')
+  const envCount = Object.keys(config.env ?? {}).length
+
+  function handleDelete() {
+    if (window.confirm(`确定要删除 MCP 服务器 "${name}" 吗？`)) onDelete()
+  }
+
+  return (
+    <div className={`flex items-start gap-3 px-4 py-3.5 rounded-xl border transition-all group ${isDisabled ? 'border-[var(--border)] opacity-60' : 'border-[var(--border)] hover:border-[var(--accent-border)]'} bg-[var(--bg-secondary)]`}>
+      <div className="mt-1 shrink-0">
+        <span className={`w-2 h-2 rounded-full block ${isDisabled ? 'bg-[var(--text-muted)]' : 'bg-emerald-400'}`} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-sm font-semibold text-[var(--text-primary)] truncate">{name}</span>
+          {isDisabled && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)] shrink-0">已禁用</span>}
+        </div>
+        <code className="text-xs text-[var(--text-secondary)] font-mono truncate block">
+          {cmdPreview.length > 80 ? cmdPreview.slice(0, 80) + '...' : cmdPreview}
+        </code>
+        {envCount > 0 && <span className="text-xs text-[var(--text-muted)] mt-0.5 block">{envCount} 个环境变量</span>}
+        {(config.autoApprove ?? []).length > 0 && <span className="text-xs text-[var(--text-muted)] mt-0.5 block">自动批准: {config.autoApprove!.join(', ')}</span>}
+      </div>
+      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button type="button" onClick={onEdit} className="px-2.5 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors" aria-label={`编辑 ${name}`}>编辑</button>
+        <button type="button" onClick={handleDelete} className="px-2.5 py-1 text-xs text-red-400 hover:text-red-300 rounded-lg hover:bg-red-900/20 transition-colors" aria-label={`删除 ${name}`}>删除</button>
+      </div>
+    </div>
+  )
+}
+
+// ── McpPanel 主体 ─────────────────────────────────────────────────────────
 
 function McpPanel() {
+  const [config, setConfig] = useState<McpConfig>({ mcpServers: {} })
+  const [configPath, setConfigPath] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [showAddModal, setShowAddModal] = useState(false)
+  const [editTarget, setEditTarget] = useState<{ name: string; config: McpServerEntry } | null>(null)
+  const [showJsonEditor, setShowJsonEditor] = useState(false)
+
+  const fetchConfig = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const [cfg, pathRes] = await Promise.all([getMcpConfig(), getMcpConfigPath()])
+      setConfig(cfg)
+      setConfigPath(pathRes)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void fetchConfig() }, [fetchConfig])
+
+  async function handleSaveServer(name: string, serverConfig: McpServerEntry) {
+    const newConfig: McpConfig = { mcpServers: { ...config.mcpServers, [name]: serverConfig } }
+    await saveMcpConfig(newConfig)
+    setConfig(newConfig)
+  }
+
+  async function handleDeleteServer(name: string) {
+    await deleteMcpServer(name)
+    const newServers = { ...config.mcpServers }
+    delete newServers[name]
+    setConfig({ mcpServers: newServers })
+  }
+
+  async function handleSaveJson(newConfig: McpConfig) {
+    await saveMcpConfig(newConfig)
+    setConfig(newConfig)
+  }
+
+  const serverEntries = Object.entries(config.mcpServers ?? {})
+
   return (
-    <div className="flex flex-col items-center justify-center py-20 text-[var(--text-secondary)]">
-      <div className="w-14 h-14 rounded-2xl bg-[var(--bg-tertiary)] border border-[var(--border)] flex items-center justify-center mb-4">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
-        </svg>
+    <div className="flex flex-col gap-4">
+      {/* 顶部操作栏 */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <a href="https://mcp.so" target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border)] rounded-lg hover:bg-[var(--bg-tertiary)] transition-all">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+            MCP Hub
+          </a>
+        </div>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setShowJsonEditor(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border)] rounded-lg hover:bg-[var(--bg-tertiary)] transition-all">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14" />
+            </svg>
+            配置 MCP
+          </button>
+          {serverEntries.length > 0 && (
+            <button type="button" onClick={() => setShowAddModal(true)} className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded-lg hover:opacity-90 transition-opacity">
+              <span>+</span><span>添加</span>
+            </button>
+          )}
+        </div>
       </div>
-      <p className="text-sm font-medium text-[var(--text-primary)] mb-1">MCP 服务</p>
-      <p className="text-xs text-[var(--text-muted)] text-center max-w-[200px] leading-relaxed">
-        Model Context Protocol 服务管理，即将上线
-      </p>
+
+      {/* 内容区 */}
+      {loading ? (
+        <div className="flex flex-col gap-2">
+          {[1, 2].map(i => <div key={i} className="h-16 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border)] animate-pulse" />)}
+        </div>
+      ) : error ? (
+        <div className="flex flex-col items-center justify-center py-16 gap-3">
+          <p className="text-sm text-red-400">{error}</p>
+          <button type="button" onClick={fetchConfig} className="px-4 py-2 text-sm bg-[var(--accent)] text-white rounded-lg hover:opacity-90 transition-opacity">重试</button>
+        </div>
+      ) : serverEntries.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 gap-4">
+          <div className="w-14 h-14 rounded-2xl bg-[var(--bg-tertiary)] border border-[var(--border)] flex items-center justify-center">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-[var(--text-muted)]">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2" /><rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
+              <line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" />
+            </svg>
+          </div>
+          <div className="text-center">
+            <p className="text-sm font-medium text-[var(--text-primary)]">暂无 MCP 服务器</p>
+            <p className="text-xs text-[var(--text-muted)] mt-1">点击配置按钮添加 MCP 服务器</p>
+          </div>
+          <button type="button" onClick={() => setShowAddModal(true)} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-[var(--accent)] text-white rounded-lg hover:opacity-90 transition-opacity">
+            <span>+</span><span>添加服务器</span>
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {serverEntries.map(([name, serverConfig]) => (
+            <McpServerCard key={name} name={name} config={serverConfig} onEdit={() => setEditTarget({ name, config: serverConfig })} onDelete={() => handleDeleteServer(name)} />
+          ))}
+        </div>
+      )}
+
+      {/* 弹窗 */}
+      {showAddModal && <McpServerModal onClose={() => setShowAddModal(false)} onSave={handleSaveServer} />}
+      {editTarget && <McpServerModal initial={editTarget} onClose={() => setEditTarget(null)} onSave={handleSaveServer} />}
+      {showJsonEditor && <McpJsonEditorModal config={config} configPath={configPath} onClose={() => setShowJsonEditor(false)} onSave={handleSaveJson} />}
     </div>
   )
 }

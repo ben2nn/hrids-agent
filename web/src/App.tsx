@@ -5,6 +5,7 @@ import { ConnectPage } from './components/pages/ConnectPage.js'
 import { ChatPage } from './components/pages/ChatPage.js'
 import { SkillsPage } from './components/pages/SkillsPage.js'
 import { AutomationPage } from './components/pages/AutomationPage.js'
+import { ZhilePage } from './components/pages/ZhilePage.js'
 import { NavBar } from './components/layout/NavBar.js'
 import type { NavView } from './components/layout/NavBar.js'
 
@@ -46,7 +47,11 @@ export function App() {
   useEffect(() => {
     if (isConnected) {
       void useSessionStore.getState().fetchSessions().then(() => {
-        const { sessions, activeSessionId, setActive } = useSessionStore.getState()
+        const { sessions, activeSessionId, setActive, initZhileSession } = useSessionStore.getState()
+
+        // 初始化知了专属会话
+        void initZhileSession()
+
         // 过滤掉已停止的会话（stopped 状态需要 resume，不自动恢复）
         const liveSessions = sessions.filter(s => s.status !== 'stopped')
         if (liveSessions.length === 0) return
@@ -120,6 +125,14 @@ export function App() {
           {view === 'automation' && (
             <div className="flex-1 overflow-hidden">
               <AutomationPage />
+            </div>
+          )}
+          {view === 'zhile' && (
+            <div className="flex-1 overflow-hidden">
+              <ZhilePage
+                navCollapsed={navCollapsed}
+                onNavCollapsedChange={setNavCollapsed}
+              />
             </div>
           )}
         </div>

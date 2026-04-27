@@ -2,8 +2,9 @@
 import { execSync } from 'child_process'
 import { existsSync, readFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
-import { join, resolve } from 'path'
-import { getMemoryStack } from '../memory/index.js'
+import { join } from 'path'
+import { getMemoryStack, getMemoryStackForSession } from '../memory/index.js'
+import { getCurrentSessionId } from './sessionContext.js'
 
 export interface ContextInfo {
   gitStatus: string | null
@@ -32,22 +33,56 @@ export function getSessionWorkDir(sessionId: string): string {
   const dir = join(homedir(), '.hrids-agent', 'work', dirName)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
+    // 初始化 git 仓库，使差异功能可用
+    try {
+      execSync('git init', { cwd: dir, stdio: 'ignore' })
+      execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
+    } catch {
+      // git 不可用时静默忽略
+    }
   }
   return dir
 }
 
 // 读取 git 状态（分支、最近提交、工作区变更）
-function getGitContext(): string | null {
+// 结果按 cwd 分桶缓存 5 秒，避免每条消息都同步阻塞执行 3 次 git 命令
+// Gateway 多会话模式下不同会话的 cwd 不同，分桶避免缓存污染
+const _gitCacheMap = new Map<string, { result: string | null; ts: number }>()
+const GIT_CACHE_TTL_MS = 5000
+// 缓存条目上限，防止长期运行的 Gateway 进程内存泄漏
+const GIT_CACHE_MAX_ENTRIES = 200
+
+function getGitContext(cwd?: string): string | null {
+  const key = cwd ?? ''
+  const now = Date.now()
+  const cached = _gitCacheMap.get(key)
+  if (cached && now - cached.ts < GIT_CACHE_TTL_MS) {
+    return cached.result
+  }
+  const result = _fetchGitContext(cwd)
+
+  // 超出上限时，淘汰最旧的条目（按插入顺序，Map 保证迭代顺序）
+  if (!_gitCacheMap.has(key) && _gitCacheMap.size >= GIT_CACHE_MAX_ENTRIES) {
+    const oldestKey = _gitCacheMap.keys().next().value
+    if (oldestKey !== undefined) _gitCacheMap.delete(oldestKey)
+  }
+
+  _gitCacheMap.set(key, { result, ts: now })
+  return result
+}
+
+function _fetchGitContext(cwd?: string): string | null {
+  const execOpts = cwd
+    ? { encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], cwd }
+    : { encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] }
   try {
-    const isGit = execSync('git rev-parse --is-inside-work-tree 2>/dev/null', {
-      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim()
+    const isGit = execSync('git rev-parse --is-inside-work-tree 2>/dev/null', execOpts).trim()
     if (isGit !== 'true') return null
 
     const [branch, status, log] = [
-      execSync('git branch --show-current', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(),
-      execSync('git status --short', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(),
-      execSync('git log --oneline -5', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(),
+      execSync('git branch --show-current', execOpts).trim(),
+      execSync('git status --short', execOpts).trim(),
+      execSync('git log --oneline -5', execOpts).trim(),
     ]
 
     const parts = [`当前分支: ${branch}`]
@@ -88,7 +123,7 @@ function findMemoryFiles(cwd: string): string[] {
 // cwd 参数可选，不传则使用 ~/.hrids-agent/work/（仅用于记忆文件查找）
 export async function buildSystemContext(basePrompt: string, cwd?: string): Promise<string> {
   const resolvedCwd = cwd ?? getDefaultAgentCwd()
-  const gitCtx = getGitContext()
+  const gitCtx = getGitContext(resolvedCwd)
   const memFiles = findMemoryFiles(resolvedCwd)
 
   const sections: string[] = [basePrompt]
@@ -100,7 +135,8 @@ export async function buildSystemContext(basePrompt: string, cwd?: string): Prom
 
   // 注入长期记忆（L0 身份 + L1 核心摘要）
   try {
-    const stack = getMemoryStack()
+    const sessionId = getCurrentSessionId()
+    const stack = sessionId ? getMemoryStackForSession(sessionId) : getMemoryStack()
     const { l0Identity, l1Essential, totalTokens } = stack.wakeUp()
     const stats = await stack.status()
     if (stats.totalMemories > 0) {

@@ -17,35 +17,71 @@ export interface Team {
   agentIds: string[]
 }
 
-// 全局单例，跨工具调用共享状态
+// 进程级全局单例（CLI 单会话模式使用）
+// Gateway 多会话模式下，每个 ManagedSession 持有自己的 TeamManager 实例，
+// 通过 AsyncLocalStorage 上下文绑定，避免跨会话污染。
 let globalTeamManager: TeamManager | null = null
+
+// 会话级 TeamManager 存储（sessionId → TeamManager）
+const sessionManagers = new Map<string, TeamManager>()
 
 export class TeamManager {
   private teams = new Map<string, Team>()
   private provider: LLMProvider
   private baseTools: ToolDef[]
   private bus: MessageBus
+  // 所属会话 ID（Gateway 模式下传入，用于 AgentPool 获取会话级记忆）
+  private sessionId: string | undefined
 
-  constructor(provider: LLMProvider, baseTools: ToolDef[]) {
+  constructor(provider: LLMProvider, baseTools: ToolDef[], sessionId?: string) {
     this.provider = provider
     this.baseTools = baseTools
     this.bus = MessageBus.getInstance()
+    this.sessionId = sessionId
   }
 
+  /** CLI 模式：初始化进程级全局单例 */
   static init(provider: LLMProvider, baseTools: ToolDef[]): TeamManager {
     globalTeamManager = new TeamManager(provider, baseTools)
     return globalTeamManager
   }
 
+  /** CLI 模式：获取进程级全局单例 */
   static get(): TeamManager | null {
     return globalTeamManager
+  }
+
+  /** Gateway 模式：为指定会话创建独立实例 */
+  static initForSession(sessionId: string, provider: LLMProvider, baseTools: ToolDef[]): TeamManager {
+    const mgr = new TeamManager(provider, baseTools, sessionId)
+    sessionManagers.set(sessionId, mgr)
+    return mgr
+  }
+
+  /** Gateway 模式：获取指定会话的实例，不存在时回退到全局单例 */
+  static getForSession(sessionId: string): TeamManager | null {
+    return sessionManagers.get(sessionId) ?? globalTeamManager
+  }
+
+  /** Gateway 模式：销毁会话实例，释放资源 */
+  static destroySession(sessionId: string): void {
+    const mgr = sessionManagers.get(sessionId)
+    if (mgr) {
+      // 中止所有团队的所有任务
+      for (const team of mgr.teams.values()) {
+        for (const id of team.agentIds) {
+          team.pool.abort(id)
+        }
+      }
+      sessionManagers.delete(sessionId)
+    }
   }
 
   createTeam(config: TeamConfig): Team {
     if (this.teams.has(config.name)) {
       throw new Error(`团队 "${config.name}" 已存在`)
     }
-    const pool = new AgentPool(this.provider, this.baseTools, config.maxConcurrent ?? 5)
+    const pool = new AgentPool(this.provider, this.baseTools, config.maxConcurrent ?? 5, this.sessionId)
     const team: Team = {
       name: config.name,
       pool,

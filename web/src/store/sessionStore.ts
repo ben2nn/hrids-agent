@@ -3,6 +3,8 @@ import {
   listSessions,
   createSession as apiCreateSession,
   deleteSession as apiDeleteSession,
+  getZhileSessionId,
+  setZhileSessionId,
 } from '../lib/gateway.js'
 import { WsClient } from '../lib/wsClient.js'
 import { useConnectionStore } from './connectionStore.js'
@@ -19,6 +21,32 @@ function httpToWs(url: string): string {
   return url.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://')
 }
 
+// 乐观 busy 超时：发送消息后若后端 30s 内无任何响应，自动回退到 ready
+const OPTIMISTIC_BUSY_TIMEOUT_MS = 2 * 60_000
+const _optimisticTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function _startOptimisticTimer(sessionId: string, set: SetFn): void {
+  _clearOptimisticTimer(sessionId)
+  const timer = setTimeout(() => {
+    _optimisticTimers.delete(sessionId)
+    console.warn('[sessionStore] 乐观 busy 超时，回退到 ready', { sessionId })
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId && s.status === 'busy' ? { ...s, status: 'ready' as const } : s,
+      ),
+    }))
+  }, OPTIMISTIC_BUSY_TIMEOUT_MS)
+  _optimisticTimers.set(sessionId, timer)
+}
+
+function _clearOptimisticTimer(sessionId: string): void {
+  const t = _optimisticTimers.get(sessionId)
+  if (t !== undefined) {
+    clearTimeout(t)
+    _optimisticTimers.delete(sessionId)
+  }
+}
+
 // ─── Store 类型定义 ────────────────────────────────────────────────────────
 
 interface SessionState {
@@ -26,15 +54,24 @@ interface SessionState {
   sessions: SessionInfo[]
   /** 当前活跃会话 ID */
   activeSessionId: string | null
+  /** 知了专属会话 ID */
+  zhileSessionId: string | null
   /** 每个会话对应的 WebSocket 客户端 */
   wsClients: Map<string, WsClient>
   /** 已超过最大重连次数的会话 ID 集合 */
   wsMaxRetriesExceeded: Set<string>
+  /** 下次创建会话时使用的模型（null = Auto，走后端 fallback 链） */
+  pendingModel: string | null
 
   /**
    * 从 Gateway 拉取会话列表，更新 sessions。
    */
   fetchSessions: () => Promise<void>
+
+  /**
+   * 初始化知了专属会话：从后端读取 ID，若不存在或已删除则自动创建。
+   */
+  initZhileSession: () => Promise<void>
 
   /**
    * 创建新会话：调用 REST API，成功后建立 WS 连接，并设为活跃会话。
@@ -53,6 +90,11 @@ interface SessionState {
   setActive: (id: string) => void
 
   /**
+   * 设置下次创建会话时使用的模型（null = Auto）。
+   */
+  setPendingModel: (model: string | null) => void
+
+  /**
    * 通过对应会话的 WS 发送用户消息。
    * attachments 为可选的图片/PDF 附件列表（base64 编码）。
    */
@@ -65,8 +107,9 @@ interface SessionState {
 
   /**
    * 通过对应会话的 WS 发送权限回复。
+   * options.permanent=true 时持久化规则；options.session=true 时会话内批准（含内容级）
    */
-  sendPermissionReply: (sessionId: string, key: string, granted: boolean) => void
+  sendPermissionReply: (sessionId: string, key: string, granted: boolean, options?: { permanent?: boolean; session?: boolean; ruleContent?: string }) => void
 
   /**
    * 通过对应会话的 WS 发送用户回答（ask_user 场景）。
@@ -91,7 +134,12 @@ interface SessionState {
   /**
    * 切换当前会话的权限模式，通过 WS 发送给后端。
    */
-  setPermissionMode: (sessionId: string, mode: 'ask' | 'auto' | 'plan') => void
+  setPermissionMode: (sessionId: string, mode: 'ask' | 'craft' | 'plan') => void
+
+  /**
+   * 清除指定会话的所有历史消息（通过 WS 通知后端同步清除）。
+   */
+  sendClearHistory: (sessionId: string) => void
 }
 
 // ─── Store 实现 ────────────────────────────────────────────────────────────
@@ -99,17 +147,61 @@ interface SessionState {
 export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
+  zhileSessionId: null,
   wsClients: new Map(),
   wsMaxRetriesExceeded: new Set(),
+  pendingModel: null,
 
   async fetchSessions() {
     const sessions = await listSessions()
     set({ sessions })
   },
 
+  async initZhileSession() {
+    // 1. 从后端读取持久化的知了会话 ID
+    const savedId = await getZhileSessionId()
+
+    // 2. 检查该会话是否还在列表里（可能已被删除）
+    const { sessions } = get()
+    const exists = savedId && sessions.some(s => s.id === savedId)
+
+    if (exists) {
+      set({ zhileSessionId: savedId })
+      const zhileSession = sessions.find(s => s.id === savedId)
+      if (zhileSession?.status === 'stopped') {
+        // 历史会话：先 resume 再建立 WS（resume 内部会建立 WS）
+        await get().resumeSession(savedId)
+      } else if (!get().wsClients.has(savedId)) {
+        // 活跃会话：立即建立 WS 连接，确保 cron 触发时能实时收到消息
+        _connectWs(savedId, set, get)
+      }
+      return
+    }
+
+    // 3. 不存在则创建新的知了专属会话
+    try {
+      const session = await apiCreateSession({ title: '知了' } as Parameters<typeof apiCreateSession>[0])
+      await setZhileSessionId(session.id)
+      // 刷新会话列表
+      const updated = await listSessions()
+      set({ sessions: updated, zhileSessionId: session.id })
+      // 立即建立 WS 连接
+      _connectWs(session.id, set, get)
+    } catch (err) {
+      console.error('[sessionStore] initZhileSession 创建失败:', err)
+    }
+  },
+
   async createSession(req: CreateSessionRequest) {
+    // 若调用方没有指定 model，自动带入用户选择的 pendingModel
+    const { pendingModel } = get()
+    const mergedReq: CreateSessionRequest = {
+      ...req,
+      model: req.model ?? (pendingModel ?? undefined),
+    }
+
     // 1. 调用 REST API 创建会话
-    const session = await apiCreateSession(req)
+    const session = await apiCreateSession(mergedReq)
 
     // 2. 从服务端重新拉取列表（避免手动 push 导致重复）
     const sessions = await listSessions()
@@ -120,6 +212,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     // 4. 设为活跃会话
     set({ activeSessionId: session.id })
+  },
+
+  setPendingModel(model: string | null) {
+    set({ pendingModel: model })
   },
 
   async resumeSession(id: string) {
@@ -186,7 +282,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     if (session?.status === 'stopped') {
       // 历史会话：先加载历史消息，再后台 resume（resume 内部会建立 WS 连接）
-      // 顺序执行避免竞态：WS 回放的消息会触发 loadHistoryMessages 的去重保护
       import('./messageStore.js').then(({ useMessageStore }) => {
         return useMessageStore.getState().loadHistoryMessages(id)
       }).then(() => {
@@ -201,47 +296,53 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return
     }
 
-    // 活跃会话（ready/busy）：先加载历史消息，再建立 WS 连接
-    // 顺序执行避免竞态：WS 回放的 tool_start 会向 messages 追加数据，
-    // 若 WS 先建立，loadHistoryMessages 的去重保护会误判为已有消息而跳过加载
+    // 活跃会话（ready/busy）：加载历史消息。
+    // busy 会话立即建立 WS 连接，确保能收到流式消息和发出 abort 指令。
+    // ready 会话采用懒连接：用户发消息时再建立，消息进入 pendingQueue 等连接就绪后发送。
+    if (session?.status === 'busy' && !get().wsClients.has(id)) {
+      _connectWs(id, set, get)
+    }
     import('./messageStore.js').then(({ useMessageStore }) => {
       return useMessageStore.getState().loadHistoryMessages(id)
-    }).then(() => {
-      // 用户可能已切换到其他会话，但 WS 连接仍需建立（后台保持连接，切回时即用）
-      if (!get().wsClients.has(id)) {
-        _connectWs(id, set, get)
-      }
     }).catch((err) => {
       console.error('[sessionStore] setActive loadHistoryMessages 失败:', err)
-      if (!get().wsClients.has(id)) {
-        _connectWs(id, set, get)
-      }
     })
   },
 
   sendMessage(sessionId: string, content: string, attachments?: import('../lib/types.js').MessageAttachment[]) {
-    const client = get().wsClients.get(sessionId)
-    if (!client) {
-      console.error('[sessionStore] sendMessage: 找不到 WsClient', { sessionId })
-      return
-    }
+    // 乐观更新：立即标记为 busy，不等后端推事件，消除发送到显示"运行中"的延迟
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId ? { ...s, status: 'busy' as const } : s,
+      ),
+    }))
+    // 启动超时保护：30s 内后端无响应则回退到 ready
+    _startOptimisticTimer(sessionId, set)
+    // 懒建立 WS 连接：没有 client 时自动创建，消息进入 pendingQueue 等连接就绪后发送
+    const client = _ensureWs(sessionId, set, get)
     console.debug('[sessionStore] sendMessage', { sessionId, contentLength: content.length, attachmentCount: attachments?.length ?? 0 })
     client.send({ type: 'message', content, ...(attachments && attachments.length > 0 ? { attachments } : {}) })
   },
 
   sendAbort(sessionId: string) {
-    const client = get().wsClients.get(sessionId)
-    client?.send({ type: 'abort' })
+    // abort 需要确保连接存在才能发出去（切换回 busy 会话时可能没有 WS 连接）
+    _ensureWs(sessionId, set, get).send({ type: 'abort' })
   },
 
-  sendPermissionReply(sessionId: string, key: string, granted: boolean) {
-    const client = get().wsClients.get(sessionId)
-    client?.send({ type: 'permission_reply', key, granted })
+  sendPermissionReply(sessionId: string, key: string, granted: boolean, options?: { permanent?: boolean; session?: boolean; ruleContent?: string }) {
+    // 权限回复需要确保连接存在（WS 断线重连后可能需要重新发送）
+    _ensureWs(sessionId, set, get).send({
+      type: 'permission_reply',
+      key,
+      granted,
+      ...(options?.permanent ? { permanent: true } : {}),
+      ...(options?.session ? { session: true } : {}),
+      ...(options?.ruleContent ? { ruleContent: options.ruleContent } : {}),
+    })
   },
 
   sendUserReply(sessionId: string, answer: string) {
-    const client = get().wsClients.get(sessionId)
-    client?.send({ type: 'user_reply', answer })
+    _ensureWs(sessionId, set, get).send({ type: 'user_reply', answer })
   },
 
   clearWsMaxRetries(sessionId: string) {
@@ -262,7 +363,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     })
   },
 
-  setPermissionMode(sessionId: string, mode: 'ask' | 'auto' | 'plan') {
+  setPermissionMode(sessionId: string, mode: 'ask' | 'craft' | 'plan') {
     const client = get().wsClients.get(sessionId)
     client?.send({ type: 'set_permission_mode', mode })
     // 乐观更新本地状态
@@ -271,6 +372,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         s.id === sessionId ? { ...s, permissionMode: mode } : s,
       ),
     }))
+  },
+
+  sendClearHistory(sessionId: string) {
+    _ensureWs(sessionId, set, get).send({ type: 'clear_history' })
   },
 }))
 
@@ -284,6 +389,19 @@ type SetFn = (
   replace?: false,
 ) => void
 type GetFn = () => SessionState
+
+/**
+ * 确保指定会话有 WsClient，没有则自动建立（懒连接）。
+ * 返回 WsClient 实例，调用方可直接 .send()，消息会进入 pendingQueue 等连接就绪后发送。
+ */
+function _ensureWs(sessionId: string, set: SetFn, get: GetFn): WsClient {
+  const existing = get().wsClients.get(sessionId)
+  if (existing) return existing
+  console.debug('[sessionStore] _ensureWs: 懒建立 WS 连接', { sessionId })
+  _connectWs(sessionId, set, get)
+  // _connectWs 同步写入 wsClients，此处一定能取到
+  return get().wsClients.get(sessionId)!
+}
 
 /**
  * 为指定会话建立 WebSocket 连接，并注册消息处理回调。
@@ -325,6 +443,10 @@ function _handleWsMessage(
   if (msg.type !== 'text_delta' && msg.type !== 'tool_log') {
     console.debug('[sessionStore] _handleWsMessage', { sessionId, type: msg.type })
   }
+
+  // 收到后端任何消息，说明连接正常、后端已响应，清除乐观 busy 超时计时器
+  _clearOptimisticTimer(sessionId)
+
   // 1. 所有消息都转发给 messageStore（懒加载，避免循环依赖）
   import('./messageStore.js').then(({ useMessageStore }) => {
     useMessageStore.getState().handleServerMessage(sessionId, msg)
@@ -360,7 +482,7 @@ function _handleWsMessage(
     }))
   }
 
-  // 4. 根据消息类型更新会话 status
+  // 5. 根据消息类型更新会话 status
   if (msg.type === 'ready' || msg.type === 'done') {
     set((state) => ({
       sessions: state.sessions.map((s) =>
@@ -378,11 +500,16 @@ function _handleWsMessage(
     }))
   }
 
-  if (msg.type === 'tool_start') {
-    set((state) => ({
-      sessions: state.sessions.map((s) =>
-        s.id === sessionId ? { ...s, status: 'busy' as const } : s,
-      ),
-    }))
+  if (msg.type === 'tool_start' || msg.type === 'text_delta') {
+    // text_delta 高频，已是 busy 时跳过，避免无效 re-render
+    set((state) => {
+      const current = state.sessions.find(s => s.id === sessionId)
+      if (current?.status === 'busy') return state
+      return {
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? { ...s, status: 'busy' as const } : s,
+        ),
+      }
+    })
   }
 }

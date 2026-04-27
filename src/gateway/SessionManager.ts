@@ -11,12 +11,15 @@ import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js
 import { getCoordinatorSystemPrompt } from '../core/coordinator/coordinatorPrompt.js'
 import { loadSession, loadSessionMeta, saveSession, generateSessionId, archiveSession, listArchives } from '../core/SessionStore.js'
 import { loadConfig } from '../core/Config.js'
-import { setGlobalCwd, getGlobalCwd } from '../tools/BashTool.js'
+import { setGlobalCwd, getGlobalCwd, runWithCwd } from '../core/cwd.js'
+import { runWithSession } from '../core/sessionContext.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
 import { setTodoSessionId, setTodosUpdatedCallback } from '../tools/TodoWriteTool.js'
+import { resolveDecision, setGatewayDecisionCallback } from '../tools/DecisionTool.js'
 import { logger } from '../core/logger.js'
 import { auditLog } from '../core/audit.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
+import { getMemoryStackForSession, destroyMemoryStackForSession, destroyMemoryStoreForSession } from '../memory/index.js'
 import type { LLMProvider } from '../core/providers/types.js'
 import type { CreateSessionRequest, SessionInfo } from './types.js'
 import type WebSocket from 'ws'
@@ -92,8 +95,8 @@ export class SessionManager {
         })
       : createProviderFromEnv()
 
-    // 权限管理：permissionMode 优先；autoMode 兼容旧字段；否则读全局配置
-    const permMode = req.permissionMode ?? (req.autoMode ? 'auto' : agentConfig.permissionMode)
+    // 权限管理：permissionMode 优先；autoMode 兼容旧字段（映射到 craft）；否则读全局配置
+    const permMode = req.permissionMode ?? (req.autoMode ? 'craft' : agentConfig.permissionMode)
     // 使用 provider 的实际模型名（createProviderFromEnv 时 model 变量可能是旧默认值）
     const actualModel = provider.model
     const session: ManagedSession = {
@@ -104,8 +107,8 @@ export class SessionManager {
         lastActiveAt: Date.now(),
         model: actualModel,
         cwd: sessionCwd,
-        title: resumeMeta?.title,
-        permissionMode: permMode as 'ask' | 'auto' | 'plan',
+        title: resumeMeta?.title ?? req.title,
+        permissionMode: permMode as 'ask' | 'craft' | 'plan',
       },
       engine: null as unknown as QueryEngine, // 下方赋值
       provider,
@@ -123,12 +126,14 @@ export class SessionManager {
         // ask 模式：通过 WebSocket 广播权限询问，等待客户端回复
         const key = `${permReq.toolName}::${permReq.description}`
 
-        // 广播权限询问给所有订阅者
+        // 广播权限询问给所有订阅者（携带 ruleContent 供前端展示和回传）
         this.broadcast(session, {
           type: 'permission_request',
           toolName: permReq.toolName,
           description: permReq.description,
           isReadonly: permReq.isReadonly,
+          isDestructive: permReq.isDestructive,
+          ruleContent: permReq.ruleContent,
           key,
         })
 
@@ -159,9 +164,9 @@ export class SessionManager {
       },
     )
 
-    // 加载 MCP 工具
+    // 加载 MCP 工具（绑定到当前会话，避免跨会话共享连接）
     const mcpTools = agentConfig.mcpServers.length > 0
-      ? await loadMcpTools(agentConfig.mcpServers)
+      ? await loadMcpTools(agentConfig.mcpServers, sessionId)
       : []
 
     const tools = [
@@ -170,7 +175,7 @@ export class SessionManager {
       ...mcpTools,
     ]
 
-    TeamManager.init(provider, tools)
+    TeamManager.initForSession(sessionId, provider, tools)
 
     // 恢复已有会话或新建
     const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
@@ -196,8 +201,6 @@ export class SessionManager {
       archiveSession(sessionId, summary)
     }
 
-    setGlobalCwd(sessionCwd)
-
     setTodoSessionId(sessionId)
     setTodosUpdatedCallback((sid, todos) => {
       const s = this.sessions.get(sid)
@@ -206,10 +209,15 @@ export class SessionManager {
       }
     })
 
-    // Gateway 模式：注册 ask_user 回调，将问题广播给前端
+    // Gateway 模式：注册 ask_user 回调，将问题广播给前端（按 sessionId 隔离）
     setGatewayAskCallback((question, options) => {
       this.broadcast(session, { type: 'ask_user', question, options })
-    })
+    }, sessionId)
+
+    // Gateway 模式：注册 decision_request 回调，将决策请求广播给前端（按 sessionId 隔离）
+    setGatewayDecisionCallback((payload) => {
+      this.broadcast(session, payload)
+    }, sessionId)
 
     this.sessions.set(sessionId, session)
     this.resetIdleTimer(session)
@@ -247,9 +255,14 @@ export class SessionManager {
     }
     session.subscribers.clear()
 
-    await disconnectAllMcp()
+    await disconnectAllMcp(id)
     setTodoSessionId(null)
-    setGatewayAskCallback(null)
+    setGatewayAskCallback(null, id)
+    setGatewayDecisionCallback(null, id)
+    TeamManager.destroySession(id)
+    // 清理会话级记忆实例（释放 SQLite 连接）
+    destroyMemoryStackForSession(id)
+    destroyMemoryStoreForSession(id)
     this.sessions.delete(id)
   }
 
@@ -310,7 +323,9 @@ export class SessionManager {
 
   // 向会话的所有订阅者广播消息，同时写入回放缓冲区
   broadcast(session: ManagedSession, msg: object): void {
-    const text = JSON.stringify(msg)
+    // 统一注入发送时间戳
+    const msgWithTs = { ...msg, timestamp: Date.now() }
+    const text = JSON.stringify(msgWithTs)
     const msgType = (msg as Record<string, unknown>).type
     if (msgType !== 'text_delta' && msgType !== 'tool_log') {
       log.debug('广播消息', { sessionId: session.info.id, type: msgType, subscribers: session.subscribers.size })
@@ -318,14 +333,11 @@ export class SessionManager {
 
     // 写入回放缓冲区（done/error 事件后清空，避免新客户端重复看到旧轮次的输出）
     if (msgType === 'done' || msgType === 'error' || msgType === 'interrupted') {
-      // 保留这条终止事件，然后在下一轮开始时清空
-      session.replayBuffer.push(msg)
+      session.replayBuffer.push(msgWithTs)
     } else if (msgType === 'message') {
-      // 新一轮开始（用户消息）：清空上一轮的缓冲区
-      session.replayBuffer = [msg]
+      session.replayBuffer = [msgWithTs]
     } else {
-      session.replayBuffer.push(msg)
-      // 超出容量时丢弃最旧的事件（保留最新的）
+      session.replayBuffer.push(msgWithTs)
       if (session.replayBuffer.length > REPLAY_BUFFER_SIZE) {
         session.replayBuffer.shift()
       }
@@ -336,12 +348,99 @@ export class SessionManager {
     }
   }
 
+  // 定时任务触发：直接发送提醒消息，不经过 LLM
+  async sendCronReminder(sessionId: string, cronJob: { id: string; description: string; task: string }): Promise<void> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+
+    // 生成本次请求的唯一 ID
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+
+    session.info.status = 'busy'
+    session.info.lastActiveAt = Date.now()
+    this.resetIdleTimer(session)
+
+    log.info('定时任务触发，发送提醒', { sessionId, requestId, jobId: cronJob.id, description: cronJob.description })
+
+    try {
+      // 广播请求开始事件
+      this.broadcast(session, {
+        type: 'request_start',
+        requestId,
+        trigger: 'cron',
+        description: cronJob.description,
+      })
+
+      // 广播定时任务分隔标记
+      this.broadcast(session, {
+        type: 'cron_trigger',
+        requestId,
+        description: cronJob.description,
+      })
+
+      // 直接广播 assistant 消息（提醒内容）
+      this.broadcast(session, {
+        type: 'text_delta',
+        requestId,
+        delta: cronJob.task,
+      })
+
+      // 广播完成事件
+      this.broadcast(session, {
+        type: 'done',
+        requestId,
+      })
+
+      // 将提醒消息写入 history（作为 assistant 消息），并持久化
+      session.engine.setHistory([
+        ...session.engine.getHistory(),
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: cronJob.task }],
+          requestId,
+          trigger: 'cron' as const,
+          cronDescription: cronJob.description,
+        },
+      ])
+      saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+
+    } catch (err) {
+      log.error('定时任务提醒失败', { sessionId, error: String(err) })
+      this.broadcast(session, {
+        type: 'error',
+        requestId,
+        message: `定时任务提醒失败: ${String(err)}`,
+      })
+    } finally {
+      session.info.status = 'ready'
+    }
+  }
+
   // 执行用户消息，流式广播事件
-  async runMessage(sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>): Promise<void> {
+  async runMessage(sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>, cronJob?: { id: string; description: string }): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
     if (session.info.status === 'busy') throw new Error('会话正忙，请等待当前任务完成')
 
+    // 在会话自己的 cwd 上下文中运行，与其他并发会话完全隔离
+    // 同时注入 sessionId 上下文，供工具层获取会话级 TeamManager
+    return runWithCwd(session.info.cwd, () =>
+      runWithSession(sessionId, () =>
+        this._runMessageInContext(session, sessionId, content, attachments, cronJob)
+      )
+    )
+  }
+
+  // 实际执行逻辑（已在正确的 cwd 上下文中）
+  private async _runMessageInContext(session: ManagedSession, sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>, cronJob?: { id: string; description: string }): Promise<void> {
+    // 生成本次请求的唯一 ID，用于前端消息分组
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    
+    // 设置 QueryEngine 的 requestId，用于 tool_result 关联
+    session.engine.setRequestId(requestId)
+    // 设置触发来源，用于历史消息标记
+    session.engine.setTrigger(cronJob ? 'cron' : 'user', cronJob?.description)
+    
     session.info.status = 'busy'
     session.info.lastActiveAt = Date.now()
     this.resetIdleTimer(session)
@@ -349,8 +448,30 @@ export class SessionManager {
     // 新一轮开始：清空上一轮的回放缓冲区，避免新客户端看到旧轮次的输出
     session.replayBuffer = []
 
-    log.debug('处理消息', { sessionId, contentLength: content.length, attachmentCount: attachments?.length ?? 0 })
-    log.info('开始执行消息', { sessionId, model: session.info.model, permissionMode: session.permissions.getMode(), contentPreview: content.slice(0, 100) })
+    log.debug('处理消息', { sessionId, requestId, contentLength: content.length, attachmentCount: attachments?.length ?? 0 })
+    log.info('开始执行消息', { sessionId, requestId, model: session.info.model, permissionMode: session.permissions.getMode(), contentPreview: content.slice(0, 100) })
+
+    // 广播请求开始事件，携带 requestId 和触发类型
+    this.broadcast(session, {
+      type: 'request_start',
+      requestId,
+      trigger: cronJob ? 'cron' : 'user',
+      description: cronJob?.description,
+    })
+
+    // 定时任务触发时，额外发送独立的分隔标记事件
+    if (cronJob) {
+      this.broadcast(session, {
+        type: 'cron_trigger',
+        requestId,
+        description: cronJob.description,
+      })
+    }
+
+    // 记录最近一条用户消息（跳过系统内部注入的消息）
+    if (!content.startsWith('[系统') && !content.startsWith('[上下文压缩]')) {
+      session.info.lastUserMessage = content.slice(0, 80)
+    }
 
     // 检测是否包含图片或 PDF 附件
     const visionMediaTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
@@ -407,7 +528,7 @@ export class SessionManager {
         originalProvider = session.provider  // 保存原始 provider 以便恢复
         session.engine.setProvider(visionProvider)
         // 广播模型切换通知
-        this.broadcast(session, { type: 'model_switched', model: visionProvider.model, reason: 'vision_content' })
+        this.broadcast(session, { type: 'model_switched', requestId, model: visionProvider.model, reason: 'vision_content' })
       } else {
         log.warn('检测到图片/PDF，但未配置视觉模型（VISION_MODEL 或 VISION_FALLBACK_N），使用当前模型', { sessionId })
       }
@@ -444,15 +565,29 @@ export class SessionManager {
 
     // plan 模式：动态注入规划模式系统提示，让 LLM 知道只做分析不执行写操作
     if (session.permissions.getMode() === 'plan') {
+      // 动态生成可用/不可用工具列表，基于工具的 readonly 属性
+      const allTools = session.engine.getTools()
+      const readonlyTools = allTools.filter(t => t.readonly).map(t => t.name)
+      const writeTools = allTools.filter(t => !t.readonly).map(t => t.name)
+
       const planModeAppendix = `
 
 ## 当前模式：Plan（规划模式）
-你现在处于规划模式。在此模式下，所有写操作（文件写入、命令执行等）均被禁止。
-你的任务是：
-1. 使用只读工具（file_read、glob、grep 等）充分了解现状
-2. 制定详细的执行计划，列出每一步要做什么、修改哪些文件、执行什么命令
-3. 不要尝试调用任何写操作工具，调用了也会被系统拒绝
-用户确认计划后，会切换到执行模式。`
+你现在处于规划模式，所有写操作均被系统禁止。
+
+### 可用工具（只读）
+${readonlyTools.join('、')}
+
+### 不可用工具（写操作，调用将被拒绝）
+${writeTools.join('、')}
+
+### 你的任务
+1. 使用只读工具充分了解现状（读文件、搜索代码、查看目录结构等）
+2. 制定详细的执行计划：列出每一步要做什么、修改哪些文件、执行什么命令
+3. 不要尝试调用写操作工具，即使调用也会被系统拒绝
+4. 计划完成后，告知用户"已完成规划，请切换到执行模式后继续"
+
+用户确认计划后，会将模式切换为 ask 或 auto，届时写操作将可用。`
       session.engine.setSystemPrompt(coordinatorPrompt + planModeAppendix)
     } else {
       // 非 plan 模式：使用动态注入了任务扩展的 coordinator prompt
@@ -471,15 +606,15 @@ export class SessionManager {
           hitTurnLimit = true
         }
         // 将 QueryEngine 内部事件格式转换为前端协议格式
-        const clientMsg = toClientMessage(ev)
+        const clientMsg = toClientMessage(ev, requestId)
         if (clientMsg) {
           // 过滤高频事件，避免日志爆炸
           if (ev.type !== 'text_delta' && ev.type !== 'tool_log') {
-            log.debug('QueryEngine 事件 → 广播', { sessionId, evType: ev.type })
+            log.debug('QueryEngine 事件 → 广播', { sessionId, requestId, evType: ev.type })
           }
           this.broadcast(session, clientMsg)
         } else if (ev.type !== 'text_delta' && ev.type !== 'tool_log') {
-          log.debug('QueryEngine 事件（无对应客户端消息，跳过广播）', { sessionId, evType: ev.type })
+          log.debug('QueryEngine 事件（无对应客户端消息，跳过广播）', { sessionId, requestId, evType: ev.type })
         }
 
         // 每次工具调用结束后增量保存，减少崩溃时的数据丢失
@@ -505,42 +640,23 @@ export class SessionManager {
       log.debug('runMessage 完成', { sessionId })
     }
 
-    // 达到轮次上限：根据 todo 状态决定自动续跑还是询问用户
+    // 达到轮次上限：仅 ask/plan 模式会触发（craft 模式 QueryEngine 内部无限制）
+    // 无论是否有 todo，都自动续跑——用户选 ask/plan 是为了控制写操作权限，
+    // 不是为了每 N 轮被打断。continuation_needed 只用于 LLM 主动停下的场景。
     if (hitTurnLimit) {
-      // 直接从 history 中找最后一次 todo_write 的 input，无需额外读文件
-      let hasUnfinishedTodos = false
-      const history = session.engine.getHistory()
-      for (let i = history.length - 1; i >= 0; i--) {
-        const msg = history[i]
-        if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
-        const todoCall = (msg.content as Array<{ type: string; name?: string; input?: unknown }>)
-          .find(b => b.type === 'tool_use' && b.name === 'todo_write')
-        if (todoCall) {
-          const todos = (todoCall.input as { todos?: Array<{ status: string }> })?.todos ?? []
-          hasUnfinishedTodos = todos.some(t => t.status === 'pending' || t.status === 'in_progress')
-          break
-        }
-      }
-
-      if (hasUnfinishedTodos) {
-        // 有未完成的 todo 任务：自动续跑，无需用户干预
-        log.info('轮次上限，todo 未完成，自动续跑', { sessionId })
-        void this.runMessage(sessionId, '请继续执行之前未完成的任务，从中断处接着做。').catch((err) => {
-          log.error('轮次上限续跑失败', { sessionId, error: String(err) })
-          this.broadcast(session, { type: 'error', message: `自动续跑失败: ${String(err)}` })
-        })
-        return
-      } else {
-        // 无 todo 或全部完成（纯对话中执行的任务）：通知前端询问用户是否继续
-        log.info('轮次上限，无未完成 todo，通知前端询问用户', { sessionId })
-        this.broadcast(session, { type: 'continuation_needed' })
-      }
+      log.info('轮次上限，自动续跑', { sessionId, permMode: session.permissions.getMode() })
+      void this.runMessage(sessionId, '请继续执行之前未完成的任务，从中断处接着做。').catch((err) => {
+        log.error('轮次上限续跑失败', { sessionId, error: String(err) })
+        this.broadcast(session, { type: 'error', requestId, message: `自动续跑失败: ${String(err)}` })
+      })
+      return
     }
 
     // 后台钩子：记忆提炼 + Skill 自动沉淀（不阻塞响应）
     const memoryCondense = loadConfig().memoryCondense ?? false
+    const skillDistill = loadConfig().autoDistillSkill ?? false
     void autoExtractMemories(session.engine, sessionId, session.provider, memoryCondense)
-    void autoDistillSkill(session.engine, session.provider)
+    void autoDistillSkill(session.engine, session.provider, skillDistill)
   }
 
   // 处理客户端发来的控制消息
@@ -578,15 +694,35 @@ export class SessionManager {
         session.engine.abort()
         break
       case 'user_reply':
-        resolveAskUser(String(msg.answer ?? ''))
+        resolveAskUser(String(msg.answer ?? ''), sessionId)
+        break
+      case 'decision_reply':
+        resolveDecision(String(msg.answer ?? ''), sessionId)
         break
       // 客户端回复权限询问
       case 'permission_reply': {
         const key = String(msg.key ?? '')
         const granted = msg.granted === true
+        // permanent=true 时持久化规则；session=true 时会话内批准（含内容级）
+        const permanent = msg.permanent === true
+        const sessionApprove = msg.session === true
         const resolve = session.pendingPermissions.get(key)
         if (resolve) {
-          log.info('收到权限回复', { sessionId, key, granted })
+          log.info('收到权限回复', { sessionId, key, granted, permanent, sessionApprove })
+          if (granted) {
+            // 解析 key 中的 toolName 和 ruleContent（key = "toolName::description"）
+            // ruleContent 由前端从 permission_request 的 ruleContent 字段回传
+            const ruleContent = msg.ruleContent ? String(msg.ruleContent) : undefined
+            const toolName = key.split('::')[0]
+            if (permanent) {
+              // 永久批准：持久化到磁盘
+              const rule = ruleContent ? `${toolName}(${ruleContent})` : toolName
+              session.permissions.approvePermanent(rule)
+            } else if (sessionApprove) {
+              // 会话内批准：精确到内容级
+              session.permissions.approveSession(toolName, ruleContent)
+            }
+          }
           resolve(granted)
         }
         break
@@ -594,7 +730,8 @@ export class SessionManager {
       case 'set_cwd': {
         const cwd = String(msg.cwd ?? '')
         if (cwd) {
-          setGlobalCwd(cwd)
+          // 只更新会话自己的 cwd，不修改全局变量
+          // 下次 runMessage 时 runWithCwd 会用 session.info.cwd 建立新的上下文
           session.info.cwd = cwd
           this.broadcast(session, { type: 'cwd_changed', cwd })
         }
@@ -602,12 +739,23 @@ export class SessionManager {
       }
       case 'set_permission_mode': {
         const mode = msg.mode as string
-        if (mode === 'ask' || mode === 'auto' || mode === 'plan') {
+        if (mode === 'ask' || mode === 'craft' || mode === 'plan') {
           session.permissions.setMode(mode)
           session.info.permissionMode = mode
           this.broadcast(session, { type: 'permission_mode_changed', mode })
           log.info('权限模式已切换', { sessionId, mode })
         }
+        break
+      }
+      case 'clear_history': {
+        // 清除会话历史：中止当前任务，清空 engine 历史，通知前端
+        if (session.info.status === 'busy') {
+          session.engine.abort()
+        }
+        session.engine.clearHistory()
+        saveSession(sessionId, [], session.info.model, session.info.cwd)
+        this.broadcast(session, { type: 'history_cleared' })
+        log.info('会话历史已清除', { sessionId })
         break
       }
     }
@@ -644,31 +792,32 @@ export class SessionManager {
 // QueryEngine 使用内部字段名（id/name/line/costUsd），前端期望不同的字段名
 import type { StreamEvent } from '../core/QueryEngine.js'
 
-function toClientMessage(ev: StreamEvent): object | null {
+function toClientMessage(ev: StreamEvent, requestId: string): object | null {
   switch (ev.type) {
     case 'text_delta':
-      return { type: 'text_delta', delta: ev.delta }
+      return { type: 'text_delta', requestId, delta: ev.delta }
 
     case 'tool_start':
-      return { type: 'tool_start', toolId: ev.id, toolName: ev.name, input: ev.input }
+      return { type: 'tool_start', requestId, toolId: ev.id, toolName: ev.name, input: ev.input }
 
     case 'tool_log':
-      return { type: 'tool_log', toolId: ev.id, log: ev.line }
+      return { type: 'tool_log', requestId, toolId: ev.id, log: ev.line }
 
     case 'tool_end': {
       // result.type: 'success' | 'error' → status; 'denied' 由 permission_denied 事件处理
       const status = ev.result.type === 'success' ? 'success' : 'error'
       const result = ev.result.type === 'success' ? ev.result.output : ev.result.message
-      return { type: 'tool_end', toolId: ev.id, toolName: ev.name, status, result }
+      return { type: 'tool_end', requestId, toolId: ev.id, toolName: ev.name, status, result }
     }
 
     case 'permission_denied':
       // 权限拒绝：以 tool_end denied 状态通知前端
-      return { type: 'tool_end', toolId: ev.id, toolName: ev.toolName, status: 'denied' }
+      return { type: 'tool_end', requestId, toolId: ev.id, toolName: ev.toolName, status: 'denied' }
 
     case 'usage':
       return {
         type: 'usage',
+        requestId,
         inputTokens: ev.inputTokens,
         outputTokens: ev.outputTokens,
         cost: ev.costUsd,
@@ -679,13 +828,13 @@ function toClientMessage(ev: StreamEvent): object | null {
       return { type: 'budget_exceeded', message: `已超出预算上限（$${ev.limitUsd}），当前花费 $${ev.costUsd.toFixed(4)}` }
 
     case 'done':
-      return { type: 'done' }
+      return { type: 'done', requestId }
 
     case 'error':
-      return { type: 'error', message: ev.message }
+      return { type: 'error', requestId, message: ev.message }
 
     case 'interrupted':
-      return { type: 'error', message: ev.message }
+      return { type: 'error', requestId, message: ev.message }
 
     // 以下事件不需要推送给前端
     case 'turn_limit':
@@ -696,7 +845,7 @@ function toClientMessage(ev: StreamEvent): object | null {
       return { type: 'compact_done', summary: ev.summary }
 
     case 'continuation_needed':
-      return { type: 'continuation_needed' }
+      return { type: 'continuation_needed', requestId }
 
     default:
       return null

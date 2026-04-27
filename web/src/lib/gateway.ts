@@ -109,6 +109,16 @@ export async function getHistorySegments(sessionId: string): Promise<CompactArch
   }
 }
 
+/** 获取指定归档段的实际历史消息 */
+export async function getArchiveMessages(sessionId: string, filename: string): Promise<DisplayMessage[]> {
+  try {
+    const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/history-segments/${encodeURIComponent(filename)}/messages`)
+    return res.json()
+  } catch {
+    return []
+  }
+}
+
 // ─── 会话文件树 ────────────────────────────────────────────────────────────
 
 /** 获取指定会话工作目录下的文件列表，path 默认为根目录 */
@@ -128,6 +138,12 @@ export interface FileContentResponse {
 /** 读取指定会话工作目录下单个文件的内容 */
 export async function getFileContent(sessionId: string, path: string): Promise<FileContentResponse> {
   const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/file-content?path=${encodeURIComponent(path)}`)
+  return res.json()
+}
+
+/** 获取文件在 git HEAD 中的原始内容（修改前），文件不在 git 中时抛出错误 */
+export async function getGitFileContent(sessionId: string, path: string): Promise<{ path: string; content: string }> {
+  const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/git-file?path=${encodeURIComponent(path)}`)
   return res.json()
 }
 
@@ -208,6 +224,22 @@ export async function deleteCron(id: string): Promise<void> {
   await apiFetch(`/crons/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
+/** 创建新定时任务 */
+export async function createCron(data: {
+  expression: string
+  description: string
+  task: string
+  once?: boolean
+  startDate?: string
+  endDate?: string
+}): Promise<CronJob> {
+  const res = await apiFetch('/crons', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+  return res.json()
+}
+
 // ─── 技能 ──────────────────────────────────────────────────────────────────
 
 /** 获取已安装的技能列表 */
@@ -267,6 +299,54 @@ export async function uninstallMarketSkill(slug: string): Promise<{ ok: boolean;
   return res.json()
 }
 
+// ─── MCP 服务器管理 ────────────────────────────────────────────────────────
+
+export interface McpServerEntry {
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+  disabled?: boolean
+  autoApprove?: string[]
+}
+
+export interface McpConfig {
+  mcpServers: Record<string, McpServerEntry>
+}
+
+/** 获取 MCP 配置文件路径 */
+export async function getMcpConfigPath(): Promise<string> {
+  const res = await apiFetch('/mcp/config-path')
+  const data = await res.json() as { path: string }
+  return data.path
+}
+
+/** 获取所有 MCP 服务器配置 */
+export async function getMcpConfig(): Promise<McpConfig> {
+  const res = await apiFetch('/mcp')
+  return res.json()
+}
+
+/** 保存完整 MCP 配置（覆盖写入） */
+export async function saveMcpConfig(config: McpConfig): Promise<void> {
+  await apiFetch('/mcp', {
+    method: 'PUT',
+    body: JSON.stringify(config),
+  })
+}
+
+/** 添加或更新单个 MCP 服务器 */
+export async function upsertMcpServer(name: string, config: McpServerEntry): Promise<void> {
+  await apiFetch(`/mcp/${encodeURIComponent(name)}`, {
+    method: 'POST',
+    body: JSON.stringify(config),
+  })
+}
+
+/** 删除单个 MCP 服务器 */
+export async function deleteMcpServer(name: string): Promise<void> {
+  await apiFetch(`/mcp/${encodeURIComponent(name)}`, { method: 'DELETE' })
+}
+
 // ─── 图片访问 ──────────────────────────────────────────────────────────────
 
 /**
@@ -283,11 +363,30 @@ export function isImageFile(filename: string): boolean {
   return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif'].includes(ext)
 }
 
+/** 获取知了专属会话 ID */
+export async function getZhileSessionId(): Promise<string | null> {
+  try {
+    const res = await apiFetch('/config/zhile-session')
+    const data = await res.json() as { sessionId: string | null }
+    return data.sessionId
+  } catch {
+    return null
+  }
+}
+
+/** 保存知了专属会话 ID */
+export async function setZhileSessionId(sessionId: string | null): Promise<void> {
+  await apiFetch('/config/zhile-session', {
+    method: 'PUT',
+    body: JSON.stringify({ sessionId }),
+  })
+}
+
 // ─── 配置 ──────────────────────────────────────────────────────────────────
 
 export interface AgentConfigSummary {
   model: string
-  permissionMode: 'ask' | 'auto' | 'readonly' | 'plan'
+  permissionMode: 'ask' | 'craft' | 'plan'
   maxTokens: number
   maxTurns: number
 }

@@ -232,32 +232,7 @@ html.theme-transitioning * {
     0 1px 2px rgba(0,0,0,0.3);
 }
 
-/* ─── 工具卡片基础样式 ──────────────────────────────────────────────────── */
-
-.tool-card-base {
-  border-radius: 10px;
-  background: var(--bg-secondary);
-  border: 1px solid rgba(255,255,255,0.06);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
-}
-
-/* 各状态左侧高亮条 */
-.tool-card-pending {
-  border-left: 2px solid rgba(251, 191, 36, 0.7);
-  background: linear-gradient(90deg, rgba(251,191,36,0.04) 0%, var(--bg-secondary) 60%);
-}
-.tool-card-success {
-  border-left: 2px solid rgba(52, 211, 153, 0.7);
-  background: linear-gradient(90deg, rgba(52,211,153,0.04) 0%, var(--bg-secondary) 60%);
-}
-.tool-card-error {
-  border-left: 2px solid rgba(248, 113, 113, 0.7);
-  background: linear-gradient(90deg, rgba(248,113,113,0.04) 0%, var(--bg-secondary) 60%);
-}
-.tool-card-denied {
-  border-left: 2px solid rgba(251, 146, 60, 0.7);
-  background: linear-gradient(90deg, rgba(251,146,60,0.04) 0%, var(--bg-secondary) 60%);
-}
+/* ─── 工具卡片基础样式（已迁移到 ToolCard.tsx inline styles） ─────────── */
 
 /* 日间模式适配 */
 .light .agent-bubble {
@@ -280,15 +255,9 @@ html.theme-transitioning * {
   box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 
-.light .tool-card-pending {
-  background: linear-gradient(90deg, rgba(217,119,6,0.05) 0%, var(--bg-secondary) 60%);
-}
-.light .tool-card-success {
-  background: linear-gradient(90deg, rgba(5,150,105,0.05) 0%, var(--bg-secondary) 60%);
-}
-.light .tool-card-error {
-  background: linear-gradient(90deg, rgba(220,38,38,0.05) 0%, var(--bg-secondary) 60%);
-}
+.light .tool-card-pending,
+.light .tool-card-success,
+.light .tool-card-error,
 .light .tool-card-denied {
-  background: linear-gradient(90deg, rgba(234,88,12,0.05) 0%, var(--bg-secondary) 60%);
+  background: var(--bg-secondary);
 }

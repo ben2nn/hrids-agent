@@ -1,10 +1,15 @@
 // 4 层记忆堆栈 —— 借鉴 mempalace 的 layers.py
 // L0: 身份 (~100 tokens) | L1: 核心摘要 (~500-800) | L2: 按需 | L3: 深度搜索
-import { getMemoryStore } from './store.js'
+import { getMemoryStore, getMemoryStoreForSession } from './store.js'
+import type { MemoryStore } from './store.js'
 import type { MemorySearchResult, WakeUpResult } from './types.js'
 
 export class MemoryStack {
-  private store = getMemoryStore()
+  private store: MemoryStore
+
+  constructor(store?: MemoryStore) {
+    this.store = store ?? getMemoryStore()
+  }
 
   // ── L0：身份层 ───────────────────────────────────────────────
 
@@ -104,9 +109,28 @@ export class MemoryStack {
   }
 }
 
-// 全局单例
+// 全局单例（CLI 模式）
 let _stack: MemoryStack | null = null
 export function getMemoryStack(): MemoryStack {
   if (!_stack) _stack = new MemoryStack()
   return _stack
+}
+
+// 会话级实例注册表（Gateway 多会话模式）
+const _sessionStacks = new Map<string, MemoryStack>()
+
+/** Gateway 模式：获取或创建指定会话的 MemoryStack */
+export function getMemoryStackForSession(sessionId: string): MemoryStack {
+  let stack = _sessionStacks.get(sessionId)
+  if (!stack) {
+    const store = getMemoryStoreForSession(sessionId)
+    stack = new MemoryStack(store)
+    _sessionStacks.set(sessionId, stack)
+  }
+  return stack
+}
+
+/** Gateway 模式：销毁会话的 MemoryStack */
+export function destroyMemoryStackForSession(sessionId: string): void {
+  _sessionStacks.delete(sessionId)
 }

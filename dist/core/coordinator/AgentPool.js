@@ -89,7 +89,7 @@ export class AgentPool {
             }
         }
         catch { /* 记忆系统不可用时静默跳过 */ }
-        const permissions = new PermissionManager('auto', async () => true);
+        const permissions = new PermissionManager('craft', async () => true);
         const engine = new QueryEngine({
             provider: this.provider,
             systemPrompt: finalSystemPrompt,

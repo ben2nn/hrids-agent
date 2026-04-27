@@ -8,7 +8,8 @@ export interface SessionInfo {
   model: string
   cwd: string
   title?: string
-  permissionMode: 'ask' | 'auto' | 'plan'
+  lastUserMessage?: string
+  permissionMode: 'ask' | 'craft' | 'plan'
 }
 
 export interface CreateSessionRequest {
@@ -17,10 +18,11 @@ export interface CreateSessionRequest {
   apiKey?: string
   baseUrl?: string
   autoMode?: boolean
-  /** 权限模式（优先级高于 autoMode）：ask / auto / plan */
-  permissionMode?: 'ask' | 'auto' | 'plan'
+  /** 权限模式（优先级高于 autoMode）：ask / craft / plan */
+  permissionMode?: 'ask' | 'craft' | 'plan'
   cwd?: string
   resume?: string  // 恢复已有会话 ID
+  title?: string   // 会话标题
 }
 
 export interface CreateSessionResponse {
@@ -35,9 +37,10 @@ export type ClientMessage =
   | { type: 'user_reply'; answer: string }
   | { type: 'set_cwd'; cwd: string }
   // 回复权限询问：key 对应 permission_request 中的 key，granted 表示是否允许
-  | { type: 'permission_reply'; key: string; granted: boolean }
+  // session=true 时会话内批准；permanent=true 时永久批准；ruleContent 由前端从 permission_request 回传
+  | { type: 'permission_reply'; key: string; granted: boolean; session?: boolean; permanent?: boolean; ruleContent?: string }
   // 运行时切换当前会话的权限模式
-  | { type: 'set_permission_mode'; mode: 'ask' | 'auto' | 'plan' }
+  | { type: 'set_permission_mode'; mode: 'ask' | 'craft' | 'plan' }
 
 // 服务端 → 客户端（通过 WebSocket 推送，即 StreamEvent 的超集）
 export type ServerMessage =
@@ -48,7 +51,7 @@ export type ServerMessage =
   | { type: 'tool_end'; id: string; name: string; result: unknown }
   | { type: 'permission_denied'; id: string; toolName: string; description: string }
   // 服务端向客户端发起权限询问（ask 模式下）
-  | { type: 'permission_request'; toolName: string; description: string; isReadonly: boolean; key: string }
+  | { type: 'permission_request'; toolName: string; description: string; isReadonly: boolean; isDestructive?: boolean; ruleContent?: string; key: string }
   | { type: 'usage'; inputTokens: number; outputTokens: number; costUsd: number }
   | { type: 'turn_limit'; turns: number }
   | { type: 'budget_exceeded'; costUsd: number; limitUsd: number }
@@ -60,4 +63,4 @@ export type ServerMessage =
   | { type: 'done' }
   | { type: 'error'; message: string }
   // 权限模式切换确认
-  | { type: 'permission_mode_changed'; mode: 'ask' | 'auto' | 'plan' }
+  | { type: 'permission_mode_changed'; mode: 'ask' | 'craft' | 'plan' }

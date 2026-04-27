@@ -3,6 +3,7 @@
 import { z } from 'zod'
 import * as readline from 'readline'
 import type { ToolDef } from '../core/Tool.js'
+import { getCurrentSessionId } from '../core/sessionContext.js'
 
 const OptionSchema = z.object({
   label: z.string().describe('选项标签，简短'),
@@ -19,10 +20,37 @@ const inputSchema = z.object({
   impact: z.string().optional().describe('此决策的影响范围（可选）'),
 })
 
-// server 模式下的 pending resolve
+// ── CLI / Server 模式（单会话）全局 pending resolve ──────────────────────────
 let pendingDecisionResolve: ((answer: string) => void) | null = null
 
-export function resolveDecision(answer: string): boolean {
+// ── Gateway 模式（多会话）会话级 pending resolve 表 ──────────────────────────
+const sessionDecisionResolves = new Map<string, (answer: string) => void>()
+
+// ── Gateway 模式（多会话）会话级推送回调表 ───────────────────────────────────
+const gatewayDecisionCallbacks = new Map<string, (payload: object) => void>()
+
+/** 注册 Gateway 模式下指定会话的 decision_request 推送回调 */
+export function setGatewayDecisionCallback(
+  cb: ((payload: object) => void) | null,
+  sessionId?: string,
+): void {
+  const key = sessionId ?? '__global__'
+  if (cb) gatewayDecisionCallbacks.set(key, cb)
+  else gatewayDecisionCallbacks.delete(key)
+}
+
+/**
+ * 将用户的决策回答注入等待中的 request_decision。
+ * Gateway 模式传入 sessionId 精确路由；CLI/Server 模式不传。
+ */
+export function resolveDecision(answer: string, sessionId?: string): boolean {
+  if (sessionId) {
+    const resolve = sessionDecisionResolves.get(sessionId)
+    if (!resolve) return false
+    sessionDecisionResolves.delete(sessionId)
+    resolve(answer)
+    return true
+  }
   if (!pendingDecisionResolve) return false
   const resolve = pendingDecisionResolve
   pendingDecisionResolve = null
@@ -75,6 +103,8 @@ export const DecisionTool: ToolDef<typeof inputSchema> = {
 
     const prompt = sections.join('\n') + '\n\n请输入选项编号（1-' + input.options.length + '）或直接输入您的指示: '
 
+    const sessionId = getCurrentSessionId()
+
     // server 模式：通过 NDJSON 协议发送决策请求
     if (process.env.AGENT_SERVER_MODE === '1') {
       return new Promise(resolve => {
@@ -90,6 +120,25 @@ export const DecisionTool: ToolDef<typeof inputSchema> = {
           deadline: input.deadline,
           impact: input.impact,
         }) + '\n')
+      })
+    }
+
+    // Gateway 多会话模式：按 sessionId 隔离 pending resolve 和推送回调
+    if (sessionId && gatewayDecisionCallbacks.has(sessionId)) {
+      const payload = {
+        type: 'decision_request',
+        title: input.title,
+        context: input.context,
+        options: input.options,
+        recommendation: input.recommendation,
+        deadline: input.deadline,
+        impact: input.impact,
+      }
+      return new Promise(resolve => {
+        sessionDecisionResolves.set(sessionId, (answer: string) => {
+          resolve({ type: 'success', output: parseDecisionAnswer(answer, input.options) })
+        })
+        gatewayDecisionCallbacks.get(sessionId)!(payload)
       })
     }
 

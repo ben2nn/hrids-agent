@@ -3,7 +3,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import TextInput from 'ink-text-input';
 import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js';
-import { listSessions, loadSession, generateSessionId } from '../core/SessionStore.js';
+import { listSessions, loadSession, generateSessionId, saveSession, archiveSession, listArchives } from '../core/SessionStore.js';
 import { getSessionWorkDir } from '../core/ContextBuilder.js';
 import { setGlobalCwd } from '../tools/BashTool.js';
 import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js';
@@ -167,9 +167,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
                     case 'compact_start':
                         push({ role: 'system', text: '⟳ 上下文过长，正在自动压缩历史...' });
                         break;
-                    case 'compact_done':
-                        push({ role: 'system', text: `✓ 历史已压缩（约 ${engine.getEstimatedTokens().toLocaleString()} tokens）` });
+                    case 'compact_done': {
+                        const archives = listArchives(sessionId);
+                        const archiveCount = archives.length;
+                        const lastArchive = archives[archiveCount - 1];
+                        const msgCount = lastArchive?.messageCount ?? 0;
+                        push({ role: 'system', text: `✓ 历史已压缩（归档了 ${msgCount} 条消息，当前约 ${engine.getEstimatedTokens().toLocaleString()} tokens）\n  输入 /history 查看归档历史` });
                         break;
+                    }
                     case 'budget_exceeded':
                         push({ role: 'error', text: `⚠ 已超出成本预算 ${ev.limitUsd.toFixed(2)}（当前 ${ev.costUsd.toFixed(4)}），任务已停止` });
                         break;
@@ -220,6 +225,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             void runEngine(`[定时任务触发] ${job.description}\n\n${job.task}`, `⏰ 定时任务触发: ${job.description}`);
         });
     }, [runEngine]);
+    // 注册压缩前归档回调：保留完整历史，workDir 不变
+    useEffect(() => {
+        engine.onBeforeCompact = async (summary) => {
+            saveSession(sessionId, engine.getHistory(), modelRef.current);
+            archiveSession(sessionId, summary);
+        };
+        return () => { engine.onBeforeCompact = null; };
+    }, [engine, sessionId]);
     // 构建命令上下文
     const cmdCtx = {
         clearHistory: () => engine.clearHistory(),
@@ -242,6 +255,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         getMode: () => 'ask',
         sessionId,
         listSessions: () => listSessions(),
+        listArchives: () => listArchives(sessionId),
         newSession: () => {
             const newId = generateSessionId();
             engine.clearHistory();

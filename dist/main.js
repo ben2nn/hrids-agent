@@ -1,5 +1,9 @@
 import 'dotenv/config';
-import { existsSync, mkdirSync } from 'fs';
+import { setupSystemProxy } from './core/proxySetup.js';
+setupSystemProxy();
+import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 import { Command } from 'commander';
 import { render } from 'ink';
 import React from 'react';
@@ -7,7 +11,7 @@ import { loadConfig, saveConfig } from './core/Config.js';
 import { QueryEngine } from './core/QueryEngine.js';
 import { PermissionManager } from './core/PermissionManager.js';
 import { CommandRegistry, createBuiltinCommands } from './core/CommandRegistry.js';
-import { generateSessionId, loadSession, loadSessionMeta, listSessions, saveSession, getLastSessionId } from './core/SessionStore.js';
+import { generateSessionId, loadSession, loadSessionMeta, listSessions, saveSession, getLastSessionId, archiveSession, listArchives } from './core/SessionStore.js';
 import { buildSystemContext, getDynamicContext, getSessionWorkDir } from './core/ContextBuilder.js';
 import { createProvider, createProviderFromEnv } from './core/providers/index.js';
 import { TeamManager } from './core/coordinator/TeamManager.js';
@@ -16,7 +20,7 @@ import { ALL_TOOLS } from './tools/index.js';
 import { setGlobalCwd, getGlobalCwd } from './tools/BashTool.js';
 import { resolveAskUser } from './tools/AskUserTool.js';
 import { resolveDecision } from './tools/DecisionTool.js';
-import { restoreScheduledJobs } from './tools/ScheduleCronTool.js';
+import { restoreScheduledJobs, setCronTriggerCallback } from './tools/ScheduleCronTool.js';
 import { createAgentTool } from './tools/AgentTool.js';
 import { loadMcpTools, disconnectAllMcp } from './tools/McpTool.js';
 import { App } from './ui/App.js';
@@ -66,7 +70,7 @@ async function main() {
         .option('--provider <provider>', '显式指定提供商: anthropic | openai | deepseek | groq | ollama | aliyun | custom')
         .option('--api-key <key>', 'API Key（也可通过环境变量设置）')
         .option('--base-url <url>', '自定义 API 端点（Ollama / 本地代理）')
-        .option('--auto', '自动模式（无需确认写操作）')
+        .option('--craft', '自主执行模式（无需确认写操作，agent 独立完成任务）')
         .option('--plan', '计划模式（只读，写操作需手动确认后执行）')
         .option('--resume <sessionId>', '恢复之前的会话')
         .option('--list-sessions', '列出最近的会话')
@@ -137,6 +141,48 @@ async function main() {
             });
             await gateway.start();
             const webUrl = `http://${opts.gatewayHost}:${opts.gatewayPort}`;
+            // Gateway 模式：注册 cron 触发回调，将任务发送到知了专属会话
+            {
+                setCronTriggerCallback((job) => {
+                    void (async () => {
+                        try {
+                            const zhileFile = join(homedir(), '.hrids-agent', 'zhile-session.json');
+                            if (!existsSync(zhileFile)) {
+                                logger.warn('[cron] 知了会话文件不存在，跳过触发', { jobId: job.id });
+                                return;
+                            }
+                            const { sessionId } = JSON.parse(readFileSync(zhileFile, 'utf-8'));
+                            if (!sessionId) {
+                                logger.warn('[cron] 知了会话 ID 为空，跳过触发', { jobId: job.id });
+                                return;
+                            }
+                            let session = gateway.manager.getSession(sessionId);
+                            if (!session) {
+                                logger.warn('[cron] 知了会话不在内存中，尝试恢复', { jobId: job.id, sessionId });
+                                try {
+                                    await gateway.manager.createSession({ resume: sessionId });
+                                    session = gateway.manager.getSession(sessionId);
+                                }
+                                catch (err) {
+                                    logger.error('[cron] 恢复知了会话失败', { error: String(err) });
+                                    return;
+                                }
+                            }
+                            if (!session) {
+                                logger.error('[cron] 知了会话恢复后仍不存在', { jobId: job.id, sessionId });
+                                return;
+                            }
+                            logger.info('[cron] 触发定时任务，发送提醒到知了会话', { jobId: job.id, sessionId, task: job.task.slice(0, 80) });
+                            // 直接发送提醒消息，不经过 LLM
+                            await gateway.manager.sendCronReminder(sessionId, { id: job.id, description: job.description, task: job.task });
+                        }
+                        catch (err) {
+                            logger.error('[cron] 触发定时任务失败', { jobId: job.id, error: String(err) });
+                        }
+                    })();
+                });
+                restoreScheduledJobs();
+            }
             console.log(``);
             console.log(`  ╔══════════════════════════════════════════════╗`);
             console.log(`  ║          hrids-agent Gateway 已就绪          ║`);
@@ -288,7 +334,7 @@ async function main() {
         }
         // 权限模式
         const permMode = opts.plan ? 'plan'
-            : opts.auto ? 'auto'
+            : opts.craft ? 'craft'
                 : config.permissionMode;
         const permissions = new PermissionManager(permMode, async (req) => {
             process.stdout.write(`\n允许执行 "${req.description}"? [y/N/always] `);
@@ -373,6 +419,11 @@ async function main() {
         // Server 模式：持续从 stdin 读取消息，保持会话历史
         if (opts.server) {
             process.env.AGENT_SERVER_MODE = '1';
+            // 注册压缩前归档回调（server 模式同样需要）
+            engine.onBeforeCompact = async (summary) => {
+                saveSession(sessionId, engine.getHistory(), model, initialCwd);
+                archiveSession(sessionId, summary);
+            };
             const { createInterface } = await import('readline');
             const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
             const emit = (obj) => {
@@ -427,6 +478,7 @@ async function main() {
                             getMode: () => permMode,
                             sessionId,
                             listSessions: () => listSessions(),
+                            listArchives: () => listArchives(sessionId),
                             newSession: () => {
                                 const newId = generateSessionId();
                                 engine.clearHistory();
@@ -548,6 +600,11 @@ async function main() {
         const skillRegistry = buildSkillRegistry(getGlobalCwd());
         registry.registerSkills(skillRegistry);
         let currentModel = model;
+        // 注册压缩前归档回调：保留完整历史，workDir 不变
+        engine.onBeforeCompact = async (summary) => {
+            saveSession(sessionId, engine.getHistory(), currentModel, initialCwd);
+            archiveSession(sessionId, summary);
+        };
         // 自动保存会话 + 自动沉淀 skill + 动态注入扩展 prompt
         const originalSend = engine.send.bind(engine);
         engine.send = async function* (msg) {

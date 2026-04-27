@@ -8,9 +8,9 @@ import React, {
 } from 'react'
 import { useSessionStore } from '../../store/sessionStore.js'
 import { useMessageStore } from '../../store/messageStore.js'
-import { getAvailableModels, uploadFiles, isImageFile } from '../../lib/gateway.js'
+import { getAvailableModels, uploadFiles, isImageFile, getSkills } from '../../lib/gateway.js'
 import type { ModelEntry } from '../../lib/gateway.js'
-import type { UploadedFile } from '../../lib/types.js'
+import type { UploadedFile, Skill } from '../../lib/types.js'
 
 // ─── 暴露的 ref 方法接口 ───────────────────────────────────────────────────
 
@@ -31,12 +31,12 @@ const MIN_ROWS = 3
 
 // ─── 权限模式配置 ──────────────────────────────────────────────────────────
 
-type PermMode = 'ask' | 'plan' | 'auto'
+type PermMode = 'ask' | 'plan' | 'craft'
 
 const PERM_MODES: Array<{ value: PermMode; label: string; desc: string; icon: string }> = [
-  { value: 'ask',  label: 'Ask',  desc: '每次写操作都询问确认', icon: '❓' },
-  { value: 'plan', label: 'Plan', desc: '规划模式没有写权限', icon: '📋' },
-  { value: 'auto', label: 'Auto', desc: '自动允许所有操作',      icon: '⚡' },
+  { value: 'ask',   label: 'Ask',   desc: '每次写操作都询问确认', icon: '❓' },
+  { value: 'plan',  label: 'Plan',  desc: '规划模式没有写权限',   icon: '📋' },
+  { value: 'craft', label: 'Craft', desc: '自主执行，无需确认',   icon: '⚡' },
 ]
 
 // ─── CraftDropdown ─────────────────────────────────────────────────────────
@@ -125,9 +125,11 @@ function CraftDropdown({ currentMode, onSelect }: CraftDropdownProps) {
 
 interface AutoDropdownProps {
   currentModel?: string
+  selectedModel: string | null  // null = Auto
+  onSelect: (model: string | null) => void
 }
 
-function AutoDropdown({ currentModel }: AutoDropdownProps) {
+function AutoDropdown({ currentModel, selectedModel, onSelect }: AutoDropdownProps) {
   const [open, setOpen] = useState(false)
   const [models, setModels] = useState<ModelEntry[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -151,9 +153,184 @@ function AutoDropdown({ currentModel }: AutoDropdownProps) {
       .catch(() => setLoaded(true))
   }, [open, loaded])
 
-  const displayModel = currentModel
-    ? currentModel.length > 16 ? currentModel.slice(0, 14) + '…' : currentModel
+  // 显示名：selectedModel 不为 null 时显示选中的模型名，否则显示 Auto
+  const displayLabel = selectedModel
+    ? (selectedModel.length > 16 ? selectedModel.slice(0, 14) + '…' : selectedModel)
     : 'Auto'
+
+  // 高亮逻辑：selectedModel 为 null 表示用户主动选了 Auto，高亮 Auto 行
+  // selectedModel 为具体字符串，高亮对应模型行
+  const isAutoSelected = selectedModel === null
+  const activeModelHighlight = selectedModel ?? null
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        title={currentModel ? `当前会话：${currentModel}` : undefined}
+        className={[
+          'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all duration-150 border',
+          open
+            ? 'bg-[var(--bg-elevated)] border-[var(--border-focus)] text-[var(--text-primary)]'
+            : selectedModel
+              ? 'bg-[var(--accent-subtle)] border-[var(--accent-border)] text-[var(--accent-light,#60a5fa)]'
+              : 'bg-[var(--bg-tertiary)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-focus)]',
+        ].join(' ')}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+        </svg>
+        <span className="font-mono">{displayLabel}</span>
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className={`transition-transform ${open ? 'rotate-180' : ''}`}>
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full left-0 mb-1.5 w-64 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-xl shadow-[var(--shadow-lg)] overflow-hidden z-50 animate-fade-in">
+          <div className="px-3 py-2 border-b border-[var(--border-subtle)]">
+            <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-wider">
+              下次会话使用的模型
+            </span>
+          </div>
+
+          <div className="max-h-52 overflow-y-auto">
+            {/* Auto 选项 */}
+            <button
+              type="button"
+              onClick={() => { onSelect(null); setOpen(false) }}
+              className={[
+                'flex items-center gap-2 w-full px-3 py-2.5 text-left transition-colors duration-100',
+                isAutoSelected
+                  ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
+                  : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]',
+              ].join(' ')}
+            >
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-mono font-semibold">Auto</div>
+                <div className="text-[10px] text-[var(--text-muted)]">自动选择最优模型</div>
+              </div>
+              {isAutoSelected && (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-[var(--accent)] shrink-0">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              )}
+            </button>
+
+            {/* 分割线 */}
+            {models.length > 0 && <div className="border-t border-[var(--border-subtle)] mx-3" />}
+
+            {!loaded ? (
+              <div className="px-3 py-4 text-xs text-[var(--text-muted)] text-center">加载中...</div>
+            ) : (
+              models.map((m) => (
+                <button
+                  key={`${m.provider}-${m.model}`}
+                  type="button"
+                  onClick={() => { onSelect(m.model); setOpen(false) }}
+                  className={[
+                    'flex items-center gap-2 w-full px-3 py-2.5 text-left transition-colors duration-100',
+                    m.model === activeModelHighlight
+                      ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
+                      : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]',
+                  ].join(' ')}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-mono truncate">{m.model}</div>
+                    <div className="text-[10px] text-[var(--text-muted)]">{m.provider}</div>
+                  </div>
+                  {m.isDefault && (
+                    <span className="text-[10px] text-[var(--accent)] shrink-0">默认</span>
+                  )}
+                  {m.model === activeModelHighlight && (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-[var(--accent)] shrink-0">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  )}
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="px-3 py-2 border-t border-[var(--border-subtle)]">
+            <p className="text-[10px] text-[var(--text-muted)]">
+              选择后下次新建会话时生效
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── SkillsButton ──────────────────────────────────────────────────────────
+
+interface SkillsButtonProps {
+  onSelect: (skill: Skill) => void
+}
+
+function SkillsButton({ onSelect }: SkillsButtonProps) {
+  const [open, setOpen] = useState(false)
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+
+  // 点击外部关闭
+  useEffect(() => {
+    if (!open) return
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  // 打开时懒加载技能列表，并聚焦搜索框
+  useEffect(() => {
+    if (!open) { setQuery(''); return }
+    if (!loaded) {
+      getSkills()
+        .then(data => { setSkills(data); setLoaded(true) })
+        .catch(() => setLoaded(true))
+    }
+    // 延迟聚焦，等弹框渲染完成
+    requestAnimationFrame(() => searchRef.current?.focus())
+  }, [open, loaded])
+
+  // 过滤：排除内置技能，按名称或描述搜索
+  const userSkills = skills.filter(s => s.source !== 'builtin')
+  const filtered = query.trim()
+    ? userSkills.filter(s =>
+        s.name.toLowerCase().includes(query.toLowerCase()) ||
+        (s.description ?? '').toLowerCase().includes(query.toLowerCase()),
+      )
+    : userSkills
+
+  function handleSelect(skill: Skill) {
+    onSelect(skill)
+    setOpen(false)
+    setQuery('')
+  }
+
+  // 根据名称生成稳定背景色（复用 SkillsPage 的逻辑）
+  function getIconBg(name: string): string {
+    const colors = [
+      'bg-blue-500', 'bg-purple-500', 'bg-green-500', 'bg-orange-500',
+      'bg-pink-500', 'bg-cyan-500', 'bg-indigo-500', 'bg-teal-500',
+    ]
+    let hash = 0
+    for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) & 0xffffffff
+    return colors[Math.abs(hash) % colors.length]
+  }
+
+  function getInitials(name: string): string {
+    const words = name.trim().split(/[\s_\-]+/)
+    if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
+    return name.slice(0, 2).toUpperCase()
+  }
 
   return (
     <div ref={ref} className="relative">
@@ -168,78 +345,96 @@ function AutoDropdown({ currentModel }: AutoDropdownProps) {
         ].join(' ')}
       >
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
         </svg>
-        <span className="font-mono">{displayModel}</span>
+        <span>Skills</span>
         <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className={`transition-transform ${open ? 'rotate-180' : ''}`}>
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 mb-1.5 w-64 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-xl shadow-[var(--shadow-lg)] overflow-hidden z-50 animate-fade-in">
+        <div className="absolute bottom-full left-0 mb-1.5 w-72 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-xl shadow-[var(--shadow-lg)] overflow-hidden z-50 animate-fade-in">
+          {/* 标题 */}
           <div className="px-3 py-2 border-b border-[var(--border-subtle)]">
             <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-wider">
-              模型
+              选择技能
             </span>
           </div>
-          {!loaded ? (
-            <div className="px-3 py-4 text-xs text-[var(--text-muted)] text-center">加载中...</div>
-          ) : models.length === 0 ? (
-            <div className="px-3 py-4 text-xs text-[var(--text-muted)] text-center">无可用模型</div>
-          ) : (
-            <div className="max-h-52 overflow-y-auto">
-              {models.map((m) => (
-                <div
-                  key={`${m.provider}-${m.model}`}
-                  className={[
-                    'flex items-center gap-2 px-3 py-2.5',
-                    m.model === currentModel
-                      ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
-                      : 'text-[var(--text-secondary)]',
-                  ].join(' ')}
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-mono truncate">{m.model}</div>
-                    <div className="text-[10px] text-[var(--text-muted)]">{m.provider}</div>
-                  </div>
-                  {m.isDefault && (
-                    <span className="text-[10px] text-[var(--accent)] shrink-0">默认</span>
-                  )}
-                  {m.model === currentModel && (
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-[var(--accent)] shrink-0">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                  )}
-                </div>
-              ))}
+
+          {/* 搜索框 */}
+          <div className="px-2 py-2 border-b border-[var(--border-subtle)]">
+            <div className="flex items-center gap-1.5 px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border)]">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-[var(--text-muted)] shrink-0">
+                <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input
+                ref={searchRef}
+                type="text"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="搜索技能..."
+                className="flex-1 bg-transparent text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none"
+              />
+              {query && (
+                <button type="button" onClick={() => setQuery('')} className="text-[var(--text-muted)] hover:text-[var(--text-secondary)]">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              )}
             </div>
-          )}
+          </div>
+
+          {/* 技能列表 */}
+          <div className="max-h-60 overflow-y-auto">
+            {!loaded ? (
+              <div className="px-3 py-6 text-xs text-[var(--text-muted)] text-center">加载中...</div>
+            ) : filtered.length === 0 ? (
+              <div className="px-3 py-6 text-xs text-[var(--text-muted)] text-center">
+                {query ? `未找到"${query}"相关技能` : '暂无可用技能'}
+              </div>
+            ) : (
+              filtered.map(skill => (
+                <button
+                  key={skill.name}
+                  type="button"
+                  onClick={() => handleSelect(skill)}
+                  className="flex items-center gap-2.5 w-full px-3 py-2.5 text-left transition-colors duration-100 hover:bg-[var(--bg-tertiary)]"
+                >
+                  {/* 图标 */}
+                  <div className={`w-7 h-7 rounded-lg ${getIconBg(skill.name)} flex items-center justify-center shrink-0`}>
+                    <span className="text-[10px] font-bold text-white">{getInitials(skill.name)}</span>
+                  </div>
+                  {/* 文字 */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-medium text-[var(--text-primary)] truncate">{skill.name}</span>
+                      <span className={[
+                        'shrink-0 text-[9px] px-1 py-0.5 rounded font-medium',
+                        skill.source === 'builtin'
+                          ? 'bg-blue-500/20 text-blue-400'
+                          : 'bg-green-500/20 text-green-400',
+                      ].join(' ')}>
+                        {skill.source === 'builtin' ? '内置' : '用户'}
+                      </span>
+                    </div>
+                    {skill.description && (
+                      <div className="text-[10px] text-[var(--text-muted)] truncate mt-0.5">{skill.description}</div>
+                    )}
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+
+          {/* 底部提示 */}
           <div className="px-3 py-2 border-t border-[var(--border-subtle)]">
-            <p className="text-[10px] text-[var(--text-muted)]">
-              在 <span className="font-mono">Auto</span> 页面可修改默认模型
-            </p>
+            <p className="text-[10px] text-[var(--text-muted)]">点击技能将其引用到输入框</p>
           </div>
         </div>
       )}
     </div>
-  )
-}
-
-// ─── SkillsButton ──────────────────────────────────────────────────────────
-
-function SkillsButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-focus)] transition-all duration-150"
-    >
-      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-        <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
-      </svg>
-      <span>Skills</span>
-    </button>
   )
 }
 
@@ -290,6 +485,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
   function InputBar({ sessionId, isBusy }, ref) {
     const [text, setText] = useState('')
     const [planModeWarning, setPlanModeWarning] = useState(false)
+    const [hasSent, setHasSent] = useState(false)  // 本轮是否已发送过消息
     const textareaRef = useRef<HTMLTextAreaElement>(null)
 
     // ── 附件状态 ──────────────────────────────────────────────────────────
@@ -304,19 +500,28 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
     const sessions = useSessionStore((s) => s.sessions)
     const sendMessage = useSessionStore((s) => s.sendMessage)
     const sendAbort = useSessionStore((s) => s.sendAbort)
-    const sendUserReply = useSessionStore((s) => s.sendUserReply)
     const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
+    const pendingModel = useSessionStore((s) => s.pendingModel)
+    const setPendingModel = useSessionStore((s) => s.setPendingModel)
     const appendUserMessage = useMessageStore((s) => s.appendUserMessage)
-    const pendingAskUser = useMessageStore((s) => s.pendingAskUser)
     const pendingContinuation = useMessageStore((s) => s.pendingContinuation)
     const clearContinuation = useMessageStore((s) => s.clearContinuation)
 
-    const askUserState = pendingAskUser.get(sessionId) ?? null
     const hasContinuation = pendingContinuation.has(sessionId)
 
     // 当前会话的权限模式（默认 ask）
     const activeSession = sessions.find(s => s.id === sessionId)
     const permissionMode: PermMode = (activeSession?.permissionMode as PermMode) ?? 'ask'
+
+    // isBusy 结束时重置 hasSent，为下一轮发送做准备
+    useEffect(() => {
+      if (!isBusy) setHasSent(false)
+    }, [isBusy])
+
+    // sessionId 切换时重置 hasSent（保活场景下组件不重建，需手动重置）
+    useEffect(() => {
+      setHasSent(false)
+    }, [sessionId])
     // 自动扩展 textarea 高度，最小保持 MIN_ROWS 行
     useEffect(() => {
       const el = textareaRef.current
@@ -370,6 +575,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
       appendUserMessage(sessionId, content, imageNames.length > 0 ? imageNames : undefined)
       sendMessage(sessionId, content)
       setText('')
+      setHasSent(true)
       setUploadedFiles([])
       setPendingFiles([])
       setUploadError(null)
@@ -443,25 +649,19 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
         return next
       })
     }, [])
-    const handleReply = useCallback((answer: string) => {
-      const trimmed = answer.trim()
-      if (!trimmed) return
-      appendUserMessage(sessionId, trimmed)
-      sendUserReply(sessionId, trimmed)
-      setText('')
-    }, [sessionId, appendUserMessage, sendUserReply])
-
     const handleAbort = useCallback(() => {
       sendAbort(sessionId)
     }, [sessionId, sendAbort])
 
-    // plan 模式下用户确认继续执行：切换到 ask 模式并发送继续指令
+    // 用户确认继续执行：仅在 plan 模式下切换到 ask，其他模式直接发消息
     const handleContinueExecution = useCallback(() => {
       clearContinuation(sessionId)
-      setPermissionMode(sessionId, 'ask')
+      if (permissionMode === 'plan') {
+        setPermissionMode(sessionId, 'ask')
+      }
       appendUserMessage(sessionId, '请按照上述计划执行')
       sendMessage(sessionId, '请按照上述计划执行')
-    }, [sessionId, clearContinuation, setPermissionMode, appendUserMessage, sendMessage])
+    }, [sessionId, permissionMode, clearContinuation, setPermissionMode, appendUserMessage, sendMessage])
 
     // plan 模式下用户放弃继续执行
     const handleDismissContinuation = useCallback(() => {
@@ -501,12 +701,11 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
     const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
-        if (askUserState) handleReply(text)
-        else handleSend()
+        handleSend()
       }
-    }, [askUserState, text, handleReply, handleSend])
+    }, [handleSend])
 
-    const canSend = (text.trim().length > 0 || uploadedFiles.length > 0) && (!isBusy || !!askUserState)
+    const canSend = (text.trim().length > 0 || uploadedFiles.length > 0) && !isBusy
 
     return (
       <div className="bg-[var(--bg-primary)] border-t border-[var(--border-subtle)]">
@@ -562,42 +761,20 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
           {hasContinuation && !isBusy && (
             <div className="bg-[var(--accent-subtle)] border border-[var(--accent-border)] rounded-lg px-3 py-2 animate-fade-in">
               <p className="text-xs text-[var(--text-secondary)] mb-2">
-                Agent 已完成规划，是否切换到执行模式并按计划执行？
+                {permissionMode === 'plan'
+                  ? 'Agent 已完成规划，是否切换到执行模式并按计划执行？'
+                  : 'Agent 想继续执行后续步骤，是否继续？'}
               </p>
               <div className="flex items-center gap-2">
                 <button type="button" onClick={handleContinueExecution}
                   className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-2.5 py-1 rounded-md text-xs font-semibold transition-all">
-                  批准并执行
+                  {permissionMode === 'plan' ? '批准并执行' : '继续执行'}
                 </button>
                 <button type="button" onClick={handleDismissContinuation}
                   className="bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-2.5 py-1 rounded-md text-xs transition-all">
-                  继续规划
+                  {permissionMode === 'plan' ? '继续规划' : '忽略'}
                 </button>
               </div>
-            </div>
-          )}
-
-          {/* ask_user 问题 */}
-          {askUserState && (
-            <div className="animate-fade-in">
-              <div className="bg-[var(--info-subtle)] border border-[var(--info)]/20 rounded-lg px-3 py-2 mb-1.5">
-                <span className="text-[10px] text-[var(--info)] font-semibold uppercase tracking-wide block mb-0.5">
-                  Agent 提问
-                </span>
-                <span className="text-sm text-[var(--text-primary)] leading-relaxed">
-                  {askUserState.question}
-                </span>
-              </div>
-              {askUserState.options && askUserState.options.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {askUserState.options.map((option, idx) => (
-                    <button key={idx} type="button" onClick={() => handleReply(option)}
-                      className="bg-[var(--bg-tertiary)] hover:bg-[var(--accent-subtle)] border border-[var(--border)] hover:border-[var(--accent-border)] text-[var(--text-primary)] px-3 py-1 rounded-lg text-xs font-medium transition-all">
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -606,14 +783,14 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
         <div className="px-4 py-3">
           <div className="input-container">
 
-            {/* 执行中提示行 */}
-            {isBusy && (
+            {/* 执行中提示行（发送后才显示） */}
+            {isBusy && hasSent && (
               <div className="flex items-center gap-2 px-3.5 pt-2.5 text-xs text-[var(--text-secondary)]">
                 <span className="relative flex shrink-0">
                   <span className="absolute w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping opacity-75" />
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
                 </span>
-                <span>Agent 正在执行任务...</span>
+                <span>运行中...</span>
               </div>
             )}
 
@@ -733,15 +910,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
               value={text}
               onChange={(e) => { setText(e.target.value); setPlanModeWarning(false) }}
               onKeyDown={handleKeyDown}
-              disabled={isBusy && !askUserState}
+              disabled={isBusy}
               rows={MIN_ROWS}
               placeholder={
-                isBusy        ? '任务执行中，可发送追加指令...'
-                : askUserState ? '输入回答...'
-                : '输入任务描述...'
+                isBusy ? '运行中，请等待完成...' : '输入任务描述...'
               }
               className="w-full bg-transparent text-[var(--text-primary)] text-sm resize-none focus:outline-none placeholder-[var(--text-muted)] leading-5 disabled:opacity-40 disabled:cursor-not-allowed px-3.5 pt-2.5 pb-2"
-              aria-label={askUserState ? '输入回答' : '输入消息'}
+              aria-label="输入消息"
             />
 
             {/* 工具栏：与输入框同在卡片内，用细线分隔 */}
@@ -753,8 +928,27 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
                   currentMode={permissionMode}
                   onSelect={(mode) => setPermissionMode(sessionId, mode)}
                 />
-                <AutoDropdown currentModel={activeSession?.model} />
-                <SkillsButton onClick={() => {}} />
+                <AutoDropdown
+                  currentModel={activeSession?.model}
+                  selectedModel={pendingModel}
+                  onSelect={setPendingModel}
+                />
+                <SkillsButton
+                  onSelect={(skill) => {
+                    const el = textareaRef.current
+                    const insertStr = `@${skill.name} `
+                    if (!el) { setText(prev => prev + insertStr); return }
+                    const start = el.selectionStart ?? el.value.length
+                    const end = el.selectionEnd ?? el.value.length
+                    const newValue = el.value.slice(0, start) + insertStr + el.value.slice(end)
+                    setText(newValue)
+                    requestAnimationFrame(() => {
+                      el.focus()
+                      const cursor = start + insertStr.length
+                      el.setSelectionRange(cursor, cursor)
+                    })
+                  }}
+                />
               </div>
 
               {/* 右侧：附件 + 发送/中止 */}
@@ -800,7 +994,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
                   </button>
                 ) : (
                   <button type="button"
-                    onClick={askUserState ? () => handleReply(text) : handleSend}
+                    onClick={handleSend}
                     disabled={!canSend}
                     className="flex items-center justify-center w-8 h-8 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:bg-[var(--bg-tertiary)] disabled:text-[var(--text-muted)] text-white rounded-lg transition-all disabled:cursor-not-allowed shadow-sm"
                     aria-label="发送消息">

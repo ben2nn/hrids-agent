@@ -53,9 +53,8 @@ export const ALL_TOOLS: ToolDef[] = [
   SkillHubInstallTool,
   SkillHubRecommendTool,
   SkillHubSetupTool,
-  SkillHubListTool,
-  SkillHubUninstallTool,
-  SkillHubUpgradeTool,
+  // SkillHubListTool、SkillHubUninstallTool、SkillHubUpgradeTool 已从 ALL_TOOLS 移除，
+  // 减少 LLM 工具列表膨胀。如需使用，可通过 bash 命令或直接 import 调用。
   ...TEAM_TOOLS,
   ...MEMORY_TOOLS,
 ]

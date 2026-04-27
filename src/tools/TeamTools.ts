@@ -2,7 +2,14 @@
 import { z } from 'zod'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { MessageBus } from '../core/coordinator/MessageBus.js'
+import { getCurrentSessionId } from '../core/sessionContext.js'
 import type { ToolDef } from '../core/Tool.js'
+
+/** 获取当前会话的 TeamManager（Gateway 模式用会话级，CLI 模式用全局单例） */
+function getTeamManager(): TeamManager | null {
+  const sessionId = getCurrentSessionId()
+  return sessionId ? TeamManager.getForSession(sessionId) : TeamManager.get()
+}
 
 // ── team_create ──────────────────────────────────────────────
 const teamCreateSchema = z.object({
@@ -17,7 +24,7 @@ export const TeamCreateTool: ToolDef<typeof teamCreateSchema> = {
   readonly: false,
   describe: (i) => `创建团队: ${i.name}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
     try {
       mgr.createTeam({ name: input.name, maxConcurrent: input.max_concurrent })
@@ -40,7 +47,7 @@ export const TeamDeleteTool: ToolDef<typeof teamDeleteSchema> = {
   readonly: false,
   describe: (i) => `删除团队: ${i.name}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
     const ok = mgr.deleteTeam(input.name)
     return ok
@@ -66,7 +73,7 @@ export const AgentSpawnTool: ToolDef<typeof agentSpawnSchema> = {
   readonly: false,
   describe: (i) => `派生智能体: ${i.name} → ${i.description}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化，请先调用 team_create' }
 
     try {
@@ -114,7 +121,7 @@ export const TeamStatusTool: ToolDef<typeof teamStatusSchema> = {
   readonly: true,
   describe: (i) => `查看团队状态: ${i.team}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
 
     const team = mgr.getTeam(input.team)
@@ -154,7 +161,7 @@ export const TeamWaitTool: ToolDef<typeof teamWaitSchema> = {
   readonly: true,
   describe: (i) => `等待团队完成: ${i.team}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
 
     try {

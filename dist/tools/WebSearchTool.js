@@ -1,25 +1,11 @@
 // Web 搜索工具 —— 优先使用 Anthropic 原生 web_search 能力，降级到 DuckDuckGo
 import { z } from 'zod';
-import { HttpsProxyAgent } from 'https-proxy-agent';
 const inputSchema = z.object({
     query: z.string().describe('搜索查询词'),
 });
-// 获取代理配置
-function getProxyAgent() {
-    const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
-    if (proxyUrl) {
-        return new HttpsProxyAgent(proxyUrl);
-    }
-    return undefined;
-}
-// 获取 fetch 配置（包含代理支持）
+// 获取 fetch 配置（代理由 proxySetup.ts 在启动时注入为全局 dispatcher，无需手动传）
 function getFetchOptions(options = {}) {
-    const agent = getProxyAgent();
-    return {
-        ...options,
-        // @ts-expect-error Node.js fetch 支持 agent 选项
-        agent,
-    };
+    return { ...options };
 }
 // ── 降级方案：DuckDuckGo HTML 搜索（无需 API Key）────────────────────────────
 async function searchViaDuckDuckGo(query) {
@@ -50,9 +36,26 @@ async function searchViaDuckDuckGo(query) {
     while ((m = resultPattern.exec(html)) !== null && titles.length < 8) {
         const href = m[1];
         const title = m[2].replace(/<[^>]+>/g, '').trim();
-        if (href && title && !href.startsWith('//duckduckgo')) {
-            titles.push({ url: href, title });
+        if (!href || !title)
+            continue;
+        // DuckDuckGo 现在将链接包装为 //duckduckgo.com/l/?uddg=<encoded_url>
+        // 需要解码出真实 URL
+        let realUrl = href;
+        if (href.includes('duckduckgo.com/l/') && href.includes('uddg=')) {
+            const uddgMatch = href.match(/[?&]uddg=([^&]+)/);
+            if (uddgMatch) {
+                try {
+                    realUrl = decodeURIComponent(uddgMatch[1]);
+                }
+                catch {
+                    realUrl = href;
+                }
+            }
         }
+        // 跳过无法解析的 duckduckgo 内部链接
+        if (realUrl.startsWith('//duckduckgo') || realUrl.startsWith('https://duckduckgo.com'))
+            continue;
+        titles.push({ url: realUrl, title });
     }
     const snippets = [];
     while ((m = snippetPattern.exec(html)) !== null && snippets.length < 8) {

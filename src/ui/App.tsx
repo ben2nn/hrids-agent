@@ -53,6 +53,77 @@ const ROLE_PREFIX: Record<MsgRole, string> = {
   error:     '✗ ',
 }
 
+// ── 工具输出差异化格式化 ──────────────────────────────────────────────────────
+
+/** web_search 输出格式化：识别 DuckDuckGo 卡片式结构 或 Anthropic 自然语言文本 */
+function formatWebSearch(out: string): string {
+  // DuckDuckGo 输出特征：包含 `---` 分隔符 + `**标题**` 格式
+  if (out.includes('---') && out.includes('**')) {
+    const blocks = out
+      .split(/\n---+\n/)
+      .map(b => b.trim())
+      .filter(Boolean)
+
+    // 找到实际结果块（跳过 "搜索结果（来源：...）：" 前缀行）
+    const resultBlocks = blocks.filter(b => b.includes('**'))
+
+    if (resultBlocks.length === 0) return out.slice(0, 500)
+
+    const lines: string[] = []
+    resultBlocks.forEach((block, idx) => {
+      // 解析：第一行是 **标题**，第二行是摘要，第三行是 URL
+      const parts = block.split('\n').map(l => l.trim()).filter(Boolean)
+      const title = parts[0]?.replace(/^\*\*|\*\*$/g, '') ?? ''
+      const snippet = parts[1] ?? ''
+      const url = parts[2] ?? ''
+
+      lines.push(`  ${idx + 1}. ${title}`)
+      if (snippet) lines.push(`     ${snippet.length > 80 ? snippet.slice(0, 80) + '…' : snippet}`)
+      if (url) lines.push(`     ${url}`)
+    })
+
+    lines.push(`  ─ 共 ${resultBlocks.length} 条结果`)
+    return lines.join('\n')
+  }
+
+  // Anthropic 自然语言输出：直接截断展示
+  return out.length > 600 ? out.slice(0, 600) + `\n  …（共 ${out.length} 字符）` : out
+}
+
+/** web_fetch 输出格式化：显示字数 + 正文预览 */
+function formatWebFetch(out: string, url: string): string {
+  const totalChars = out.length
+  const isTruncated = out.includes('[内容已截断，共')
+
+  // 提取实际正文（去掉末尾截断提示行）
+  const bodyEnd = out.lastIndexOf('\n\n[内容已截断')
+  const body = bodyEnd > 0 ? out.slice(0, bodyEnd) : out
+
+  const preview = body.slice(0, 300)
+  const previewLines = preview.split('\n').slice(0, 8).join('\n')
+
+  const lines: string[] = []
+  lines.push(`  来源: ${url}`)
+  lines.push(`  字数: ${totalChars.toLocaleString()} 字符${isTruncated ? '（已截断）' : ''}`)
+  lines.push(`  ${'─'.repeat(40)}`)
+  lines.push(previewLines.split('\n').map(l => `  ${l}`).join('\n'))
+  if (body.length > 300) lines.push(`  …（正文共 ${body.length.toLocaleString()} 字符）`)
+
+  return lines.join('\n')
+}
+
+/** 按工具名称差异化格式化输出，其他工具保持原有截断逻辑 */
+function formatToolOutput(toolName: string, out: string, toolInput?: Record<string, unknown>): string {
+  if (!out) return ''
+  if (toolName === 'web_search') return formatWebSearch(out)
+  if (toolName === 'web_fetch') {
+    const url = (toolInput?.url as string) ?? ''
+    return formatWebFetch(out, url)
+  }
+  // 默认：超 500 字符截断
+  return out.length > 500 ? out.slice(0, 500) + `\n…（共 ${out.length} 字符）` : out
+}
+
 export function App({ engine, commands, sessionId: initialSessionId, onModelChange, currentModel, providerName, getProviderName }: Props) {
   const { exit } = useApp()
   const [input, setInput] = useState('')
@@ -94,6 +165,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const toolLogFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // 每个工具执行期间的日志，用于 tool_end 时持久化到历史
   const currentToolLogsRef = useRef<string[]>([])
+  // 缓存当前工具的 input，供 tool_end 格式化时使用
+  const currentToolInputRef = useRef<Record<string, unknown>>({})
   // 每个工具最多保留的日志行数（避免爬虫等大量输出撑爆界面）
   const MAX_TOOL_LOG_LINES = 30
 
@@ -133,6 +206,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
           case 'tool_start':
             currentToolLogsRef.current = [] // 重置当前工具日志缓冲
+            currentToolInputRef.current = (ev.input as Record<string, unknown>) ?? {}
             push({ id: ev.id, role: 'tool', text: `⚙ ${ev.name}  ${ev.description}` })
             // ask_user 工具：切换输入框为回答模式
             if (ev.name === 'ask_user') {
@@ -174,9 +248,9 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
                 color: 'red',
               }), { role: 'error', text: `✗ ${ev.name}: ${result.message}` })
             } else {
-              // 成功：追加日志 + 结果行；output 超 500 字符时截断
+              // 成功：按工具类型差异化格式化输出
               const out = result.output ?? ''
-              const preview = out.length > 500 ? out.slice(0, 500) + `\n…（共 ${out.length} 字符）` : out
+              const preview = formatToolOutput(ev.name, out, currentToolInputRef.current)
               updateMsg(ev.id, prev => ({
                 ...prev,
                 text: prev.text + logSuffix + `\n✓ ${ev.name}${preview ? '\n' + preview : ''}`,

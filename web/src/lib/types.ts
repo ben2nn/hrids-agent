@@ -1,23 +1,26 @@
 // ─── 服务端推送消息（WebSocket Server → Client） ───────────────────────────
 
 export type ServerMessage =
-  | { type: 'ready'; sessionId: string }
-  | { type: 'text_delta'; delta: string }
-  | { type: 'tool_start'; toolId: string; toolName: string; input: unknown }
-  | { type: 'tool_log'; toolId: string; log: string }
-  | { type: 'tool_end'; toolId: string; status: 'success' | 'error' | 'denied'; result?: unknown }
-  | { type: 'todos_updated'; todos: Todo[] }
-  | { type: 'permission_request'; key: string; toolName: string; description: string; readonly: boolean }
-  | { type: 'ask_user'; question: string; options?: string[] }
-  | { type: 'usage'; inputTokens: number; outputTokens: number; cost: number; model: string }
-  | { type: 'cwd_changed'; cwd: string }
-  | { type: 'permission_mode_changed'; mode: 'ask' | 'auto' | 'plan' }
-  | { type: 'continuation_needed' }
-  | { type: 'compact_done'; summary: string }
-  | { type: 'model_switched'; model: string; reason: string }
-  | { type: 'done' }
-  | { type: 'error'; message: string }
-  | { type: 'budget_exceeded'; message: string }
+  | { type: 'ready'; requestId?: string; sessionId: string; timestamp: number }
+  | { type: 'request_start'; requestId: string; trigger: 'user' | 'cron'; description?: string; timestamp: number }
+  | { type: 'cron_trigger'; requestId: string; description: string; timestamp: number }
+  | { type: 'text_delta'; requestId: string; delta: string; timestamp: number }
+  | { type: 'tool_start'; requestId: string; toolId: string; toolName: string; input: unknown; timestamp: number }
+  | { type: 'tool_log'; requestId: string; toolId: string; log: string; timestamp: number }
+  | { type: 'tool_end'; requestId: string; toolId: string; status: 'success' | 'error' | 'denied'; result?: unknown; timestamp: number }
+  | { type: 'todos_updated'; requestId?: string; todos: Todo[]; timestamp: number }
+  | { type: 'permission_request'; requestId?: string; key: string; toolName: string; description: string; readonly: boolean; isDestructive?: boolean; ruleContent?: string; timestamp: number }
+  | { type: 'ask_user'; requestId?: string; question: string; options?: string[]; timestamp: number }
+  | { type: 'usage'; requestId: string; inputTokens: number; outputTokens: number; cost: number; model: string; timestamp: number }
+  | { type: 'cwd_changed'; requestId?: string; cwd: string; timestamp: number }
+  | { type: 'permission_mode_changed'; requestId?: string; mode: 'ask' | 'craft' | 'plan'; timestamp: number }
+  | { type: 'continuation_needed'; requestId: string; timestamp: number }
+  | { type: 'compact_done'; requestId?: string; summary: string; timestamp: number }
+  | { type: 'model_switched'; requestId?: string; model: string; reason: string; timestamp: number }
+  | { type: 'done'; requestId: string; timestamp: number }
+  | { type: 'error'; requestId: string; message: string; timestamp: number }
+  | { type: 'budget_exceeded'; requestId?: string; message: string; timestamp: number }
+  | { type: 'history_cleared'; requestId?: string; timestamp: number }
 
 // ─── 客户端发送消息（WebSocket Client → Server） ───────────────────────────
 
@@ -32,9 +35,10 @@ export type ClientMessage =
   | { type: 'message'; content: string; attachments?: MessageAttachment[] }
   | { type: 'abort' }
   | { type: 'user_reply'; answer: string }
-  | { type: 'permission_reply'; key: string; granted: boolean }
+  | { type: 'permission_reply'; key: string; granted: boolean; permanent?: boolean; session?: boolean; ruleContent?: string }
   | { type: 'set_cwd'; cwd: string }
-  | { type: 'set_permission_mode'; mode: 'ask' | 'auto' | 'plan' }
+  | { type: 'set_permission_mode'; mode: 'ask' | 'craft' | 'plan' }
+  | { type: 'clear_history' }
 
 // ─── 文件上传 ──────────────────────────────────────────────────────────────
 
@@ -62,17 +66,20 @@ export interface SessionInfo {
   cwd?: string
   createdAt: number
   title?: string
-  permissionMode?: 'ask' | 'auto' | 'plan'
+  lastUserMessage?: string
+  permissionMode?: 'ask' | 'craft' | 'plan'
 }
 
 export interface CreateSessionRequest {
   model?: string
   cwd?: string
   autoMode?: boolean
-  /** 权限模式（优先级高于 autoMode）：ask / auto / readonly / plan */
-  permissionMode?: 'ask' | 'auto' | 'readonly' | 'plan'
+  /** 权限模式（优先级高于 autoMode）：ask / craft / plan */
+  permissionMode?: 'ask' | 'craft' | 'plan'
   /** 恢复历史会话时传入旧会话 ID */
   resume?: string
+  /** 会话标题 */
+  title?: string
 }
 
 // ─── 文件系统 ──────────────────────────────────────────────────────────────
@@ -120,6 +127,8 @@ export interface CronJob {
   nextRunAt?: number
   enabled: boolean
   once?: boolean
+  startDate?: string
+  endDate?: string
 }
 
 // ─── 技能 ──────────────────────────────────────────────────────────────────
@@ -139,16 +148,19 @@ export interface Skill {
 
 export type DisplayMessage =
   | { id: string; type: 'user'; content: string; timestamp: number; images?: string[] }
-  | { id: string; type: 'assistant'; content: string; timestamp: number; usage?: CostInfo }
+  | { id: string; type: 'request_start'; requestId: string; trigger: 'user' | 'cron'; description?: string; timestamp: number }
+  | { id: string; type: 'cron_trigger'; requestId: string; description: string; timestamp: number }
+  | { id: string; type: 'assistant'; requestId: string; content: string; timestamp: number; usage?: CostInfo; isCron?: boolean; cronDescription?: string }
   | {
-      id: string; type: 'tool'; toolId: string; toolName: string; timestamp: number
+      id: string; type: 'tool'; requestId: string; toolId: string; toolName: string; timestamp: number
       /** 历史消息加载时携带，用于重建 toolCard */
       toolInput?: unknown
       toolStatus?: 'success' | 'error'
       toolResult?: unknown
+      isCron?: boolean
     }
   | { id: string; type: 'system'; content: string; timestamp: number }
-  | { id: string; type: 'error'; content: string; timestamp: number }
+  | { id: string; type: 'error'; requestId?: string; content: string; timestamp: number }
   | {
       id: string; type: 'compact'
       /** 归档时间 ISO 字符串 */
@@ -159,6 +171,8 @@ export type DisplayMessage =
       summary: string
       /** 是否展开摘要 */
       expanded?: boolean
+      /** 归档文件名，用于按需加载实际历史消息 */
+      filename?: string
       timestamp: number
     }
 
@@ -181,6 +195,10 @@ export interface PermissionRequest {
   toolName: string
   description: string
   readonly: boolean
+  /** 是否为破坏性操作（如删除文件、rm 命令等） */
+  isDestructive?: boolean
+  /** 规则内容（bash 命令内容或文件路径），用于前端展示和会话级批准 */
+  ruleContent?: string
   /** 请求到达的时间戳（ms），用于计算 5 分钟倒计时 */
   requestedAt: number
 }

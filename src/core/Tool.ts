@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { zodToJsonSchema } from './schema.js'
 
 // 工具执行结果
 export type ToolResult =
@@ -25,6 +26,12 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   inputSchema: TInput
   // 是否只读（不修改文件系统）
   readonly: boolean
+  /**
+   * 是否为破坏性操作（删除、覆盖、不可逆写入等）。
+   * 用于在 plan 模式下给出更明确的拒绝提示，以及审计日志分级。
+   * 默认 false。
+   */
+  isDestructive?: boolean
   // 执行工具（ctx 可选，用于传递日志回调）
   execute(input: z.infer<TInput>, ctx?: ToolContext): Promise<ToolResult>
   // 权限检查（可选，默认允许）
@@ -33,6 +40,12 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   describe?(input: z.infer<TInput>): string
   // 返回工具操作涉及的文件路径（用于路径级权限控制，可选）
   getFilePath?(input: z.infer<TInput>): string | undefined
+  /**
+   * 返回用于权限规则内容匹配的字符串。
+   * bash/powershell 工具返回命令内容，文件工具返回文件路径。
+   * 用于支持 "bash(git *)" 这类细粒度规则匹配。
+   */
+  getRuleContent?(input: z.infer<TInput>): string | undefined
 }
 
 // 将工具定义转换为 Anthropic API 所需的 tool 格式
@@ -42,42 +55,4 @@ export function toAnthropicTool(tool: ToolDef): object {
     description: tool.description,
     input_schema: zodToJsonSchema(tool.inputSchema),
   }
-}
-
-// 简单的 Zod schema 转 JSON Schema（仅支持常用类型）
-function zodToJsonSchema(schema: z.ZodTypeAny): object {
-  if (schema instanceof z.ZodObject) {
-    const shape = schema.shape as Record<string, z.ZodTypeAny>
-    const properties: Record<string, object> = {}
-    const required: string[] = []
-
-    for (const [key, val] of Object.entries(shape)) {
-      properties[key] = zodFieldToJsonSchema(val)
-      if (!(val instanceof z.ZodOptional)) {
-        required.push(key)
-      }
-    }
-
-    return { type: 'object', properties, required }
-  }
-  return { type: 'string' }
-}
-
-function zodFieldToJsonSchema(field: z.ZodTypeAny): object {
-  if (field instanceof z.ZodString) {
-    const base: Record<string, unknown> = { type: 'string' }
-    const desc = field.description
-    if (desc) base.description = desc
-    return base
-  }
-  if (field instanceof z.ZodNumber) return { type: 'number' }
-  if (field instanceof z.ZodBoolean) return { type: 'boolean' }
-  if (field instanceof z.ZodOptional) return zodFieldToJsonSchema(field.unwrap())
-  if (field instanceof z.ZodArray) {
-    return { type: 'array', items: zodFieldToJsonSchema(field.element) }
-  }
-  if (field instanceof z.ZodEnum) {
-    return { type: 'string', enum: field.options }
-  }
-  return { type: 'string' }
 }

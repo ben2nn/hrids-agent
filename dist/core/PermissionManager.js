@@ -3,9 +3,84 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join, resolve } from 'path';
 const RULES_FILE = join(homedir(), '.hrids-agent', 'permission-rules.json');
+/**
+ * 解析规则字符串为结构化对象。
+ * "bash"         → { toolName: 'bash' }
+ * "bash(git *)"  → { toolName: 'bash', ruleContent: 'git *' }
+ */
+function parseRule(rule) {
+    const match = rule.match(/^([^(]+)\((.+)\)$/);
+    if (match) {
+        return { toolName: match[1].trim(), ruleContent: match[2].trim() };
+    }
+    return { toolName: rule.trim() };
+}
+/**
+ * 检查命令/内容是否匹配规则内容。
+ * 支持三种匹配模式：
+ *   精确匹配：  "git add"    → 完全相等
+ *   前缀匹配：  "git:*"      → 以 "git" 开头（旧语法兼容）
+ *   通配符匹配："git *"      → 支持 * 作为任意字符序列
+ */
+function matchesRuleContent(actual, ruleContent) {
+    const trimmed = actual.trim();
+    const pattern = ruleContent.trim();
+    // 旧语法：prefix:* 前缀匹配
+    const prefixMatch = pattern.match(/^(.+):\*$/);
+    if (prefixMatch) {
+        const prefix = prefixMatch[1];
+        return trimmed === prefix || trimmed.startsWith(prefix + ' ') || trimmed.startsWith(prefix + '\t');
+    }
+    // 无通配符：精确匹配
+    if (!pattern.includes('*')) {
+        return trimmed === pattern;
+    }
+    // 通配符匹配：将 * 转为正则 .*
+    // 转义正则特殊字符（除 * 外）
+    const regexStr = pattern
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*');
+    // 末尾 " .*" 变为可选（"git *" 同时匹配 "git" 和 "git add"）
+    const finalRegex = regexStr.endsWith(' .*')
+        ? regexStr.slice(0, -4) + '( .*)?'
+        : regexStr;
+    return new RegExp(`^${finalRegex}$`, 's').test(trimmed);
+}
+/**
+ * 检查一条权限请求是否匹配某条规则字符串。
+ */
+function requestMatchesRule(req, rule) {
+    const parsed = parseRule(rule);
+    // 工具名不匹配，直接跳过
+    if (parsed.toolName !== req.toolName)
+        return false;
+    // 规则无内容限定 → 匹配该工具的所有调用
+    if (!parsed.ruleContent)
+        return true;
+    // 规则有内容限定 → 需要与 ruleContent 字段匹配
+    if (!req.ruleContent)
+        return false;
+    return matchesRuleContent(req.ruleContent, parsed.ruleContent);
+}
+// ── 路径匹配 ──────────────────────────────────────────────────────────────────
+function matchesPathRule(filePath, rule) {
+    const absFile = resolve(filePath);
+    const absRule = resolve(rule);
+    if (absFile === absRule)
+        return true;
+    if (absFile.startsWith(absRule + '/') || absFile.startsWith(absRule + '\\'))
+        return true;
+    // 文件名匹配（如规则 ".env" 匹配任意目录下的 .env）
+    const basename = absFile.split(/[/\\]/).pop() ?? '';
+    if (basename === rule || basename.startsWith(rule))
+        return true;
+    return false;
+}
+// ── 持久化 ────────────────────────────────────────────────────────────────────
 function loadRules() {
-    if (!existsSync(RULES_FILE))
+    if (!existsSync(RULES_FILE)) {
         return { alwaysAllow: [], alwaysDeny: [], alwaysAsk: [], allowedPaths: [], deniedPaths: [] };
+    }
     try {
         const raw = JSON.parse(readFileSync(RULES_FILE, 'utf-8'));
         return {
@@ -26,21 +101,11 @@ function saveRules(rules) {
         mkdirSync(dir, { recursive: true });
     writeFileSync(RULES_FILE, JSON.stringify(rules, null, 2), 'utf-8');
 }
-// 检查路径是否匹配某个前缀规则（支持 glob 风格的 * 通配）
-function matchesPathRule(filePath, rule) {
-    const absFile = resolve(filePath);
-    const absRule = resolve(rule);
-    // 精确匹配或前缀匹配（目录）
-    if (absFile === absRule)
-        return true;
-    if (absFile.startsWith(absRule + '/') || absFile.startsWith(absRule + '\\'))
-        return true;
-    // 文件名匹配（如规则 ".env" 匹配任意目录下的 .env）
-    const basename = absFile.split(/[/\\]/).pop() ?? '';
-    if (basename === rule || basename.startsWith(rule))
-        return true;
-    return false;
-}
+const DENIAL_LIMITS = {
+    maxConsecutive: 3, // 连续拒绝超过此值，给 LLM 附加提示
+    maxTotal: 20, // 总拒绝超过此值，给 LLM 附加提示
+};
+// ── PermissionManager ─────────────────────────────────────────────────────────
 export class PermissionManager {
     mode;
     // 会话内临时批准（不持久化）
@@ -48,76 +113,115 @@ export class PermissionManager {
     // 持久化规则
     rules;
     onAsk;
+    // 拒绝追踪（会话内，不持久化）
+    denial = { consecutive: 0, total: 0 };
     constructor(mode, onAsk) {
         this.mode = mode;
         this.onAsk = onAsk;
         this.rules = loadRules();
     }
     async check(req) {
+        const result = await this._check(req);
+        // 更新拒绝追踪
+        if (result) {
+            this.denial.consecutive = 0; // 成功则重置连续计数
+        }
+        else {
+            this.denial.consecutive++;
+            this.denial.total++;
+        }
+        return result;
+    }
+    async _check(req) {
         // 只读操作始终允许
         if (req.isReadonly)
             return true;
         // 永久拒绝规则（优先级最高）
-        if (this.rules.alwaysDeny.includes(req.toolName))
+        if (this.rules.alwaysDeny.some(rule => requestMatchesRule(req, rule)))
             return false;
         // 路径级拒绝规则（次高优先级）
         if (req.filePath && this.rules.deniedPaths.length > 0) {
             for (const rule of this.rules.deniedPaths) {
-                if (matchesPathRule(req.filePath, rule)) {
+                if (matchesPathRule(req.filePath, rule))
                     return false;
-                }
             }
         }
         // 路径级允许规则（仅在设置了 allowedPaths 时生效，相当于白名单）
+        // 注意：此白名单只对携带 filePath 的工具有效（file_write、file_edit 等）。
+        // bash/powershell 工具不填 filePath，其路径限制应通过 alwaysDeny/alwaysAllow
+        // 规则实现，例如 "bash(rm *)" 或 "bash(git *)"。
         if (req.filePath && this.rules.allowedPaths.length > 0) {
             const allowed = this.rules.allowedPaths.some(rule => matchesPathRule(req.filePath, rule));
             if (!allowed) {
-                // 路径不在白名单内，降级为询问
                 return this.onAsk(req);
             }
         }
         // 永久允许规则（在非 alwaysAsk 覆盖时生效）
-        if (this.rules.alwaysAllow.includes(req.toolName) && !this.rules.alwaysAsk.includes(req.toolName))
+        // 注意：plan 模式下 alwaysAllow 无效，plan 模式是绝对只读的安全阀。
+        const isAlwaysAllow = this.rules.alwaysAllow.some(rule => requestMatchesRule(req, rule));
+        const isAlwaysAsk = this.rules.alwaysAsk.some(rule => requestMatchesRule(req, rule));
+        if (isAlwaysAllow && !isAlwaysAsk && this.mode !== 'plan')
             return true;
-        // alwaysAsk：无论模式如何，都强制询问
-        if (this.rules.alwaysAsk.includes(req.toolName)) {
+        // alwaysAsk：无论模式如何，都强制询问（plan 模式下直接拒绝，不询问）
+        if (isAlwaysAsk && this.mode !== 'plan')
             return this.onAsk(req);
-        }
         switch (this.mode) {
-            case 'auto':
+            case 'craft':
                 return true;
             case 'plan':
+                // plan 模式：所有写操作一律拒绝，alwaysAllow/alwaysAsk 均无效
                 return false;
             case 'ask': {
-                // 会话内已批准
+                // 会话内已批准：先查内容级 key，再查工具级 key（向后兼容）
+                const contentKey = req.ruleContent ? `${req.toolName}::${req.ruleContent}` : null;
+                if (contentKey && this.sessionApproved.has(contentKey))
+                    return true;
                 if (this.sessionApproved.has(req.toolName))
                     return true;
                 return this.onAsk(req);
             }
         }
     }
-    // 会话内临时批准
-    approveSession(toolName) {
-        this.sessionApproved.add(toolName);
+    /**
+     * 获取连续拒绝次数，供 QueryEngine 在拒绝提示中附加警告。
+     */
+    getDenialState() {
+        return { ...this.denial };
+    }
+    /**
+     * 是否已触发拒绝阈值（连续或总量超限）。
+     * QueryEngine 可据此在 denyReason 中附加更强的提示。
+     */
+    isDenialThresholdReached() {
+        return (this.denial.consecutive >= DENIAL_LIMITS.maxConsecutive ||
+            this.denial.total >= DENIAL_LIMITS.maxTotal);
+    }
+    // 会话内临时批准（工具级或内容级）
+    // key 格式：
+    //   "bash"           → 批准该会话内所有 bash 调用（工具级）
+    //   "bash::git add"  → 只批准该会话内 bash 的 git add 命令（内容级）
+    approveSession(toolName, ruleContent) {
+        const key = ruleContent ? `${toolName}::${ruleContent}` : toolName;
+        this.sessionApproved.add(key);
     }
     // 永久批准（持久化到磁盘）
-    approvePermanent(toolName) {
-        if (!this.rules.alwaysAllow.includes(toolName)) {
-            this.rules.alwaysAllow.push(toolName);
+    approvePermanent(rule) {
+        if (!this.rules.alwaysAllow.includes(rule)) {
+            this.rules.alwaysAllow.push(rule);
             saveRules(this.rules);
         }
     }
     // 永久拒绝
-    denyPermanent(toolName) {
-        if (!this.rules.alwaysDeny.includes(toolName)) {
-            this.rules.alwaysDeny.push(toolName);
+    denyPermanent(rule) {
+        if (!this.rules.alwaysDeny.includes(rule)) {
+            this.rules.alwaysDeny.push(rule);
             saveRules(this.rules);
         }
     }
     // 永久强制询问（即使在 auto 模式下）
-    askPermanent(toolName) {
-        if (!this.rules.alwaysAsk.includes(toolName)) {
-            this.rules.alwaysAsk.push(toolName);
+    askPermanent(rule) {
+        if (!this.rules.alwaysAsk.includes(rule)) {
+            this.rules.alwaysAsk.push(rule);
             saveRules(this.rules);
         }
     }
@@ -144,11 +248,12 @@ export class PermissionManager {
         this.rules.deniedPaths = this.rules.deniedPaths.filter(r => r !== p);
         saveRules(this.rules);
     }
-    // 移除某工具的所有持久化规则
+    // 移除某工具的所有持久化规则（兼容旧接口，按工具名前缀清除）
     clearRules(toolName) {
-        this.rules.alwaysAllow = this.rules.alwaysAllow.filter(t => t !== toolName);
-        this.rules.alwaysDeny = this.rules.alwaysDeny.filter(t => t !== toolName);
-        this.rules.alwaysAsk = this.rules.alwaysAsk.filter(t => t !== toolName);
+        const matches = (rule) => parseRule(rule).toolName === toolName;
+        this.rules.alwaysAllow = this.rules.alwaysAllow.filter(r => !matches(r));
+        this.rules.alwaysDeny = this.rules.alwaysDeny.filter(r => !matches(r));
+        this.rules.alwaysAsk = this.rules.alwaysAsk.filter(r => !matches(r));
         saveRules(this.rules);
     }
     getRules() {

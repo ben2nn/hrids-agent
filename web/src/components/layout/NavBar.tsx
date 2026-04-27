@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { useSessionStore } from '../../store/sessionStore.js'
 import { useThemeStore } from '../../store/themeStore.js'
+import { ConfirmModal } from '../modals/ConfirmModal.js'
 import type { SessionInfo } from '../../lib/types.js'
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────
 
-export type NavView = 'chat' | 'skills' | 'automation'
+export type NavView = 'chat' | 'skills' | 'automation' | 'zhile'
 
 export interface NavBarProps {
   activeView: NavView
@@ -56,11 +57,16 @@ function SessionItem({ session, isActive, onSelect, onDelete }: SessionItemProps
       onMouseLeave={() => setHovered(false)}
       title={session.title || '新会话'}
     >
-      {/* 图标 */}
-      <div className="w-6 h-6 rounded-md bg-[var(--bg-tertiary)] border border-[var(--border)] flex items-center justify-center shrink-0">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[var(--text-muted)]">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-        </svg>
+      {/* 运行状态点 */}
+      <div className="w-4 flex items-center justify-center shrink-0">
+        {session.status === 'busy' ? (
+          <span className="relative flex">
+            <span className="absolute w-2 h-2 rounded-full bg-emerald-400 animate-ping opacity-60" />
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+          </span>
+        ) : (
+          <span className={`w-1.5 h-1.5 rounded-full ${session.status === 'stopped' ? 'bg-[var(--text-muted)] opacity-40' : 'bg-[var(--text-muted)] opacity-25'}`} />
+        )}
       </div>
 
       {/* 内容区 */}
@@ -73,7 +79,12 @@ function SessionItem({ session, isActive, onSelect, onDelete }: SessionItemProps
             {timeLabel}
           </span>
         </div>
-        {/* 悬停时不显示任何副标题 */}
+        {/* 最近一次提问预览 */}
+        {session.lastUserMessage && (
+          <div className="text-[10px] text-[var(--text-muted)] truncate mt-0.5 leading-tight">
+            {session.lastUserMessage}
+          </div>
+        )}
       </div>
 
       {/* 悬停时显示删除按钮 */}
@@ -128,12 +139,6 @@ function NavMenuItem({ icon, label, isActive, onClick, badge }: NavMenuItemProps
 
 // ─── SVG 图标 ──────────────────────────────────────────────────────────────
 
-const ChatIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-  </svg>
-)
-
 const SkillsIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
@@ -146,6 +151,8 @@ const AutomationIcon = () => (
     <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14" />
   </svg>
 )
+
+
 
 // ─── 主题切换按钮 ──────────────────────────────────────────────────────────
 
@@ -192,6 +199,8 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
   const setActive = useSessionStore((state) => state.setActive)
   const wsClients = useSessionStore((state) => state.wsClients)
   const [searchQuery, setSearchQuery] = useState('')
+  // 待删除的会话（null 表示未触发确认弹窗）
+  const [pendingDeleteSession, setPendingDeleteSession] = useState<SessionInfo | null>(null)
 
   // 根据活跃会话的 WS 状态判断连接情况
   const wsStatus: 'connected' | 'reconnecting' | 'disconnected' = (() => {
@@ -201,7 +210,11 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
     return client.getStatus()
   })()
 
-  const sortedSessions = [...sessions].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+  const zhileSessionId = useSessionStore((state) => state.zhileSessionId)
+
+  const sortedSessions = [...sessions]
+    .filter((s) => s.id !== zhileSessionId)
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
 
   const filteredSessions = searchQuery.trim()
     ? sortedSessions.filter((s) =>
@@ -241,22 +254,9 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
         <div className="flex flex-col gap-1 items-center">
           <button
             type="button"
-            onClick={() => { onViewChange('chat'); onCollapsedChange?.(false) }}
-            title="对话"
-            aria-label="对话"
-            className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-150 border-0 cursor-pointer ${
-              activeView === 'chat'
-                ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]'
-            }`}
-          >
-            <ChatIcon />
-          </button>
-          <button
-            type="button"
             onClick={() => { onViewChange('skills'); onCollapsedChange?.(false) }}
-            title="Skills"
-            aria-label="Skills"
+            title="技能"
+            aria-label="技能"
             className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-150 border-0 cursor-pointer ${
               activeView === 'skills'
                 ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
@@ -277,6 +277,19 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
             }`}
           >
             <AutomationIcon />
+          </button>
+          <button
+            type="button"
+            onClick={() => { onViewChange('zhile'); onCollapsedChange?.(false) }}
+            title="知了"
+            aria-label="知了"
+            className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-150 border-0 cursor-pointer ${
+              activeView === 'zhile'
+                ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]'
+            }`}
+          >
+            <img src="/avatar.png" alt="知了" className="w-5 h-5 rounded object-cover" />
           </button>
         </div>
 
@@ -315,25 +328,7 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
         <span className="text-sm font-semibold text-[var(--text-primary)] truncate tracking-tight">
           知了
         </span>
-        {/* 连接状态 */}
-        {wsStatus === 'connected' && (
-          <span className="relative flex ml-auto shrink-0" title="已连接">
-            <span className="absolute w-2 h-2 rounded-full bg-emerald-400 animate-ping opacity-60" />
-            <span className="w-2 h-2 rounded-full bg-emerald-400" />
-          </span>
-        )}
-        {wsStatus === 'reconnecting' && (
-          <span className="relative flex ml-auto shrink-0" title="重连中...">
-            <span className="absolute w-2 h-2 rounded-full bg-amber-400 animate-ping opacity-75" />
-            <span className="w-2 h-2 rounded-full bg-amber-400" />
-          </span>
-        )}
-        {wsStatus === 'disconnected' && (
-          <span className="flex items-center gap-1.5 ml-auto shrink-0">
-            <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
-            <span className="text-[10px] text-red-400 font-medium">失去连接</span>
-          </span>
-        )}
+
       </div>
 
       {/* ── 搜索框 ── */}
@@ -376,14 +371,14 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
       {/* ── 导航菜单 ── */}
       <div className="flex flex-col gap-0.5 px-0 shrink-0">
         <NavMenuItem
-          icon={<ChatIcon />}
-          label="对话"
-          isActive={activeView === 'chat'}
-          onClick={() => onViewChange('chat')}
+          icon={<img src="/avatar.png" alt="知了" className="w-4 h-4 rounded object-cover" />}
+          label="知了"
+          isActive={activeView === 'zhile'}
+          onClick={() => onViewChange('zhile')}
         />
         <NavMenuItem
           icon={<SkillsIcon />}
-          label="Skills"
+          label="技能"
           isActive={activeView === 'skills'}
           onClick={() => onViewChange('skills')}
         />
@@ -422,9 +417,7 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
                 setActive(session.id)
                 onViewChange('chat')
               }}
-              onDelete={() => {
-                void useSessionStore.getState().deleteSession(session.id)
-              }}
+              onDelete={() => setPendingDeleteSession(session)}
             />
           ))
         )}
@@ -441,6 +434,22 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
           <ThemeToggle />
         </div>
       </div>
+
+      {/* ── 删除确认弹窗 ── */}
+      {pendingDeleteSession && (
+        <ConfirmModal
+          title="删除会话"
+          message={`确定要删除「${pendingDeleteSession.title || '新会话'}」吗？此操作将同时删除该会话的所有工作区文件，且无法恢复。`}
+          confirmText="删除"
+          cancelText="取消"
+          danger
+          onConfirm={() => {
+            void useSessionStore.getState().deleteSession(pendingDeleteSession.id)
+            setPendingDeleteSession(null)
+          }}
+          onCancel={() => setPendingDeleteSession(null)}
+        />
+      )}
     </div>
   )
 }

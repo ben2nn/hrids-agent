@@ -109,13 +109,17 @@ export class FallbackProvider {
             for (let attempt = 1; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
                 log.info(`${platformInfo}尝试模型: ${provider.name}/${provider.model}` +
                     (attempt > 1 ? `（第 ${attempt}/${MAX_RETRIES_PER_MODEL} 次重试）` : ''));
+                log.debug('LLM 请求参数', { model: provider.model, messagesCount: messages.length, toolsCount: tools.length, maxTokens });
                 try {
                     const gen = provider.stream(messages, tools, systemPrompt, maxTokens);
                     const buffer = [];
+                    let hasContent = false;
                     for await (const chunk of gen) {
                         buffer.push(chunk);
                         // 已有实质性输出，直接透传剩余流（此时不再 fallback）
                         if (chunk.type === 'text_delta' || chunk.type === 'tool_call') {
+                            hasContent = true;
+                            log.debug('LLM 开始输出，锁定当前模型', { model: provider.model, chunkType: chunk.type });
                             saveState(this.currentGroupIdx, this.currentModelIdx);
                             yield chunk;
                             for await (const rest of gen) {
@@ -124,10 +128,20 @@ export class FallbackProvider {
                             return;
                         }
                         if (chunk.type === 'done') {
+                            if (!hasContent) {
+                                // 空响应（无 text_delta 也无 tool_call）：视为失败，触发 fallback
+                                log.warn(`模型 ${provider.model} 返回空响应，触发 fallback`, { attempt });
+                                lastErr = new Error('模型返回空响应（无文本也无工具调用）');
+                                break;
+                            }
                             saveState(this.currentGroupIdx, this.currentModelIdx);
                             yield chunk;
                             return;
                         }
+                    }
+                    if (!hasContent) {
+                        // 流结束但没有任何实质内容，继续重试
+                        continue;
                     }
                     // 流正常结束
                     saveState(this.currentGroupIdx, this.currentModelIdx);

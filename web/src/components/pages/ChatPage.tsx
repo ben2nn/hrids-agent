@@ -1,10 +1,11 @@
-import React, { useRef, useState, useCallback } from 'react'
+import React, { useRef, useState, useCallback, useEffect } from 'react'
 import { useSessionStore } from '../../store/sessionStore.js'
 import { useMessageStore } from '../../store/messageStore.js'
 import { RightPanel } from '../layout/RightPanel.js'
 import { MessageList } from '../chat/MessageList.js'
 import { InputBar } from '../chat/InputBar.js'
 import { PermissionModal } from '../modals/PermissionModal.js'
+import { AskUserModal } from '../modals/AskUserModal.js'
 import { Toast } from '../ui/Toast.js'
 import type { InputBarHandle } from '../chat/InputBar.js'
 
@@ -231,15 +232,34 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
   const manualReconnect = useSessionStore((s) => s.manualReconnect)
   const clearWsMaxRetries = useSessionStore((s) => s.clearWsMaxRetries)
   const sendPermissionReply = useSessionStore((s) => s.sendPermissionReply)
+  const sendUserReply = useSessionStore((s) => s.sendUserReply)
   const createSession = useSessionStore((s) => s.createSession)
   const sendMessage = useSessionStore((s) => s.sendMessage)
 
   const pendingPermission = useMessageStore((s) => s.pendingPermission)
+  const pendingAskUser = useMessageStore((s) => s.pendingAskUser)
   const clearPermission = useMessageStore((s) => s.clearPermission)
+  const clearAskUser = useMessageStore((s) => s.clearAskUser)
   const appendUserMessage = useMessageStore((s) => s.appendUserMessage)
 
   // ── 首页创建中状态 ─────────────────────────────────────────────────────
   const [isCreating, setIsCreating] = useState(false)
+
+  // ── 保活会话列表：最近访问的 MAX_KEPT 个会话保持挂载，用 display:none 隐藏 ──
+  const MAX_KEPT = 5
+  const [keptSessionIds, setKeptSessionIds] = useState<string[]>(() =>
+    activeSessionId ? [activeSessionId] : []
+  )
+  useEffect(() => {
+    if (!activeSessionId) return
+    setKeptSessionIds(prev => {
+      // 已在列表中：提到最前（最近访问）
+      const without = prev.filter(id => id !== activeSessionId)
+      const next = [activeSessionId, ...without]
+      // 超出上限时丢弃最旧的
+      return next.length > MAX_KEPT ? next.slice(0, MAX_KEPT) : next
+    })
+  }, [activeSessionId])
 
   // ── 当前活跃会话信息 ───────────────────────────────────────────────────
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null
@@ -250,6 +270,11 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
     ? pendingPermission.get(activeSessionId) ?? null
     : null
 
+  // ── ask_user 提问 ──────────────────────────────────────────────────────
+  const currentAskUser = activeSessionId
+    ? pendingAskUser.get(activeSessionId) ?? null
+    : null
+
   // ── InputBar ref（供 RightPanel 的 FileTreeNode 插入文本） ─────────────
   const inputBarRef = useRef<InputBarHandle>(null)
 
@@ -257,10 +282,18 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
   const [rightPanelVisible, setRightPanelVisible] = useState(true)
 
   // ── 权限回复处理 ───────────────────────────────────────────────────────
-  function handlePermissionReply(granted: boolean) {
+  function handlePermissionReply(granted: boolean, options?: { permanent?: boolean; session?: boolean; ruleContent?: string }) {
     if (!activeSessionId || !currentPermission) return
-    sendPermissionReply(activeSessionId, currentPermission.key, granted)
+    sendPermissionReply(activeSessionId, currentPermission.key, granted, options)
     clearPermission(activeSessionId)
+  }
+
+  // ── ask_user 回复处理 ──────────────────────────────────────────────────
+  function handleAskUserReply(answer: string) {
+    if (!activeSessionId || !currentAskUser) return
+    appendUserMessage(activeSessionId, answer)
+    sendUserReply(activeSessionId, answer)
+    clearAskUser(activeSessionId)
   }
 
   // ── WS 超限 toast 显示 ─────────────────────────────────────────────────
@@ -353,9 +386,17 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
               </button>
             </div>
 
-            {/* 消息列表（flex-1，可滚动） */}
-            <div className="flex-1 min-h-0 overflow-hidden">
-              <MessageList sessionId={activeSessionId} />
+            {/* 消息列表（flex-1，可滚动）—— 保活最近 MAX_KEPT 个会话 */}
+            <div className="flex-1 min-h-0 overflow-hidden relative">
+              {keptSessionIds.map(sid => (
+                <div
+                  key={sid}
+                  className="absolute inset-0"
+                  style={{ display: sid === activeSessionId ? 'block' : 'none' }}
+                >
+                  <MessageList sessionId={sid} />
+                </div>
+              ))}
             </div>
 
             {/* 输入栏 */}
@@ -385,6 +426,15 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
           sessionId={activeSessionId}
           permission={currentPermission}
           onReply={handlePermissionReply}
+        />
+      )}
+
+      {/* Agent 提问弹窗 */}
+      {currentAskUser && activeSessionId && (
+        <AskUserModal
+          sessionId={activeSessionId}
+          askUserState={currentAskUser}
+          onReply={handleAskUserReply}
         />
       )}
 

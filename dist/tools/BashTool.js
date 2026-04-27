@@ -2,26 +2,55 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { homedir } from 'os';
+import { AsyncLocalStorage } from 'async_hooks';
 import { z } from 'zod';
 import { auditLog } from '../core/audit.js';
 import { logger } from '../core/logger.js';
 const log = logger.child({ component: 'bash-tool' });
-// 持久化工作目录，在当前 session 进程内跨命令调用保持 cd 状态
-// 默认使用 ~/.hrids-agent/work/，由 setGlobalCwd 覆盖
+// ── 会话级 cwd 隔离（AsyncLocalStorage） ─────────────────────────────────
+// 每个 runMessage 调用链在自己的 AsyncLocalStorage 上下文中运行，
+// cwd 变更只影响当前会话，多会话并发不会互相污染。
 function initDefaultCwd() {
     const dir = path.join(homedir(), '.hrids-agent', 'work');
     if (!fs.existsSync(dir))
         fs.mkdirSync(dir, { recursive: true });
     return dir;
 }
-let persistentCwd = initDefaultCwd();
-// 供 main.ts server 模式在处理 set_cwd 指令时同步更新
-export function setGlobalCwd(dir) {
-    persistentCwd = dir;
+const DEFAULT_CWD = initDefaultCwd();
+// 每个异步上下文存储 { cwd: string }
+const cwdStorage = new AsyncLocalStorage();
+/**
+ * 在指定 cwd 上下文中运行 fn。
+ * SessionManager.runMessage 在调用前用此函数包裹，确保整个调用链使用会话自己的 cwd。
+ */
+export function runWithCwd(cwd, fn) {
+    return cwdStorage.run({ cwd }, fn);
 }
+/**
+ * 获取当前异步上下文的 cwd。
+ * 若不在任何上下文中（CLI 单会话模式），返回全局 fallback。
+ */
 export function getGlobalCwd() {
-    return persistentCwd;
+    return cwdStorage.getStore()?.cwd ?? _fallbackCwd;
 }
+/**
+ * 更新当前异步上下文的 cwd（等价于原来的 setGlobalCwd）。
+ * 只影响当前会话的调用链，不影响其他会话。
+ */
+export function setGlobalCwd(dir) {
+    const store = cwdStorage.getStore();
+    if (store) {
+        store.cwd = dir;
+    }
+    else {
+        // 不在任何上下文中（CLI 模式）：回退到修改 DEFAULT_CWD 的行为
+        // 用一个模块级变量兜底，保持 CLI 模式兼容
+        _fallbackCwd = dir;
+    }
+}
+// CLI 模式（无 AsyncLocalStorage 上下文）的 fallback
+let _fallbackCwd = DEFAULT_CWD;
+import { isDangerousRemovalPath } from '../core/pathSafety.js';
 const inputSchema = z.object({
     command: z.string().describe('要执行的 shell 命令（bash/sh 语法）'),
     timeout: z.number().optional().describe('超时时间（毫秒），默认 60000。长时间任务（如爬虫、编译）可设置更大的值，例如 1800000（30分钟）'),
@@ -41,30 +70,43 @@ const BLOCKED_PATTERNS = [
     /curl.*\|\s*(ba)?sh/, // 管道执行远程脚本
     /wget.*\|\s*(ba)?sh/, // 管道执行远程脚本
 ];
+// 提取 rm/rmdir 命令的目标路径，用于危险路径检测
+function extractRemovalTarget(command) {
+    const match = command.match(/\brm\s+(?:-[a-zA-Z]*\s+)*(.+)$/);
+    if (match)
+        return match[1].trim().split(/\s+/)[0];
+    return null;
+}
 export const BashTool = {
     name: 'bash',
-    description: '在 Linux/macOS 的 bash/sh 环境中执行命令，返回 stdout 和 stderr。仅适用于 Unix 系统。',
+    description: '执行 shell 命令（当前平台：Linux/macOS bash/sh），返回 stdout 和 stderr。',
     inputSchema,
     readonly: false,
     describe(input) {
         return `执行命令: ${input.command}`;
     },
+    getRuleContent(input) {
+        return input.command;
+    },
     async checkPermission(input) {
+        // 危险命令黑名单
         for (const pattern of BLOCKED_PATTERNS) {
             if (pattern.test(input.command)) {
                 return { granted: false, reason: `命令包含危险模式: ${pattern}` };
             }
         }
+        // 危险删除路径检测
+        const removalTarget = extractRemovalTarget(input.command);
+        if (removalTarget && isDangerousRemovalPath(removalTarget)) {
+            return { granted: false, reason: `危险的删除目标路径: ${removalTarget}` };
+        }
         return { granted: true };
     },
     async execute(input, ctx) {
-        const permCheck = await BashTool.checkPermission(input);
-        if (!permCheck.granted) {
-            return { type: 'error', message: permCheck.reason };
-        }
         // 记录 bash 执行审计日志
         auditLog({ action: 'bash_execute', resource: input.command.slice(0, 200), result: 'allowed' });
-        log.info('执行命令', { command: input.command.slice(0, 200), cwd: persistentCwd });
+        const cwd = getGlobalCwd();
+        log.info('执行命令', { command: input.command.slice(0, 200), cwd });
         const logLine = (line, isStderr = false) => {
             // server 模式下 stdout 是 JSON 通信通道，不能直接写明文
             // CLI 模式下由 Ink UI 的 tool_log 事件渲染，不直接写 stdout/stderr
@@ -79,11 +121,11 @@ export const BashTool = {
         const cdMatch = input.command.trim().match(/^cd\s+(.+)$/);
         if (cdMatch) {
             const target = cdMatch[1].trim().replace(/^["']|["']$/g, '').trim();
-            const newDir = path.resolve(persistentCwd, target);
+            const newDir = path.resolve(cwd, target);
             if (fs.existsSync(newDir) && fs.statSync(newDir).isDirectory()) {
-                persistentCwd = newDir;
-                logLine(`[bash] 切换目录: ${persistentCwd}`);
-                return { type: 'success', output: persistentCwd };
+                setGlobalCwd(newDir);
+                logLine(`[bash] 切换目录: ${newDir}`);
+                return { type: 'success', output: newDir };
             }
             else {
                 return { type: 'error', message: `目录不存在: ${newDir}` };
@@ -92,10 +134,10 @@ export const BashTool = {
         const timeout = input.timeout ?? 60000;
         const startTime = Date.now();
         logLine(`[bash] 开始执行: ${input.command}`);
-        logLine(`[bash] 工作目录: ${persistentCwd}`);
+        logLine(`[bash] 工作目录: ${cwd}`);
         return new Promise((resolve) => {
             const child = spawn('/bin/sh', ['-c', input.command], {
-                cwd: persistentCwd,
+                cwd,
                 env: {
                     ...process.env,
                     PYTHONIOENCODING: 'utf-8',

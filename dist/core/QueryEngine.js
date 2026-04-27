@@ -3,6 +3,7 @@ import { logger } from './logger.js';
 import { auditLog } from './audit.js';
 const log = logger.child({ component: 'query-engine' });
 // 估算历史消息的大致 token 数（粗略：4字符≈1token）
+// 图片内容块不计入 token 估算，避免 base64 数据虚高触发误压缩
 function estimateTokens(messages) {
     let chars = 0;
     for (const m of messages) {
@@ -15,6 +16,8 @@ function estimateTokens(messages) {
                     chars += b.text.length;
                 else if (b.type === 'tool_result')
                     chars += b.content.length;
+                else if (b.type === 'image')
+                    chars += 100; // 图片固定计 100 字符，不算 base64
                 else
                     chars += JSON.stringify(b).length;
             }
@@ -36,11 +39,21 @@ export class QueryEngine {
     costs;
     // 上次压缩生成的摘要，用于迭代更新（避免多次压缩后信息层层丢失）
     previousSummary = null;
+    // 压缩前归档回调（由外部注册，用于持久化原始历史）
+    onBeforeCompact = null;
+    // 当前请求的 requestId，用于关联消息分组
+    currentRequestId = null;
     constructor(config) {
         this.config = config;
         this.history = config.initialMessages ? [...config.initialMessages] : [];
         this.abortController = new AbortController();
         this.costs = new CostTracker(config.provider.model);
+    }
+    /**
+     * 设置当前请求的 requestId，用于关联消息分组
+     */
+    setRequestId(requestId) {
+        this.currentRequestId = requestId;
     }
     // ── 优先级 2：压缩前先 prune 旧工具输出（不调用 LLM，免费降 token）──────────
     // 保护最近 protectTailCount 条消息，对更早的 tool_result 做截断
@@ -285,14 +298,33 @@ ${contentToSummarize}
     async *send(userMessage) {
         // 并发保护：如果已有任务在运行，拒绝新任务
         if (this.running) {
+            log.warn('并发保护触发：上一个任务仍在执行中', { historyLength: this.history.length });
             yield { type: 'error', message: '上一个任务仍在执行中，请等待完成后再发送新消息' };
             return;
         }
         this.running = true;
         this.abortController = new AbortController();
+        // 规范化用户消息为 Message 对象，并添加 requestId
+        const userMsg = typeof userMessage === 'string'
+            ? { role: 'user', content: userMessage, requestId: this.currentRequestId ?? undefined }
+            : { ...userMessage, requestId: this.currentRequestId ?? userMessage.requestId };
+        // 如果 content 是数组，为每个块添加 requestId
+        if (Array.isArray(userMsg.content) && this.currentRequestId) {
+            userMsg.content = userMsg.content.map(block => ({
+                ...block,
+                requestId: this.currentRequestId,
+            }));
+        }
         // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行
-        const isQueryMode = this.isQueryIntent(userMessage);
-        this.history.push({ role: 'user', content: userMessage });
+        const msgText = typeof userMsg.content === 'string'
+            ? userMsg.content
+            : userMsg.content
+                .filter((b) => b.type === 'text')
+                .map(b => b.text)
+                .join('');
+        const isQueryMode = this.isQueryIntent(msgText);
+        log.debug('send 开始', { historyLength: this.history.length, isQueryMode, estimatedTokens: this.getEstimatedTokens() });
+        this.history.push(userMsg);
         const maxTurns = this.config.maxTurns ?? 50;
         const maxBudgetUsd = this.config.maxBudgetUsd;
         // 自动压缩阈值：默认 20000 tokens（约 80KB 文本）
@@ -304,15 +336,27 @@ ${contentToSummarize}
                 if (this.abortController.signal.aborted)
                     break;
                 turns++;
+                log.debug(`第 ${turns}/${maxTurns} 轮开始`, { historyLength: this.history.length, estimatedTokens: estimateTokens(this.history) });
                 // 成本预算检查（每轮开始前）
                 if (maxBudgetUsd !== undefined && this.costs.getCostUsd() >= maxBudgetUsd) {
                     yield { type: 'budget_exceeded', costUsd: this.costs.getCostUsd(), limitUsd: maxBudgetUsd };
                     break;
                 }
                 // 自动压缩：历史过长时在发送前压缩
-                if (estimateTokens(this.history) > autoCompactThreshold) {
+                // 注意：跳过包含图片内容块的轮次，避免压缩时丢失图片数据
+                const latestMsg = this.history[this.history.length - 1];
+                const latestHasImage = Array.isArray(latestMsg?.content) &&
+                    latestMsg.content.some(b => b.type === 'image');
+                if (!latestHasImage && estimateTokens(this.history) > autoCompactThreshold) {
                     yield { type: 'compact_start' };
                     const summary = await this.generateCompactSummary();
+                    // 压缩前先归档（如果注册了归档回调）
+                    if (this.onBeforeCompact) {
+                        try {
+                            await this.onBeforeCompact(summary);
+                        }
+                        catch { /* 归档失败不阻断压缩 */ }
+                    }
                     this.compactHistory(summary);
                     // 压缩后修复孤立的工具调用对，防止 API 报错
                     this.sanitizeToolPairs();
@@ -321,7 +365,17 @@ ${contentToSummarize}
                 let fullText = '';
                 const toolCalls = [];
                 try {
-                    const streamFn = () => this.config.provider.stream(this.history, this.config.tools, this.config.systemPrompt, this.config.maxTokens ?? 8096);
+                    // plan 模式下对写工具 description 追加不可用标注，
+                    // 让 LLM 在工具选择阶段就知道这些工具当前不可用，避免盲目调用。
+                    const isPlanMode = this.config.permissions.getMode() === 'plan';
+                    const toolsForLLM = isPlanMode
+                        ? this.config.tools.map(t => t.readonly ? t : {
+                            ...t,
+                            description: t.description + '\n[Plan 模式：此工具当前不可用，调用将被拒绝]',
+                        })
+                        : this.config.tools;
+                    const streamFn = () => this.config.provider.stream(this.history, toolsForLLM, this.config.systemPrompt, this.config.maxTokens ?? 8096);
+                    log.debug('调用 LLM stream', { model: this.config.provider.model, turn: turns });
                     for await (const chunk of streamFn()) {
                         if (this.abortController.signal.aborted)
                             break;
@@ -354,6 +408,7 @@ ${contentToSummarize}
                 }
                 catch (err) {
                     const errMsg = String(err);
+                    log.error('LLM 请求失败', { turn: turns, error: errMsg });
                     yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` };
                     yield { type: 'error', message: errMsg };
                     // 将中断原因写入 history，方便恢复时 LLM 知道上次发生了什么
@@ -363,15 +418,16 @@ ${contentToSummarize}
                 // 将 assistant 回复加入历史
                 const assistantBlocks = [];
                 if (fullText)
-                    assistantBlocks.push({ type: 'text', text: fullText });
+                    assistantBlocks.push({ type: 'text', text: fullText, requestId: this.currentRequestId ?? undefined });
                 for (const tc of toolCalls) {
-                    assistantBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input });
+                    assistantBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input, requestId: this.currentRequestId ?? undefined });
                 }
                 if (assistantBlocks.length > 0) {
-                    this.history.push({ role: 'assistant', content: assistantBlocks });
+                    this.history.push({ role: 'assistant', content: assistantBlocks, requestId: this.currentRequestId ?? undefined });
                 }
                 // 没有工具调用，检查是否是中途停止（任务未完成）
                 if (toolCalls.length === 0) {
+                    log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length, isQueryMode });
                     // 查询/回忆类意图：直接结束，不触发 continuation 检测
                     if (isQueryMode) {
                         break;
@@ -402,8 +458,8 @@ ${contentToSummarize}
                     const shouldContinue = CONTINUATION_PATTERNS.some(p => p.test(fullText));
                     if (shouldContinue && turns < maxTurns) {
                         const mode = this.config.permissions.getMode();
-                        if (mode === 'auto') {
-                            // 自动模式：系统静默注入继续指令，不显示为用户消息
+                        if (mode === 'craft') {
+                            // craft 模式：系统静默注入继续指令，不显示为用户消息
                             // 使用 [系统内部] 前缀标记，UI 层可识别并以 system 角色显示
                             this.history.push({ role: 'user', content: '[系统内部] 请继续执行，不要停下。直接调用工具完成任务，不要再解释计划。' });
                             // 不 break，继续下一轮
@@ -420,6 +476,7 @@ ${contentToSummarize}
                 }
                 // 执行工具调用（串行，保证历史顺序正确）
                 const toolResults = [];
+                log.debug('本轮工具调用', { turn: turns, tools: toolCalls.map(tc => tc.name) });
                 for (const tc of toolCalls) {
                     // 实时日志队列：工具执行期间持续 yield 日志
                     const logQueue = [];
@@ -429,27 +486,83 @@ ${contentToSummarize}
                     if (!tool) {
                         yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description: tc.name };
                         yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: `未找到工具: ${tc.name}` } };
-                        toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: `错误: 未找到工具: ${tc.name}`, is_error: true });
+                        toolResults.push({
+                            type: 'tool_result',
+                            tool_use_id: tc.id,
+                            content: `错误: 未找到工具: ${tc.name}`,
+                            is_error: true,
+                            ...(this.currentRequestId ? { requestId: this.currentRequestId } : {}),
+                        });
                         continue;
                     }
                     const description = tool.describe?.(tc.input) ?? tc.name;
                     yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description };
+                    log.debug('工具开始执行', { toolName: tc.name, toolId: tc.id, description });
+                    // ── 第一道：工具级硬拦截（checkPermission）────────────────────────
+                    // 在询问用户之前先做硬检查，避免用户被询问"是否允许 rm -rf /"这类
+                    // 无论如何都会被拦截的危险操作。
+                    if (tool.checkPermission) {
+                        const hardCheck = await tool.checkPermission(tc.input);
+                        if (!hardCheck.granted) {
+                            log.info('工具硬拦截', { toolName: tc.name, reason: hardCheck.reason });
+                            auditLog({
+                                action: 'permission_denied',
+                                resource: tc.name,
+                                result: 'denied',
+                                permissionMode: this.config.permissions.getMode(),
+                                details: { reason: hardCheck.reason, stage: 'hard_check' },
+                            });
+                            yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: hardCheck.reason } };
+                            toolResults.push({
+                                type: 'tool_result',
+                                tool_use_id: tc.id,
+                                content: `错误: ${hardCheck.reason}`,
+                                is_error: true,
+                                ...(this.currentRequestId ? { requestId: this.currentRequestId } : {}),
+                            });
+                            continue;
+                        }
+                    }
+                    // ── 第二道：PermissionManager 策略决策 ───────────────────────────
                     const filePath = tool.getFilePath?.(tc.input);
+                    const ruleContent = tool.getRuleContent?.(tc.input);
                     const allowed = await this.config.permissions.check({
                         toolName: tc.name,
                         description,
                         isReadonly: tool.readonly,
+                        isDestructive: tool.isDestructive,
                         filePath,
+                        ruleContent,
                     });
                     if (!allowed) {
                         log.info('权限拒绝', { toolName: tc.name, description });
-                        auditLog({ action: 'permission_denied', resource: tc.name, result: 'denied', details: { description } });
+                        auditLog({
+                            action: 'permission_denied',
+                            resource: tc.name,
+                            result: 'denied',
+                            permissionMode: this.config.permissions.getMode(),
+                            details: { description },
+                        });
                         yield { type: 'permission_denied', id: tc.id, toolName: tc.name, description };
-                        // plan 模式下给 LLM 明确的反馈，避免反复尝试写操作
-                        const denyReason = this.config.permissions.getMode() === 'plan'
-                            ? '[Plan 模式] 此操作在规划模式下被禁止。请继续完成规划，不要尝试执行写操作。'
-                            : '用户拒绝了此操作';
-                        toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: denyReason, is_error: true });
+                        // 构建拒绝原因，根据模式和拒绝追踪状态给出不同提示
+                        let denyReason;
+                        if (this.config.permissions.getMode() === 'plan') {
+                            denyReason = '[Plan 模式] 此操作在规划模式下被禁止。请继续完成规划，不要尝试执行写操作。';
+                        }
+                        else if (this.config.permissions.isDenialThresholdReached()) {
+                            const { consecutive, total } = this.config.permissions.getDenialState();
+                            denyReason = `用户拒绝了此操作（已连续拒绝 ${consecutive} 次，会话内共拒绝 ${total} 次）。请停止尝试此类操作，直接询问用户希望如何处理。`;
+                        }
+                        else {
+                            denyReason = '用户拒绝了此操作';
+                        }
+                        toolResults.push({
+                            type: 'tool_result',
+                            tool_use_id: tc.id,
+                            content: denyReason,
+                            is_error: true,
+                            ...(this.currentRequestId ? { requestId: this.currentRequestId } : {}),
+                        });
                         continue;
                     }
                     // 写操作记录审计日志
@@ -502,6 +615,7 @@ ${contentToSummarize}
                         return;
                     }
                     yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult };
+                    log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type });
                     const result = finalResult;
                     const resultContent = result.type === 'success' ? result.output : `错误: ${result.message}`;
                     // 截断过长的工具输出，防止单条结果撑爆 history
@@ -515,6 +629,7 @@ ${contentToSummarize}
                         tool_use_id: tc.id,
                         content: truncatedContent,
                         is_error: result.type === 'error',
+                        ...(this.currentRequestId ? { requestId: this.currentRequestId } : {}),
                     });
                 }
                 this.history.push({ role: 'user', content: toolResults });
@@ -540,6 +655,8 @@ ${contentToSummarize}
     }
     abort() {
         this.abortController.abort();
+        // 强制释放锁，防止 generator 未被消费时 running 永久为 true
+        this.running = false;
     }
     isRunning() {
         return this.running;
@@ -548,6 +665,8 @@ ${contentToSummarize}
     getHistory() { return this.history; }
     setHistory(messages) { this.history = [...messages]; }
     setSystemPrompt(prompt) { this.config.systemPrompt = prompt; }
+    setProvider(provider) { this.config.provider = provider; }
+    getTools() { return this.config.tools; }
     compactHistory(summary) {
         this.history = [
             { role: 'user', content: `[上下文压缩] 早期对话轮次已被压缩以节省上下文空间。以下摘要描述了已完成的工作，当前会话状态可能仍反映该工作（例如文件可能已被修改）。请基于此摘要和当前状态继续，避免重复已完成的工作：\n\n${summary}` },
