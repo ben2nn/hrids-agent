@@ -79,12 +79,13 @@ function SessionItem({ session, isActive, onSelect, onDelete }: SessionItemProps
             {timeLabel}
           </span>
         </div>
-        {/* 最近一次提问预览 */}
-        {session.lastUserMessage && (
+        {/* 最近一次提问预览（与标题不同时才显示） */}
+        {session.lastUserMessage && session.lastUserMessage !== title && (
           <div className="text-[10px] text-[var(--text-muted)] truncate mt-0.5 leading-tight">
             {session.lastUserMessage}
           </div>
         )}
+
       </div>
 
       {/* 悬停时显示删除按钮 */}

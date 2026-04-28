@@ -13,6 +13,8 @@ import { homedir } from 'os'
 import { loadConfig, saveConfig } from '../core/Config.js'
 import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
+import { PlatformManager } from './im/PlatformManager.js'
+import type { IMGatewayConfig, IMPlatform, PlatformConfig } from './im/types.js'
 
 const log = logger.child({ component: 'gateway-server' })
 
@@ -68,6 +70,9 @@ export function createGateway(config: GatewayConfig = {}) {
     maxSessions: config.maxSessions,
     authToken: config.authToken,
   })
+
+  // IM 平台管理器（多 IM 平台接入）
+  const platformManager = new PlatformManager(manager)
 
   const rateLimiter = new RateLimiter(config.rateLimitPerMinute ?? 10)
 
@@ -1243,6 +1248,139 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
+  // ── IM 平台管理 API ──────────────────────────────────────────────────────
+
+  // GET /im/platforms — 读取 IM 平台配置列表
+  app.get('/im/platforms', (_req, res) => {
+    try {
+      const cfg = PlatformManager.loadConfig()
+      // 脱敏：不返回 token/secret 等敏感字段
+      const sanitized = cfg.platforms.map(p => {
+        const rest = { ...(p as unknown as Record<string, unknown>) }
+        if (rest.token) rest.token = '***'
+        if (rest.secret) rest.secret = '***'
+        return rest
+      })
+      res.json({ platforms: sanitized, status: platformManager.getStatus() })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /im/platforms/config — 读取完整配置（含 token，需鉴权）
+  app.get('/im/platforms/config', (_req, res) => {
+    try {
+      const cfg = PlatformManager.loadConfig()
+      res.json(cfg)
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // PUT /im/platforms/config — 保存完整 IM 配置
+  app.put('/im/platforms/config', (req, res) => {
+    try {
+      const body = req.body as IMGatewayConfig
+      if (!body || !Array.isArray(body.platforms)) {
+        res.status(400).json({ error: '请求体格式错误，需要 { platforms: [...] }' })
+        return
+      }
+      PlatformManager.saveConfig(body)
+      log.info('IM 平台配置已保存', { platformCount: body.platforms.length })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // POST /im/platforms/:platform — 添加或更新单个平台配置
+  app.post('/im/platforms/:platform', async (req, res) => {
+    try {
+      const platform = req.params.platform as IMPlatform
+      const platformCfg = req.body as PlatformConfig
+
+      if (!platformCfg || platformCfg.platform !== platform) {
+        res.status(400).json({ error: 'platform 字段与路径不匹配' })
+        return
+      }
+
+      const cfg = PlatformManager.loadConfig()
+      const idx = cfg.platforms.findIndex(p => p.platform === platform)
+      if (idx >= 0) {
+        cfg.platforms[idx] = platformCfg
+      } else {
+        cfg.platforms.push(platformCfg)
+      }
+      PlatformManager.saveConfig(cfg)
+
+      // 如果平台已启用，立即重启适配器
+      if (platformCfg.enabled) {
+        try {
+          await platformManager.startPlatform(platformCfg)
+          log.info('IM 平台适配器已重启', { platform })
+        } catch (err) {
+          log.warn('IM 平台适配器重启失败', { platform, error: String(err) })
+          res.json({ ok: true, warning: `配置已保存，但适配器启动失败: ${String(err)}` })
+          return
+        }
+      } else {
+        // 禁用时停止适配器
+        await platformManager.stopPlatform(platform)
+      }
+
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // DELETE /im/platforms/:platform — 删除平台配置并停止适配器
+  app.delete('/im/platforms/:platform', async (req, res) => {
+    try {
+      const platform = req.params.platform as IMPlatform
+      const cfg = PlatformManager.loadConfig()
+      const filtered = cfg.platforms.filter(p => p.platform !== platform)
+      if (filtered.length === cfg.platforms.length) {
+        res.status(404).json({ error: `平台 "${platform}" 不存在` })
+        return
+      }
+      cfg.platforms = filtered
+      PlatformManager.saveConfig(cfg)
+      await platformManager.stopPlatform(platform)
+      log.info('IM 平台已删除', { platform })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // POST /im/platforms/:platform/restart — 重启单个平台适配器
+  app.post('/im/platforms/:platform/restart', async (req, res) => {
+    try {
+      const platform = req.params.platform as IMPlatform
+      const cfg = PlatformManager.loadConfig()
+      const platformCfg = cfg.platforms.find(p => p.platform === platform)
+      if (!platformCfg) {
+        res.status(404).json({ error: `平台 "${platform}" 未配置` })
+        return
+      }
+      if (!platformCfg.enabled) {
+        res.status(400).json({ error: `平台 "${platform}" 未启用` })
+        return
+      }
+      await platformManager.startPlatform(platformCfg)
+      log.info('IM 平台适配器已重启', { platform })
+      res.json({ ok: true, status: platformManager.getStatus() })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /im/status — 获取所有平台运行状态
+  app.get('/im/status', (_req, res) => {
+    res.json({ status: platformManager.getStatus() })
+  })
+
   // GET /sessions/:id/image?path= — 直接返回图片二进制（用于前端 <img> 标签显示）
   app.get('/sessions/:id/image', (req, res) => {
     const activeSession = manager.getSession(req.params.id)
@@ -1376,6 +1514,10 @@ export function createGateway(config: GatewayConfig = {}) {
       return new Promise(resolve => {
         server.listen(port, host, () => {
           log.info('Gateway 已启动', { host, port })
+          // 启动 IM 平台适配器（异步，不阻塞 HTTP 服务启动）
+          platformManager.start().catch(err => {
+            log.warn('IM 平台管理器启动时出现错误', { error: String(err) })
+          })
           resolve()
         })
       })
@@ -1383,6 +1525,10 @@ export function createGateway(config: GatewayConfig = {}) {
     // 优雅关闭：等待进行中任务完成，再关闭 HTTP/WS 服务
     async stop(gracefulTimeoutMs = 10000): Promise<void> {
       log.info('开始关闭 Gateway')
+
+      // 先停止 IM 平台适配器
+      await platformManager.stop()
+
       await manager.gracefulShutdown(gracefulTimeoutMs)
 
       // 主动关闭所有 WebSocket 连接，否则 server.close() 会因连接保持而一直 pending
@@ -1412,5 +1558,6 @@ export function createGateway(config: GatewayConfig = {}) {
     },
     manager,
     server,
+    platformManager,
   }
 }

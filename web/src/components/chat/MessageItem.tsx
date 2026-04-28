@@ -3,7 +3,6 @@ import { MarkdownRenderer } from '../../lib/markdown.js'
 import { ToolCard } from './ToolCard.js'
 import { useMessageStore } from '../../store/messageStore.js'
 import { getImageUrl } from '../../lib/gateway.js'
-import { useState } from 'react'
 
 // ─── 工具名称简单中文化（用于 fallback pending 状态） ───────────────────────
 
@@ -61,42 +60,12 @@ const CONTENT_COL = ''  // 内容区撑满 ml-10 后的剩余空间
 // ─── MessageItem 组件 ──────────────────────────────────────────────────────
 
 export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompact, showAvatar = false, sessionId }: MessageItemProps) {
-  const [hovered, setHovered] = useState(false)
-  const deleteMessage = useMessageStore((s) => s.deleteMessage)
-
-  function handleDelete() {
-    if (sessionId) deleteMessage(sessionId, message.id)
-  }
-
-  // ── 删除按钮（悬停时显示） ────────────────────────────────────────────
-  function DeleteBtn({ align = 'right' }: { align?: 'left' | 'right' }) {
-    return hovered ? (
-      <button
-        type="button"
-        onClick={handleDelete}
-        title="删除此消息"
-        aria-label="删除此消息"
-        className={`absolute top-2 ${align === 'right' ? 'right-2' : 'left-2'} w-6 h-6 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error-subtle)] transition-all duration-150 opacity-0 group-hover:opacity-100`}
-      >
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="3 6 5 6 21 6" />
-          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-          <path d="M10 11v6" /><path d="M14 11v6" />
-          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-        </svg>
-      </button>
-    ) : null
-  }
-
   // ── user 消息：右对齐，头像+名称在上，内容在下 ────────────────────────
   if (message.type === 'user') {
     return (
       <div
         className="relative group flex flex-col items-end px-4 pt-4 pb-2 animate-fade-in"
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
       >
-        <DeleteBtn align="left" />
         {/* 头像 + 名称（右对齐） */}
         <div className="flex items-center gap-2 mb-2 flex-row-reverse">
           <UserAvatar />
@@ -135,10 +104,7 @@ export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompa
     return (
       <div
         className="relative group flex flex-col px-4 py-2 animate-fade-in"
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
       >
-        <DeleteBtn align="right" />
         {showAvatar && (
           <div className="flex items-center gap-2 mb-2">
             <AgentAvatar />
@@ -184,10 +150,7 @@ export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompa
     return (
       <div
         className="relative group flex flex-col px-4 py-0.5 animate-fade-in"
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
       >
-        <DeleteBtn align="right" />
         {showAvatar && (
           <div className="flex items-center gap-2 mb-2">
             <AgentAvatar />

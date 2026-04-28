@@ -6,6 +6,7 @@ import type { McpServerConfig } from '../tools/McpTool.js'
 
 const CONFIG_DIR = join(homedir(), '.hrids-agent')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
+const MCP_FILE = join(CONFIG_DIR, 'mcp.json')
 
 export interface AgentConfig {
   model: string
@@ -71,16 +72,56 @@ export function loadConfig(): AgentConfig {
     } catch (err) {
       process.stderr.write(`[config] 写入配置文件失败（将使用内存配置）: ${String(err)}\n`)
     }
+    // 合并 mcp.json（若存在）
+    const mcpFileServers = loadMcpFile()
+    if (mcpFileServers.length > 0) {
+      generated.mcpServers = [...generated.mcpServers, ...mcpFileServers]
+    }
     return generated
   }
 
   try {
     const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')) as Partial<AgentConfig>
     // 已有配置文件：用硬编码默认值补全缺失字段，不覆盖用户已设置的值
-    return { ...HARDCODED_DEFAULTS, ...raw }
+    const config = { ...HARDCODED_DEFAULTS, ...raw }
+    // 合并 mcp.json（若存在）：将其中的服务器追加到 config.json 的 mcpServers 中，去重
+    const mcpFileServers = loadMcpFile()
+    if (mcpFileServers.length > 0) {
+      const existingNames = new Set(config.mcpServers.map(s => s.name))
+      const newServers = mcpFileServers.filter(s => !existingNames.has(s.name))
+      config.mcpServers = [...config.mcpServers, ...newServers]
+    }
+    return config
   } catch {
     process.stderr.write(`[config] 配置文件解析失败，使用默认配置\n`)
     return { ...HARDCODED_DEFAULTS }
+  }
+}
+
+/**
+ * 读取 ~/.hrids-agent/mcp.json，支持两种格式：
+ *   1. { "mcpServers": { "name": { command, args, env } } }  （对象格式，兼容 Claude Desktop）
+ *   2. McpServerConfig[]  （数组格式，与 config.json 一致）
+ */
+function loadMcpFile(): McpServerConfig[] {
+  if (!existsSync(MCP_FILE)) return []
+  try {
+    const raw = JSON.parse(readFileSync(MCP_FILE, 'utf-8'))
+    // 格式一：{ mcpServers: { name: { command, args, env } } }
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && raw.mcpServers && !Array.isArray(raw.mcpServers)) {
+      return Object.entries(raw.mcpServers as Record<string, Omit<McpServerConfig, 'name'>>).map(
+        ([name, cfg]) => ({ name, ...cfg })
+      )
+    }
+    // 格式二：McpServerConfig[]
+    if (Array.isArray(raw)) return raw as McpServerConfig[]
+    // 格式三：{ mcpServers: McpServerConfig[] }
+    if (raw?.mcpServers && Array.isArray(raw.mcpServers)) return raw.mcpServers as McpServerConfig[]
+    process.stderr.write(`[config] mcp.json 格式无法识别，已忽略\n`)
+    return []
+  } catch (err) {
+    process.stderr.write(`[config] mcp.json 解析失败: ${String(err)}\n`)
+    return []
   }
 }
 
