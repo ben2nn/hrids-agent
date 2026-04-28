@@ -5,5 +5,3 @@ refercode
 tests
 .kiro
 .vscode
-web/node_modules
-dist/web

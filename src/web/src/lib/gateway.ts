@@ -528,3 +528,49 @@ export async function saveConfigFile(content: string): Promise<void> {
     body: JSON.stringify({ content }),
   })
 }
+
+// ─── IM 平台管理 ────────────────────────────────────────────────────────────
+
+export interface IMPlatformStatus {
+  platform: string
+  running: boolean
+}
+
+export interface IMStatusResponse {
+  status: IMPlatformStatus[]
+}
+
+export interface IMGatewayConfig {
+  platforms: Array<Record<string, unknown>>
+}
+
+/** 获取所有 IM 平台运行状态 */
+export async function getIMStatus(): Promise<IMStatusResponse> {
+  const res = await apiFetch('/im/status')
+  return res.json()
+}
+
+/** 获取完整 IM 平台配置（含 token） */
+export async function getWeixinConfig(): Promise<IMGatewayConfig> {
+  const res = await apiFetch('/im/platforms/config')
+  return res.json()
+}
+
+/** 保存微信平台配置并立即启动/停止适配器 */
+export async function saveWeixinConfig(cfg: {
+  token: string
+  accountId: string
+  allowedUsers?: string[]
+  enabled?: boolean
+}): Promise<void> {
+  await apiFetch('/im/platforms/weixin', {
+    method: 'POST',
+    body: JSON.stringify({
+      platform: 'weixin',
+      enabled: cfg.enabled ?? true,
+      token: cfg.token,
+      accountId: cfg.accountId,
+      allowedUsers: cfg.allowedUsers ?? [],
+    }),
+  })
+}
