@@ -1,5 +1,5 @@
 // 会话管理器 —— 管理 agent 进程的生命周期
-import { createProvider, createProviderFromEnv, createVisionProviderFromEnv } from '../core/providers/index.js'
+import { createProvider, createProviderFromConfig, createVisionProviderFromConfig } from '../core/providers/index.js'
 import { QueryEngine } from '../core/QueryEngine.js'
 import type { Message, ContentBlock, ImageSource } from '../core/QueryEngine.js'
 import { PermissionManager } from '../core/PermissionManager.js'
@@ -85,15 +85,16 @@ export class SessionManager {
 
     // 创建 LLM 提供商
     // 若请求显式指定了 model/provider/apiKey，则用 createProvider 精确创建；
-    // 否则走 .env 的 LLM_FALLBACK_N / DEFAULT_MODEL 多模型 fallback 配置
+    // 否则走 config.json 的 llm.fallbacks / model 多模型 fallback 配置
     const provider = (req.model || req.provider || req.apiKey)
       ? createProvider({
           model,
           apiKey: req.apiKey ?? agentConfig.apiKey,
           baseUrl: req.baseUrl ?? agentConfig.baseUrl,
           provider: req.provider as never ?? agentConfig.provider,
+          customProviders: agentConfig.customProviders,
         })
-      : createProviderFromEnv()
+      : createProviderFromConfig(agentConfig)
 
     // 权限管理：permissionMode 优先；autoMode 兼容旧字段（映射到 craft）；否则读全局配置
     const permMode = req.permissionMode ?? (req.autoMode ? 'craft' : agentConfig.permissionMode)
@@ -522,15 +523,14 @@ export class SessionManager {
     // 如果有视觉内容，尝试切换到视觉模型
     let originalProvider: LLMProvider | null = null
     if (hasEffectiveVision) {
-      const visionProvider = createVisionProviderFromEnv()
+      const visionProvider = createVisionProviderFromConfig(loadConfig())
       if (visionProvider) {
         log.info('检测到图片/PDF，切换到视觉模型', { sessionId, model: visionProvider.model })
-        originalProvider = session.provider  // 保存原始 provider 以便恢复
+        originalProvider = session.provider
         session.engine.setProvider(visionProvider)
-        // 广播模型切换通知
         this.broadcast(session, { type: 'model_switched', requestId, model: visionProvider.model, reason: 'vision_content' })
       } else {
-        log.warn('检测到图片/PDF，但未配置视觉模型（VISION_MODEL 或 VISION_FALLBACK_N），使用当前模型', { sessionId })
+        log.warn('检测到图片/PDF，但未配置视觉模型（config.json 的 vision 字段），使用当前模型', { sessionId })
       }
     }
 

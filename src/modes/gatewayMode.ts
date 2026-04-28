@@ -10,6 +10,7 @@ export interface GatewayModeOpts {
   gatewayPort: string
   gatewayHost: string
   gatewayToken?: string
+  gatewayUsers?: Array<{ username: string; password: string }>
 }
 
 export async function runGatewayMode(opts: GatewayModeOpts): Promise<void> {
@@ -27,6 +28,7 @@ export async function runGatewayMode(opts: GatewayModeOpts): Promise<void> {
     port: parseInt(opts.gatewayPort, 10),
     host: opts.gatewayHost,
     authToken: opts.gatewayToken,
+    users: opts.gatewayUsers,
   })
   await gateway.start()
 

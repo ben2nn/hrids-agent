@@ -1,6 +1,6 @@
 // 向用户提问工具 —— 智能体主动向用户询问信息
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 
 const inputSchema = z.object({
@@ -64,7 +64,7 @@ export function getPendingAskUser(): { question: string; options?: string[] } | 
 
 function makeAnswerResolver(
   options: string[] | undefined,
-  resolve: (result: { type: string; output: string }) => void,
+  resolve: (result: { type: 'success'; output: string }) => void,
 ): (answer: string) => void {
   return (answer: string) => {
     if (options && /^\d+$/.test(answer.trim())) {
@@ -93,7 +93,7 @@ export const AskUserTool: ToolDef<typeof inputSchema> = {
 
     // server 模式：通过 NDJSON 协议发送问题，等待前端回复
     if (process.env.AGENT_SERVER_MODE === '1') {
-      return new Promise(resolve => {
+      return new Promise<ToolResult>(resolve => {
         pendingQuestion = { question: input.question, options: input.options }
         pendingResolve = makeAnswerResolver(input.options, resolve)
         process.stdout.write(JSON.stringify({
@@ -106,14 +106,14 @@ export const AskUserTool: ToolDef<typeof inputSchema> = {
 
     // Gateway 多会话模式：按 sessionId 隔离 pending resolve 和回调
     if (sessionId && gatewayCallbacks.has(sessionId)) {
-      return new Promise(resolve => {
+      return new Promise<ToolResult>(resolve => {
         sessionPendingResolves.set(sessionId, makeAnswerResolver(input.options, resolve))
         gatewayCallbacks.get(sessionId)!(input.question, input.options)
       })
     }
 
     // 交互模式（Ink UI）：通过全局回调等待，由 App.tsx 的 handleSubmit 调用 resolveAskUser
-    return new Promise(resolve => {
+    return new Promise<ToolResult>(resolve => {
       pendingQuestion = { question: input.question, options: input.options }
       pendingResolve = makeAnswerResolver(input.options, resolve)
 

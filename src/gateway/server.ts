@@ -3,6 +3,8 @@ import http from 'http'
 import express from 'express'
 import { WebSocketServer, WebSocket } from 'ws'
 import { execSync } from 'child_process'
+import { randomBytes } from 'crypto'
+import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
 import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
@@ -28,12 +30,15 @@ function atomicWriteJson(filePath: string, data: unknown): void {
 export interface GatewayConfig {
   port?: number
   host?: string
-  authToken?: string       // 若设置，所有请求需携带 Authorization: Bearer <token>
+  authToken?: string       // Token 模式：若设置，所有请求需携带 Authorization: Bearer <token>
   idleTimeoutMs?: number
   maxSessions?: number
-  // 每个 IP 每分钟最多创建的会话数（默认 10）
   rateLimitPerMinute?: number
-  corsOrigin?: string      // CORS 允许的来源（默认 *）
+  corsOrigin?: string
+  // 登录模式：配置用户列表后启用，登录成功颁发 JWT
+  users?: Array<{ username: string; password: string }>
+  // JWT 签名密钥（登录模式自动生成，也可手动指定）
+  jwtSecret?: string
 }
 
 // 简单的内存速率限制（令牌桶，按 IP 计数）
@@ -65,6 +70,40 @@ export function createGateway(config: GatewayConfig = {}) {
   const host = config.host ?? '127.0.0.1'
   const startTime = Date.now()
 
+  // ── 鉴权模式判断 ──────────────────────────────────────────────
+  // 登录模式：配置了 users 列表
+  // Token 模式：配置了 authToken（静态 token）
+  // 无鉴权：两者都未配置
+  const hasUsers = (config.users ?? []).length > 0
+  const hasStaticToken = !!config.authToken
+
+  // 登录模式下的 JWT 密钥（启动时生成随机密钥，或使用配置中的密钥）
+  const jwtSecret = config.jwtSecret
+    ?? (hasUsers ? randomBytes(32).toString('hex') : '')
+
+  /** 验证 Bearer token（自动去除 "Bearer " 前缀） */
+  function verifyToken(authHeader: string): boolean {
+    const bearer = authHeader.replace(/^Bearer\s+/i, '')
+    return verifyRawToken(bearer)
+  }
+
+  /** 验证裸 token（不含 "Bearer " 前缀） */
+  function verifyRawToken(token: string): boolean {
+    if (!token) return false
+    if (hasStaticToken) {
+      return token === config.authToken
+    }
+    if (hasUsers) {
+      try {
+        jwt.verify(token, jwtSecret)
+        return true
+      } catch {
+        return false
+      }
+    }
+    return true // 无鉴权模式
+  }
+
   const manager = new SessionManager({
     idleTimeoutMs: config.idleTimeoutMs,
     maxSessions: config.maxSessions,
@@ -92,11 +131,93 @@ export function createGateway(config: GatewayConfig = {}) {
     next()
   })
 
-  // ── 鉴权中间件 ──────────────────────────────────────────────
+  // ── 登录接口（在鉴权中间件之前，无需 token）──────────────────
+  app.post('/api/login', (req, res) => {
+    const { username, password } = req.body as { username?: string; password?: string }
+    const users = config.users ?? []
+
+    if (users.length === 0) {
+      // 无鉴权模式：直接返回静态 token（可能为空）
+      res.json({ token: config.authToken ?? '', mode: 'none' })
+      return
+    }
+
+    const matched = users.find(u => u.username === username && u.password === password)
+    if (!matched) {
+      log.warn('登录失败', { username, ip: req.ip })
+      res.status(401).json({ error: '用户名或密码错误' })
+      return
+    }
+
+    log.info('登录成功', { username, ip: req.ip })
+
+    if (hasStaticToken) {
+      // Token 模式：验证用户身份后返回静态 token
+      res.json({ token: config.authToken!, mode: 'token' })
+    } else {
+      // 登录模式：签发 JWT（7 天有效期）
+      const token = jwt.sign(
+        { username, iat: Math.floor(Date.now() / 1000) },
+        jwtSecret,
+        { expiresIn: '7d' }
+      )
+      res.json({ token, mode: 'jwt' })
+    }
+  })
+
+  // 健康检查（在鉴权中间件之前，无需 token）
+  app.get('/health', (_req, res) => {
+    const sessions = manager.listSessions()
+    const busySessions = sessions.filter(s => s.status === 'busy').length
+    const memUsage = process.memoryUsage()
+    // 鉴权模式：none | token | login
+    const authMode = hasUsers ? (hasStaticToken ? 'token' : 'login') : 'none'
+    res.json({
+      status: 'ok',
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      authMode,
+      sessions: {
+        total: sessions.length,
+        busy: busySessions,
+        idle: sessions.length - busySessions,
+      },
+      memory: {
+        heapUsedMb: Math.round(memUsage.heapUsed / 1024 / 1024),
+        heapTotalMb: Math.round(memUsage.heapTotal / 1024 / 1024),
+        rssMb: Math.round(memUsage.rss / 1024 / 1024),
+      },
+    })
+  })
+
+  // ── 静态文件托管（鉴权之前，前端资源无需 token）────────────────
+  const webDistPath = join(resolve('.'), 'dist', 'web')
+  if (existsSync(webDistPath)) {
+    log.info('托管前端静态文件', { path: webDistPath })
+    app.use(express.static(webDistPath))
+    // SPA fallback：非 API 的 GET 请求一律返回 index.html
+    app.get('/{*splat}', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/sessions') ||
+          req.path.startsWith('/todos') || req.path.startsWith('/crons') ||
+          req.path.startsWith('/skills') || req.path.startsWith('/mcp') ||
+          req.path.startsWith('/config')) {
+        return next()
+      }
+      res.sendFile(join(webDistPath, 'index.html'))
+    })
+  }
+
+  // ── 鉴权中间件（仅保护 API，静态文件已在上方放行）────────────
   app.use((req, res, next) => {
-    if (!config.authToken) return next()
+    // 无鉴权模式：直接放行
+    if (!hasUsers && !hasStaticToken) return next()
+    // 非 API 路径（前端静态资源）：直接放行
+    const isApiPath = req.path.startsWith('/api/') || req.path.startsWith('/sessions') ||
+      req.path.startsWith('/todos') || req.path.startsWith('/crons') ||
+      req.path.startsWith('/skills') || req.path.startsWith('/mcp') ||
+      req.path.startsWith('/config')
+    if (!isApiPath) return next()
     const auth = req.headers.authorization ?? ''
-    if (auth === `Bearer ${config.authToken}`) return next()
+    if (verifyToken(auth)) return next()
     log.warn('未授权请求', { path: req.path, ip: req.ip })
     res.status(401).json({ error: '未授权' })
   })
@@ -173,27 +294,6 @@ export function createGateway(config: GatewayConfig = {}) {
     res.json({ ok: true })
   })
 
-  // 健康检查（增强版：包含运行时指标）
-  app.get('/health', (_req, res) => {
-    const sessions = manager.listSessions()
-    const busySessions = sessions.filter(s => s.status === 'busy').length
-    const memUsage = process.memoryUsage()
-    res.json({
-      status: 'ok',
-      uptime: Math.floor((Date.now() - startTime) / 1000),
-      sessions: {
-        total: sessions.length,
-        busy: busySessions,
-        idle: sessions.length - busySessions,
-      },
-      memory: {
-        heapUsedMb: Math.round(memUsage.heapUsed / 1024 / 1024),
-        heapTotalMb: Math.round(memUsage.heapTotal / 1024 / 1024),
-        rssMb: Math.round(memUsage.rss / 1024 / 1024),
-      },
-    })
-  })
-
   // GET /config — 读取 agent 全局配置（模型、权限模式等）
   app.get('/config', (_req, res) => {
     try {
@@ -255,37 +355,25 @@ export function createGateway(config: GatewayConfig = {}) {
   app.get('/config/models', (_req, res) => {
     try {
       const models: Array<{ provider: string; model: string; isDefault: boolean }> = []
-      const defaultModel = process.env.DEFAULT_MODEL ?? loadConfig().model
+      const cfg = loadConfig()
+      const defaultModel = cfg.model
 
-      // 解析 LLM_FALLBACK_N 环境变量
-      let n = 1
-      while (true) {
-        const val = process.env[`LLM_FALLBACK_${n}`]
-        if (!val) break
-        // 格式：provider:aliyun,models:m1,m2[,apiKey:xxx][,baseUrl:xxx]
-        const parts = val.split(',')
-        let provider = ''
-        const modelNames: string[] = []
-        for (const part of parts) {
-          if (part.startsWith('provider:')) provider = part.slice('provider:'.length)
-          else if (part.startsWith('models:')) modelNames.push(...part.slice('models:'.length).split(',').filter(Boolean))
-          else if (!part.includes(':')) modelNames.push(part) // 裸模型名兼容
+      // 从 config.json 的 llm.fallbacks 读取模型列表
+      for (const group of cfg.llm?.fallbacks ?? []) {
+        for (const m of group.models) {
+          models.push({ provider: group.provider, model: m, isDefault: m === defaultModel })
         }
-        for (const m of modelNames) {
-          if (m) models.push({ provider, model: m, isDefault: m === defaultModel })
-        }
-        n++
       }
 
-      // 若没有 FALLBACK 配置，至少返回 DEFAULT_MODEL
+      // 若没有 fallbacks，至少返回默认模型
       if (models.length === 0 && defaultModel) {
-        models.push({ provider: 'default', model: defaultModel, isDefault: true })
+        models.push({ provider: cfg.provider ?? 'default', model: defaultModel, isDefault: true })
       }
 
-      // 确保 defaultModel 标记正确（可能不在 FALLBACK 列表里）
+      // 确保 defaultModel 标记正确
       const hasDefault = models.some(m => m.isDefault)
       if (!hasDefault && defaultModel) {
-        models.unshift({ provider: 'default', model: defaultModel, isDefault: true })
+        models.unshift({ provider: cfg.provider ?? 'default', model: defaultModel, isDefault: true })
       }
 
       res.json({ models, defaultModel })
@@ -1197,7 +1285,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '20'), 10) || 20, 1), 500)
       const page = Math.max(parseInt(String(req.query.page ?? '1'), 10) || 1, 1)
 
-      const searchApiBase = (process.env.SKILLHUB_SEARCH_URL ?? 'https://lightmake.site/api/v1/search').replace(/\/$/, '')
+      const searchApiBase = (loadConfig().skillHub?.searchUrl ?? 'https://lightmake.site/api/v1/search').replace(/\/$/, '')
       const offset = (page - 1) * limit
       const url = `${searchApiBase}?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}&page=${page}`
 
@@ -1444,21 +1532,140 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
+  // GET /api/logs — 读取最近的日志条目
+  app.get('/api/logs', (req, res) => {
+    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+    const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000)
+    const level = String(req.query.level ?? 'all')
+
+    if (!existsSync(logFile)) {
+      res.json({ logs: [], total: 0 })
+      return
+    }
+
+    try {
+      const content = readFileSync(logFile, 'utf-8')
+      const lines = content.split('\n').filter(l => l.trim())
+      const entries: Array<Record<string, unknown>> = []
+
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line) as Record<string, unknown>
+          if (level !== 'all' && entry.level !== level) continue
+          entries.push(entry)
+        } catch { /* 跳过非 JSON 行 */ }
+      }
+
+      // 返回最新的 limit 条
+      const sliced = entries.slice(-limit)
+      res.json({ logs: sliced, total: entries.length })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /api/usage — 读取模型用量统计（从日志中聚合）
+  app.get('/api/usage', (_req, res) => {
+    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+
+    if (!existsSync(logFile)) {
+      res.json({ sessions: [], totals: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 } })
+      return
+    }
+
+    try {
+      const content = readFileSync(logFile, 'utf-8')
+      const lines = content.split('\n').filter(l => l.trim())
+
+      // 按日期聚合用量
+      const byDate = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number; calls: number }>()
+      let totalInput = 0, totalOutput = 0, totalCost = 0, totalCalls = 0
+
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line) as Record<string, unknown>
+          // 从 usage 相关日志中提取 token 数据
+          if (
+            entry.inputTokens !== undefined &&
+            entry.outputTokens !== undefined
+          ) {
+            const date = String(entry.ts ?? '').slice(0, 10) || 'unknown'
+            const input = Number(entry.inputTokens) || 0
+            const output = Number(entry.outputTokens) || 0
+            const cost = Number(entry.costUsd ?? entry.cost ?? 0)
+
+            const prev = byDate.get(date) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 }
+            byDate.set(date, {
+              inputTokens: prev.inputTokens + input,
+              outputTokens: prev.outputTokens + output,
+              costUsd: prev.costUsd + cost,
+              calls: prev.calls + 1,
+            })
+            totalInput += input
+            totalOutput += output
+            totalCost += cost
+            totalCalls++
+          }
+        } catch { /* 跳过 */ }
+      }
+
+      const sessions = Array.from(byDate.entries())
+        .map(([date, stats]) => ({ date, ...stats }))
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .slice(0, 30)
+
+      res.json({
+        sessions,
+        totals: { inputTokens: totalInput, outputTokens: totalOutput, costUsd: totalCost, calls: totalCalls },
+      })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /api/config-file — 读取 config.json 原始内容
+  app.get('/api/config-file', (_req, res) => {
+    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    if (!existsSync(configFile)) {
+      res.json({ content: '{}', path: configFile })
+      return
+    }
+    try {
+      const content = readFileSync(configFile, 'utf-8')
+      res.json({ content, path: configFile })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // PUT /api/config-file — 保存 config.json 原始内容
+  app.put('/api/config-file', async (req, res) => {
+    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    try {
+      const { content } = req.body as { content?: string }
+      if (typeof content !== 'string') {
+        res.status(400).json({ error: '缺少 content 字段' })
+        return
+      }
+      // 验证 JSON 格式
+      JSON.parse(content)
+      const tmp = configFile + '.tmp'
+      writeFileSync(tmp, content, 'utf-8')
+      renameSync(tmp, configFile)
+      // 清除配置缓存，下次读取时重新加载
+      const { _resetConfigCache } = await import('../core/Config.js')
+      _resetConfigCache()
+      log.info('config.json 已通过 Web 界面更新')
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
   // ── WebSocket 服务器 ─────────────────────────────────────────
   const server = http.createServer(app)
   // 不设置 path，由 connection 回调自行匹配 /sessions/:id/stream
   const wss = new WebSocketServer({ server })
-
-  // ── 静态文件托管（SPA fallback）──────────────────────────────
-  const webDistPath = join(resolve('.'), 'web', 'dist')
-  if (existsSync(webDistPath)) {
-    log.info('托管前端静态文件', { path: webDistPath })
-    app.use(express.static(webDistPath))
-    // SPA fallback：所有未匹配的 GET 请求返回 index.html
-    app.get('/{*splat}', (_req, res) => {
-      res.sendFile(join(webDistPath, 'index.html'))
-    })
-  }
 
   wss.on('connection', (ws: WebSocket, req) => {
     // req.url 包含路径和查询参数，先解析出纯路径部分再匹配
@@ -1472,10 +1679,10 @@ export function createGateway(config: GatewayConfig = {}) {
     const sessionId = match[1]
 
     // WebSocket 鉴权（通过 URL query 参数 token 或 Sec-WebSocket-Protocol）
-    if (config.authToken) {
+    if (hasUsers || hasStaticToken) {
       const token = parsedUrl.searchParams.get('token')
         ?? req.headers['sec-websocket-protocol']
-      if (token !== config.authToken) {
+      if (!token || !verifyRawToken(token)) {
         log.warn('WebSocket 未授权', { sessionId })
         ws.close(1008, '未授权')
         return

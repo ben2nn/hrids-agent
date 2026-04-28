@@ -1,0 +1,12 @@
+src/
+refercode/
+docs/
+.env
+.env.bak
+*.log
+node_modules/
+.git/
+.vscode/
+.kiro/
+tsconfig.json
+vitest.config.ts

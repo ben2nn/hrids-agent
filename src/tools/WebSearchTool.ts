@@ -157,7 +157,13 @@ export const WebSearchTool: ToolDef<typeof inputSchema> = {
   },
 
   async execute(input) {
-    const anthropicKey = process.env.ANTHROPIC_API_KEY
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { loadConfig, getApiKey } = require('../core/Config.js') as {
+      loadConfig: () => import('../core/Config.js').AgentConfig
+      getApiKey: (id: string) => string | undefined
+    }
+    void loadConfig()
+    const anthropicKey = getApiKey('anthropic')
 
     try {
       if (anthropicKey) {

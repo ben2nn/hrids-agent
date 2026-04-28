@@ -80,7 +80,7 @@ export function zodFieldToSchema(field: z.ZodTypeAny): object {
   }
 
   if (field instanceof z.ZodRecord) {
-    return { type: 'object', additionalProperties: zodFieldToSchema(field.valueType), ...base }
+    return { type: 'object', additionalProperties: zodFieldToSchema((field._def as { valueType: z.ZodTypeAny }).valueType), ...base }
   }
 
   // 兜底：unknown / any

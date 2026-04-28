@@ -37,8 +37,18 @@ class Logger {
   private get serverMode() { return !!process.env.AGENT_SERVER_MODE }
 
   constructor() {
-    const envLevel = process.env.LOG_LEVEL as LogLevel | undefined
-    this.minLevel = envLevel && LEVEL_RANK[envLevel] !== undefined ? envLevel : 'info'
+    // 优先从 config.json 读取，其次环境变量（兼容旧用法），最后默认 info
+    let level: LogLevel = 'info'
+    try {
+      // 延迟 import 避免循环依赖，且 logger 在 config 加载前就可能被使用
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { loadConfig } = require('./Config.js') as { loadConfig: () => { logLevel?: LogLevel } }
+      level = loadConfig().logLevel ?? 'info'
+    } catch {
+      const envLevel = process.env.LOG_LEVEL as LogLevel | undefined
+      if (envLevel && LEVEL_RANK[envLevel] !== undefined) level = envLevel
+    }
+    this.minLevel = level
   }
 
   private write(level: LogLevel, msg: string, meta?: Record<string, unknown>) {

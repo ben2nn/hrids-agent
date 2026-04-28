@@ -1,4 +1,5 @@
-import 'dotenv/config'
+import { homedir } from 'os'
+import { join } from 'path'
 import { setupSystemProxy } from './core/proxySetup.js'
 setupSystemProxy()
 
@@ -24,28 +25,23 @@ import { runGatewayMode } from './modes/gatewayMode.js'
 import { runPrintMode } from './modes/printMode.js'
 import { runServerMode } from './modes/serverMode.js'
 import { runInteractiveMode } from './modes/interactiveMode.js'
+import { runInitCommand } from './commands/init.js'
 
 // 启动配置校验：在实际调用 API 前提前检测缺失的必要配置
-function validateStartupConfig(opts: Record<string, string | boolean | undefined>) {
-  const isOllama = opts.provider === 'ollama'
-    || (opts.baseUrl as string | undefined)?.includes('localhost')
-    || (opts.baseUrl as string | undefined)?.includes('127.0.0.1')
+function validateStartupConfig(config: import('./core/Config.js').AgentConfig, cliApiKey?: string) {
+  const isOllama = config.provider === 'ollama'
+    || config.baseUrl?.includes('localhost')
+    || config.baseUrl?.includes('127.0.0.1')
 
   if (!isOllama) {
     const hasAnyKey = !!(
-      opts.apiKey
-      || process.env.ANTHROPIC_API_KEY
-      || process.env.OPENAI_API_KEY
-      || process.env.DEEPSEEK_API_KEY
-      || process.env.GROQ_API_KEY
-      || process.env.DASHSCOPE_API_KEY
-      || process.env.ZHIPU_API_KEY
-      || process.env.NVIDIA_API_KEY
-      || process.env.CUSTOM_API_KEY
+      cliApiKey
+      || config.apiKey
+      || config.llm?.fallbacks?.some(g => g.apiKey)
     )
     if (!hasAnyKey) {
       process.stderr.write(
-        `\x1b[33m[警告]\x1b[0m 未检测到任何 API Key，请设置对应的环境变量（如 ANTHROPIC_API_KEY）或使用 --api-key 参数\n`,
+        `\x1b[33m[警告]\x1b[0m 未检测到任何 API Key，请在 config.json 的 llm.fallbacks 中为各提供商配置 apiKey\n`,
       )
     }
   }
@@ -62,9 +58,21 @@ async function main() {
     .name('hrids-agent')
     .description('原创智能体 CLI，支持 Anthropic / OpenAI / DeepSeek / Groq / Ollama')
     .version('0.1.0')
-    .option('-m, --model <model>', '模型名称（自动识别提供商）', process.env.DEFAULT_MODEL ?? 'claude-sonnet-4-5')
-    .option('--provider <provider>', '显式指定提供商：anthropic | openai | deepseek | groq | ollama | aliyun | custom')
-    .option('--api-key <key>', 'API Key（也可通过环境变量设置）')
+
+  // ── init 子命令 ──────────────────────────────────────────────
+  program
+    .command('init')
+    .description('初始化配置文件（~/.hrids-agent/config.json）')
+    .option('--force', '强制覆盖已有配置文件')
+    .action(async (opts) => {
+      await runInitCommand({ force: opts.force })
+    })
+
+  // ── 主命令 ──────────────────────────────────────────────────
+  program
+    .option('-m, --model <model>', '模型名称（自动识别提供商）', 'qwen-plus-2025-07-28')
+    .option('--provider <provider>', '显式指定提供商：anthropic | openai | deepseek | groq | aliyun | zhipu | nvidia | kimi | minimax | google | openrouter | ollama | custom')
+    .option('--api-key <key>', 'API Key（覆盖 config.json 中的配置）')
     .option('--base-url <url>', '自定义 API 端点（Ollama / 本地代理）')
     .option('--craft', '自主执行模式（无需确认写操作，agent 独立完成任务）')
     .option('--plan', '计划模式（只读，写操作需手动确认后执行）')
@@ -74,39 +82,43 @@ async function main() {
     .option('-p, --print <message>', '非交互模式：执行一条消息后退出')
     .option('--server', 'Server 模式：持续从 stdin 读取消息（NDJSON），保持会话历史')
     .option('--gateway', 'Gateway 模式：启动 HTTP + WebSocket 服务，供前端或远程客户端连接')
-    .option('--gateway-port <port>', 'Gateway 监听端口（默认 3282）', '3282')
-    .option('--gateway-host <host>', 'Gateway 监听地址（默认 127.0.0.1）', '127.0.0.1')
-    .option('--gateway-token <token>', 'Gateway 鉴权 Token（可选）')
-    .option('--embedding-provider <provider>', 'Embedding 提供商：openai | ollama | tfidf（默认 tfidf）')
+    .option('--gateway-port <port>', 'Gateway 监听端口（覆盖 config.json gateway.port，默认 3282）')
+    .option('--gateway-host <host>', 'Gateway 监听地址（覆盖 config.json gateway.host，默认 127.0.0.1）')
+    .option('--gateway-token <token>', 'Gateway 鉴权 Token（覆盖 config.json gateway.token）')
+    .option('--embedding-provider <provider>', 'Embedding 提供商：openai | aliyun | ollama | tfidf（默认 tfidf）')
     .option('--embedding-model <model>', 'Embedding 模型名称')
     .option('--embedding-base-url <url>', 'Embedding API 端点（Ollama 用）')
-    .option('--cwd <dir>', '设置工作目录（覆盖配置文件中的 agentCwd）')
+    .option('--cwd <dir>', '设置工作目录（覆盖 config.json agent.cwd）')
     .option('--max-chars <n>', '非交互模式（-p）输出字符上限，超出后截断（默认不限制）')
     .addHelpText('after', `
+配置:
+  首次运行会自动生成 ~/.hrids-agent/config.json
+  也可运行 hrids-agent init 手动初始化配置文件
+
 示例:
-  # Anthropic（自动识别）
-  ANTHROPIC_API_KEY=sk-ant-... npx tsx src/main.ts
+  # 使用 config.json 中配置的默认模型和 API Key（推荐）
+  hrids-agent
 
-  # OpenAI
-  OPENAI_API_KEY=sk-... npx tsx src/main.ts -m gpt-4o
-
-  # DeepSeek
-  DEEPSEEK_API_KEY=sk-... npx tsx src/main.ts -m deepseek-chat
-
-  # Groq（免费）
-  GROQ_API_KEY=gsk_... npx tsx src/main.ts -m llama-3.3-70b-versatile
-
-  # 阿里云百炼（DashScope）
-  DASHSCOPE_API_KEY=sk-... npx tsx src/main.ts -m qwen-max
+  # 临时指定模型（不修改配置文件）
+  hrids-agent -m deepseek-chat
+  hrids-agent -m qwen-max --provider aliyun
 
   # Ollama 本地模型（无需 API Key）
-  npx tsx src/main.ts -m qwen2.5-coder:7b --provider ollama
+  hrids-agent -m qwen2.5-coder:7b --provider ollama
 
   # 自定义端点
-  npx tsx src/main.ts -m my-model --provider custom --base-url http://localhost:8080/v1 --api-key token
-    `)
+  hrids-agent -m my-model --provider custom --base-url http://localhost:8080/v1 --api-key token
+
+  # 非交互模式
+  hrids-agent -p "帮我写一个 hello world"
+
+  # 启动 Gateway 服务
+  hrids-agent --gateway
+`)
     .action(async (opts) => {
-      validateStartupConfig(opts as Record<string, string | boolean | undefined>)
+      const config = loadConfig()
+      process.stderr.write(`[config] 配置目录: ${join(homedir(), '.hrids-agent')}\n`)
+      validateStartupConfig(config, opts.apiKey)
 
       // 初始化 Embedding 提供商
       if (opts.embeddingProvider && opts.embeddingProvider !== 'tfidf') {
@@ -114,16 +126,18 @@ async function main() {
           provider: opts.embeddingProvider,
           model: opts.embeddingModel,
           baseUrl: opts.embeddingBaseUrl,
-          apiKey: opts.apiKey ?? process.env.OPENAI_API_KEY,
+          apiKey: opts.apiKey,
         })
       }
 
       // Gateway 模式：独立启动，不需要 provider/engine
+      // CLI 参数优先，其次读 config.gateway，最后用内置默认值
       if (opts.gateway) {
         await runGatewayMode({
-          gatewayPort: opts.gatewayPort,
-          gatewayHost: opts.gatewayHost,
-          gatewayToken: opts.gatewayToken,
+          gatewayPort: opts.gatewayPort ?? String(config.gateway?.port ?? 3282),
+          gatewayHost: opts.gatewayHost ?? config.gateway?.host ?? '127.0.0.1',
+          gatewayToken: opts.gatewayToken ?? config.gateway?.token,
+          gatewayUsers: config.gateway?.users,
         })
         return
       }
@@ -142,10 +156,9 @@ async function main() {
         return
       }
 
-      const config = loadConfig()
       const model = opts.model ?? config.model
-      const memoryCondense = process.env.MEMORY_CONDENSE === 'true' || (config.memoryCondense ?? false)
-      const skillDistill = process.env.AUTO_DISTILL_SKILL === 'true' || (config.autoDistillSkill ?? false)
+      const memoryCondense = config.memoryCondense ?? false
+      const skillDistill = config.autoDistillSkill ?? false
 
       // 后台清理过期会话（默认保留最近 30 个）
       setImmediate(() => { try { pruneOldSessions() } catch { /* 忽略 */ } })
@@ -162,21 +175,15 @@ async function main() {
       let provider
       try {
         provider = setupProvider({
-          model,
-          apiKey: opts.apiKey ?? config.apiKey,
-          baseUrl: opts.baseUrl || config.baseUrl || undefined,
-          provider: opts.provider ?? config.provider,
+          model: opts.model,
+          apiKey: opts.apiKey,
+          baseUrl: opts.baseUrl || undefined,
+          provider: opts.provider,
+          config,
         })
       } catch (err) {
         console.error(`\n错误: ${String(err)}\n`)
-        console.error('支持的提供商及对应环境变量：')
-        console.error('  Anthropic  -> ANTHROPIC_API_KEY')
-        console.error('  OpenAI     -> OPENAI_API_KEY')
-        console.error('  DeepSeek   -> DEEPSEEK_API_KEY')
-        console.error('  Groq       -> GROQ_API_KEY')
-        console.error('  阿里云     -> DASHSCOPE_API_KEY（模型如 qwen-max、qwen-plus）')
-        console.error('  Ollama     -> 无需 Key，使用 --provider ollama')
-        console.error('  自定义     -> --provider custom --base-url <url> --api-key <key>')
+        console.error('请在 ~/.hrids-agent/config.json 中配置 llm.fallbacks 和各提供商的 apiKey')
         process.exit(1)
       }
 
@@ -209,7 +216,7 @@ async function main() {
 
       const tools = [
         ...ALL_TOOLS,
-        createAgentTool(opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? '', model),
+        createAgentTool(opts.apiKey ?? config.apiKey ?? '', model),
         ...mcpTools,
       ]
 

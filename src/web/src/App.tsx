@@ -6,6 +6,7 @@ import { ChatPage } from './components/pages/ChatPage.js'
 import { SkillsPage } from './components/pages/SkillsPage.js'
 import { AutomationPage } from './components/pages/AutomationPage.js'
 import { ZhilePage } from './components/pages/ZhilePage.js'
+import { SettingsPage } from './components/pages/SettingsPage.js'
 import { NavBar } from './components/layout/NavBar.js'
 import type { NavView } from './components/layout/NavBar.js'
 
@@ -25,7 +26,7 @@ function LoadingScreen() {
 // ─── App 根组件 ────────────────────────────────────────────────────────────
 
 export function App() {
-  const { isConnected, isChecking, loadFromStorage, checkConnection } = useConnectionStore()
+  const { isConnected, isChecking, needsLogin, loadFromStorage, checkConnection } = useConnectionStore()
   // 当前视图
   const [view, setView] = useState<NavView>('chat')
   // 左侧边栏折叠状态
@@ -84,8 +85,8 @@ export function App() {
     return <LoadingScreen />
   }
 
-  // 未连接：显示连接配置页
-  if (!isConnected) {
+  // 未连接或需要登录：显示登录页
+  if (!isConnected || needsLogin) {
     return (
       <ConnectPage
         onConnected={() => {
@@ -133,6 +134,11 @@ export function App() {
                 navCollapsed={navCollapsed}
                 onNavCollapsedChange={setNavCollapsed}
               />
+            </div>
+          )}
+          {view === 'settings' && (
+            <div className="flex-1 overflow-hidden">
+              <SettingsPage />
             </div>
           )}
         </div>

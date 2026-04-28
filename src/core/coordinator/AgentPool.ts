@@ -168,7 +168,7 @@ export class AgentPool {
     // 优先使用会话级记忆（Gateway 模式），CLI 模式回退到全局单例
     let finalSystemPrompt = systemPrompt
     try {
-      const { getMemoryStack, getMemoryStackForSession } = await import('../memory/index.js')
+      const { getMemoryStack, getMemoryStackForSession } = await import('../../memory/index.js')
       const stack = this.sessionId ? getMemoryStackForSession(this.sessionId) : getMemoryStack()
       const stats = await stack.status()
       if (stats.totalMemories > 0) {

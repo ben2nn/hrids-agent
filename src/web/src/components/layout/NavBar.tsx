@@ -1,12 +1,13 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useSessionStore } from '../../store/sessionStore.js'
 import { useThemeStore } from '../../store/themeStore.js'
+import { useConnectionStore } from '../../store/connectionStore.js'
 import { ConfirmModal } from '../modals/ConfirmModal.js'
 import type { SessionInfo } from '../../lib/types.js'
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────
 
-export type NavView = 'chat' | 'skills' | 'automation' | 'zhile'
+export type NavView = 'chat' | 'skills' | 'automation' | 'zhile' | 'settings'
 
 export interface NavBarProps {
   activeView: NavView
@@ -153,42 +154,285 @@ const AutomationIcon = () => (
   </svg>
 )
 
+const SettingsIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+)
 
 
-// ─── 主题切换按钮 ──────────────────────────────────────────────────────────
 
-function ThemeToggle() {
+// ─── 用户菜单（收起状态，图标触发） ──────────────────────────────────────
+
+interface UserMenuCollapsedProps {
+  wsStatus: 'connected' | 'reconnecting' | 'disconnected'
+}
+
+function UserMenuCollapsed({ wsStatus }: UserMenuCollapsedProps) {
   const { theme, toggle } = useThemeStore()
   const isDark = theme === 'dark'
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  const wsColor = wsStatus === 'connected' ? '#4ade80' : wsStatus === 'reconnecting' ? '#fbbf24' : '#f87171'
+  const wsLabel = wsStatus === 'connected' ? '已连接' : wsStatus === 'reconnecting' ? '重连中' : '已断开'
+
+  useEffect(() => {
+    if (!open) return
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [open])
 
   return (
-    <button
-      type="button"
-      onClick={toggle}
-      title={isDark ? '切换到日间模式' : '切换到夜间模式'}
-      aria-label={isDark ? '切换到日间模式' : '切换到夜间模式'}
-      className="w-7 h-7 flex items-center justify-center rounded-lg text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] transition-all duration-150 shrink-0 border-0 cursor-pointer"
-    >
-      {isDark ? (
-        /* 太阳图标 — 切换到日间 */
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="5" />
-          <line x1="12" y1="1" x2="12" y2="3" />
-          <line x1="12" y1="21" x2="12" y2="23" />
-          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-          <line x1="1" y1="12" x2="3" y2="12" />
-          <line x1="21" y1="12" x2="23" y2="12" />
-          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-        </svg>
-      ) : (
-        /* 月亮图标 — 切换到夜间 */
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-        </svg>
+    <div ref={menuRef} className="relative flex flex-col items-center">
+      {/* 弹出菜单（向右展开） */}
+      {open && (
+        <div
+          className="absolute bottom-0 left-full ml-2 w-52 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)] shadow-[var(--shadow-lg)] overflow-hidden animate-fade-in z-50"
+        >
+          {/* 用户信息 */}
+          <div className="flex items-center gap-3 px-3.5 py-3 border-b border-[var(--border-subtle)]">
+            <div className="relative shrink-0">
+              <div className="w-8 h-8 rounded-full overflow-hidden border-2 border-[var(--accent-border)]">
+                <img src="/avatar.png" alt="用户头像" className="w-full h-full object-cover" />
+              </div>
+              <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[var(--bg-elevated)]" style={{ background: wsColor }} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-[var(--text-primary)] truncate">admin</div>
+              <div className="text-[10px] text-[var(--text-muted)] flex items-center gap-1 mt-0.5">
+                <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: wsColor }} />
+                {wsLabel}
+              </div>
+            </div>
+          </div>
+          {/* 操作项 */}
+          <div className="py-1">
+            <button
+              type="button"
+              onClick={() => { toggle(); setOpen(false) }}
+              className="flex items-center gap-2.5 w-full px-3.5 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors border-0 cursor-pointer text-left"
+            >
+              <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0 text-[var(--text-muted)]">
+                {isDark ? (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="5" />
+                    <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                    <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                  </svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                  </svg>
+                )}
+              </span>
+              {isDark ? '日间模式' : '夜间模式'}
+            </button>
+          </div>
+          <div className="border-t border-[var(--border-subtle)]">
+            <button
+              type="button"
+              onClick={() => { useConnectionStore.getState().logout(); setOpen(false) }}
+              className="flex items-center gap-2.5 w-full px-3.5 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--error)] hover:bg-[var(--error-subtle)] transition-colors border-0 cursor-pointer text-left"
+            >
+              <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+              </span>
+              退出登录
+            </button>
+          </div>
+        </div>
       )}
-    </button>
+
+      {/* 头像触发按钮 */}
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        title="用户菜单"
+        aria-label="用户菜单"
+        className={`relative w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-150 border-0 cursor-pointer ${open ? 'bg-[var(--bg-tertiary)]' : 'hover:bg-[var(--bg-tertiary)]'}`}
+      >
+        <div className="relative">
+          <div className="w-6 h-6 rounded-full overflow-hidden border border-[var(--border-subtle)]">
+            <img src="/avatar.png" alt="用户头像" className="w-full h-full object-cover" />
+          </div>
+          <span
+            className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-[var(--bg-secondary)]"
+            style={{ background: wsColor }}
+          />
+        </div>
+      </button>
+    </div>
+  )
+}
+
+// ─── 用户菜单（DeepSeek 风格弹出菜单） ────────────────────────────────────
+
+interface UserMenuProps {
+  onViewChange: (view: NavView) => void
+  wsStatus: 'connected' | 'reconnecting' | 'disconnected'
+}
+
+function UserMenu({ onViewChange, wsStatus }: UserMenuProps) {
+  const { theme, toggle } = useThemeStore()
+  const isDark = theme === 'dark'
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // 点击外部关闭
+  useEffect(() => {
+    if (!open) return
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [open])
+
+  const wsLabel = wsStatus === 'connected' ? '已连接' : wsStatus === 'reconnecting' ? '重连中' : '已断开'
+  const wsColor = wsStatus === 'connected' ? '#4ade80' : wsStatus === 'reconnecting' ? '#fbbf24' : '#f87171'
+
+  return (
+    <div ref={menuRef} className="relative border-t border-[var(--border-subtle)] shrink-0">
+      {/* 弹出菜单 */}
+      {open && (
+        <div
+          className="absolute bottom-full left-2 right-2 mb-1 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)] shadow-[var(--shadow-lg)] overflow-hidden animate-fade-in z-50"
+          style={{ boxShadow: '0 -4px 24px rgba(0,0,0,0.35), 0 0 0 1px var(--border)' }}
+        >
+          {/* 用户信息头部 */}
+          <div className="flex items-center gap-3 px-4 py-3.5 border-b border-[var(--border-subtle)]">
+            <div className="relative shrink-0">
+              <div className="w-9 h-9 rounded-full overflow-hidden border-2 border-[var(--accent-border)]">
+                <img src="/avatar.png" alt="用户头像" className="w-full h-full object-cover" />
+              </div>
+              {/* 连接状态角标 */}
+              <span
+                className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[var(--bg-elevated)]"
+                style={{ background: wsColor }}
+                title={wsLabel}
+              />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold text-[var(--text-primary)] truncate leading-tight">admin</div>
+              <div className="text-[11px] text-[var(--text-muted)] mt-0.5 flex items-center gap-1">
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full"
+                  style={{ background: wsColor }}
+                />
+                {wsLabel}
+              </div>
+            </div>
+          </div>
+
+          {/* 功能菜单 */}
+          <div className="py-1.5">
+            {/* 主题切换 */}
+            <button
+              type="button"
+              onClick={() => { toggle(); setOpen(false) }}
+              className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors duration-100 border-0 cursor-pointer text-left"
+            >
+              <span className="w-4 h-4 flex items-center justify-center shrink-0 text-[var(--text-muted)]">
+                {isDark ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="5" />
+                    <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                    <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                  </svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                  </svg>
+                )}
+              </span>
+              <span className="flex-1">{isDark ? '切换到日间模式' : '切换到夜间模式'}</span>
+            </button>
+
+            {/* 设置 */}
+            <button
+              type="button"
+              onClick={() => { onViewChange('settings'); setOpen(false) }}
+              className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors duration-100 border-0 cursor-pointer text-left"
+            >
+              <span className="w-4 h-4 flex items-center justify-center shrink-0 text-[var(--text-muted)]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </span>
+              <span className="flex-1">设置</span>
+            </button>
+          </div>
+
+          {/* 分割线 + 退出 */}
+          <div className="border-t border-[var(--border-subtle)]">
+            <button
+              type="button"
+              onClick={() => { useConnectionStore.getState().logout(); setOpen(false) }}
+              className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-[var(--text-secondary)] hover:text-[var(--error)] hover:bg-[var(--error-subtle)] transition-colors duration-100 border-0 cursor-pointer text-left"
+            >
+              <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+              </span>
+              <span className="flex-1">退出登录</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 触发按钮 */}
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className={[
+          'flex items-center gap-2.5 w-full px-4 py-3 transition-colors duration-150 border-0 cursor-pointer text-left',
+          open
+            ? 'bg-[var(--bg-tertiary)]'
+            : 'hover:bg-[var(--bg-tertiary)]',
+        ].join(' ')}
+      >
+        {/* 头像 */}
+        <div className="relative shrink-0">
+          <div className="w-7 h-7 rounded-full overflow-hidden border border-[var(--border-subtle)]">
+            <img src="/avatar.png" alt="用户头像" className="w-full h-full object-cover" />
+          </div>
+          <span
+            className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[var(--bg-secondary)]"
+            style={{ background: wsColor }}
+          />
+        </div>
+        {/* 用户名 */}
+        <span className="text-xs font-medium text-[var(--text-secondary)] truncate flex-1">admin</span>
+        {/* 展开箭头 */}
+        <svg
+          width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+          className={`text-[var(--text-muted)] shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+        >
+          <polyline points="18 15 12 9 6 15" />
+        </svg>
+      </button>
+    </div>
   )
 }
 
@@ -292,27 +536,24 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
           >
             <img src="/avatar.png" alt="知了" className="w-5 h-5 rounded object-cover" />
           </button>
+          <button
+            type="button"
+            onClick={() => { onViewChange('settings'); onCollapsedChange?.(false) }}
+            title="系统设置"
+            aria-label="系统设置"
+            className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-150 border-0 cursor-pointer ${
+              activeView === 'settings'
+                ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]'
+            }`}
+          >
+            <SettingsIcon />
+          </button>
         </div>
 
-        {/* 底部：连接状态 + 主题 */}
+        {/* 底部：用户菜单 */}
         <div className="mt-auto pb-3 flex flex-col items-center gap-2">
-          {/* 连接状态点 */}
-          {wsStatus === 'connected' && (
-            <span className="relative flex shrink-0" title="已连接">
-              <span className="absolute w-2 h-2 rounded-full bg-emerald-400 animate-ping opacity-60" />
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            </span>
-          )}
-          {wsStatus === 'reconnecting' && (
-            <span className="relative flex shrink-0" title="重连中...">
-              <span className="absolute w-2 h-2 rounded-full bg-amber-400 animate-ping opacity-75" />
-              <span className="w-2 h-2 rounded-full bg-amber-400" />
-            </span>
-          )}
-          {wsStatus === 'disconnected' && (
-            <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" title="失去连接" />
-          )}
-          <ThemeToggle />
+          <UserMenuCollapsed wsStatus={wsStatus} />
         </div>
       </div>
     )
@@ -389,6 +630,12 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
           isActive={activeView === 'automation'}
           onClick={() => onViewChange('automation')}
         />
+        <NavMenuItem
+          icon={<SettingsIcon />}
+          label="系统设置"
+          isActive={activeView === 'settings'}
+          onClick={() => onViewChange('settings')}
+        />
       </div>
 
       {/* ── 分割线 + 会话列表标题 ── */}
@@ -425,16 +672,7 @@ export function NavBar({ activeView, onViewChange, onNewSession, collapsed = fal
       </div>
 
       {/* ── 底部用户区域 ── */}
-      <div className="border-t border-[var(--border-subtle)] px-3 py-3 shrink-0">
-        <div className="flex items-center gap-2 px-2">
-          <div className="w-6 h-6 rounded-full overflow-hidden border border-[var(--border-subtle)] shrink-0">
-            <img src="/avatar.png" alt="用户头像" className="w-full h-full object-cover" />
-          </div>
-          <span className="text-xs text-[var(--text-secondary)] truncate flex-1">本地用户</span>
-          {/* 主题切换按钮 */}
-          <ThemeToggle />
-        </div>
-      </div>
+      <UserMenu onViewChange={onViewChange} wsStatus={wsStatus} />
 
       {/* ── 删除确认弹窗 ── */}
       {pendingDeleteSession && (

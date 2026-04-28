@@ -294,124 +294,51 @@ let _provider: AnyEmbeddingProvider | null = null
  * 从环境变量创建 EmbeddingProvider（支持多模型 Fallback）
  *
  * 优先级：
- * 1. EMBEDDING_FALLBACK_N 多模型配置（N = 1, 2, 3...）
- * 2. EMBEDDING_MODEL 单一模型
+ * 1. config.embedding.fallbacks 多模型配置
+ * 2. config.embedding.model 单一模型
  * 3. 降级 TF-IDF（无需 API）
- *
- * EMBEDDING_FALLBACK_N 格式（与 LLM_FALLBACK_N 相同）：
- *   EMBEDDING_FALLBACK_1=provider:aliyun,models:text-embedding-v3,text-embedding-v2
- *   EMBEDDING_FALLBACK_2=provider:openai,models:text-embedding-3-small
  */
 function createEmbeddingProviderFromEnv(): AnyEmbeddingProvider {
-  // 1. 尝试读取 EMBEDDING_FALLBACK_N 多模型配置
-  const fallbackProviders: EmbeddingProvider[] = []
-  for (let i = 1; i <= 20; i++) {
-    const raw = process.env[`EMBEDDING_FALLBACK_${i}`]
-    if (!raw) break
+  // 从 config.json 读取
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { loadConfig } = require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
+  const config = loadConfig()
+  const embCfg = config.embedding
 
-    const entries = parseEmbeddingLine(raw)
-    for (const cfg of entries) {
-      fallbackProviders.push(new EmbeddingProvider(cfg))
+  // 1. fallbacks 多模型配置
+  if (embCfg?.fallbacks && embCfg.fallbacks.length > 0) {
+    const fallbackProviders: EmbeddingProvider[] = []
+    for (const group of embCfg.fallbacks) {
+      const apiKey = group.apiKey
+      const baseUrl = group.baseUrl ?? resolveBaseUrl(group.provider)
+      for (const model of group.models) {
+        fallbackProviders.push(new EmbeddingProvider({
+          provider: group.provider === 'ollama' ? 'ollama' : 'openai',
+          model,
+          apiKey,
+          baseUrl,
+          dimensions: embCfg.dimensions,
+        }))
+      }
     }
-  }
-
-  if (fallbackProviders.length > 0) {
     if (!process.env.AGENT_SERVER_MODE) {
-      const chain = fallbackProviders.map(p => p.name).join(' → ')
-      process.stderr.write(`[embedding] fallback 链: ${chain}\n`)
+      process.stderr.write(`[embedding] fallback 链: ${fallbackProviders.map(p => p.name).join(' → ')}\n`)
     }
-    return fallbackProviders.length === 1
-      ? fallbackProviders[0]
-      : new EmbeddingFallbackProvider(fallbackProviders)
+    return fallbackProviders.length === 1 ? fallbackProviders[0] : new EmbeddingFallbackProvider(fallbackProviders)
   }
 
-  // 2. 单一 EMBEDDING_MODEL
-  const model = process.env.EMBEDDING_MODEL
-  if (model) {
-    const baseUrl = process.env.EMBEDDING_BASE_URL
-    const provider: EmbeddingConfig['provider'] =
-      baseUrl && !baseUrl.includes('openai.com') && !baseUrl.includes('dashscope')
-        ? 'ollama'
-        : 'openai'
+  // 2. 单一 model
+  if (embCfg?.model) {
     return new EmbeddingProvider({
-      provider,
-      model,
-      apiKey: process.env.OPENAI_API_KEY ?? process.env.DASHSCOPE_API_KEY,
-      baseUrl,
-      dimensions: process.env.EMBEDDING_DIMENSIONS
-        ? parseInt(process.env.EMBEDDING_DIMENSIONS, 10)
-        : undefined,
+      provider: (embCfg.provider ?? 'openai') === 'ollama' ? 'ollama' : 'openai',
+      model: embCfg.model,
+      baseUrl: embCfg.baseUrl ?? resolveBaseUrl(embCfg.provider ?? 'openai'),
+      dimensions: embCfg.dimensions,
     })
   }
 
   // 3. 降级 TF-IDF
   return new EmbeddingProvider({ provider: 'tfidf' })
-}
-
-/**
- * 解析一行 EMBEDDING_FALLBACK_N 配置，返回多个 EmbeddingConfig
- * 格式：provider:aliyun,models:text-embedding-v3,text-embedding-v2[,apiKey:xxx][,baseUrl:xxx]
- */
-function parseEmbeddingLine(raw: string): EmbeddingConfig[] {
-  const modelsMatch = raw.match(/(?:^|,)models:(.+)$/)
-
-  if (modelsMatch) {
-    const beforeModels = raw.slice(0, raw.indexOf('models:'))
-    const kv = parseKV(beforeModels)
-
-    const afterModels = modelsMatch[1]
-    const modelTokens: string[] = []
-    const extraKV: Record<string, string> = {}
-
-    for (const token of afterModels.split(',')) {
-      const t = token.trim()
-      if (!t) continue
-      if (t.includes(':')) {
-        const idx = t.indexOf(':')
-        extraKV[t.slice(0, idx)] = t.slice(idx + 1)
-      } else {
-        modelTokens.push(t)
-      }
-    }
-
-    const merged = { ...kv, ...extraKV }
-    const platformProvider = merged.provider ?? 'openai'
-    const apiKey = merged.apiKey ?? resolveApiKey(platformProvider)
-    const baseUrl = merged.baseUrl ?? resolveBaseUrl(platformProvider)
-    const dimensions = merged.dimensions ? parseInt(merged.dimensions, 10) : undefined
-
-    return modelTokens.map(model => ({
-      provider: platformProvider === 'ollama' ? 'ollama' : 'openai',
-      model,
-      apiKey,
-      baseUrl,
-      dimensions,
-    } as EmbeddingConfig))
-  }
-
-  // 旧格式：model:xxx,provider:yyy,...
-  const kv = parseKV(raw)
-  if (!kv.model) throw new Error(`EMBEDDING_FALLBACK 配置行缺少 model 字段: ${raw}`)
-  const platformProvider = kv.provider ?? 'openai'
-  return [{
-    provider: platformProvider === 'ollama' ? 'ollama' : 'openai',
-    model: kv.model,
-    apiKey: kv.apiKey ?? resolveApiKey(platformProvider),
-    baseUrl: kv.baseUrl ?? resolveBaseUrl(platformProvider),
-    dimensions: kv.dimensions ? parseInt(kv.dimensions, 10) : undefined,
-  }]
-}
-
-/** 根据平台名自动解析 API Key */
-function resolveApiKey(platform: string): string | undefined {
-  switch (platform) {
-    case 'openai':  return process.env.OPENAI_API_KEY
-    case 'aliyun':  return process.env.DASHSCOPE_API_KEY
-    case 'zhipu':   return process.env.ZHIPU_API_KEY
-    case 'deepseek':return process.env.DEEPSEEK_API_KEY
-    case 'ollama':  return undefined
-    default:        return process.env.OPENAI_API_KEY ?? process.env.DASHSCOPE_API_KEY
-  }
 }
 
 /** 根据平台名自动解析 Base URL */
@@ -420,8 +347,8 @@ function resolveBaseUrl(platform: string): string | undefined {
     case 'aliyun':  return 'https://dashscope.aliyuncs.com/compatible-mode/v1'
     case 'zhipu':   return 'https://open.bigmodel.cn/api/paas/v4'
     case 'deepseek':return 'https://api.deepseek.com/v1'
-    case 'ollama':  return process.env.EMBEDDING_BASE_URL ?? 'http://localhost:11434'
-    default:        return process.env.EMBEDDING_BASE_URL
+    case 'ollama':  return 'http://localhost:11434'
+    default:        return undefined
   }
 }
 

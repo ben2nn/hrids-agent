@@ -222,6 +222,7 @@ export class OpenAIProvider implements LLMProvider {
                   function?: { name?: string; arguments?: string }
                 }>
               }
+              finish_reason?: string
             }>
             usage?: { prompt_tokens: number; completion_tokens: number }
           }

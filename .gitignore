@@ -1,8 +1,9 @@
 docs
-dist
+dist/*
 node_modules
 refercode
 tests
 .kiro
 .vscode
 web/node_modules
+dist/web

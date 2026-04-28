@@ -63,6 +63,59 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
+/**
+ * 检查 Gateway 健康状态，返回详细结果：
+ * - 'ok'：可达且已授权（或无需鉴权）
+ * - 'needs-login'：需要用户名/密码登录
+ * - 'unauthorized'：token 无效或已过期
+ * - 'unreachable'：无法连接
+ */
+export async function checkHealthStatus(): Promise<'ok' | 'needs-login' | 'unauthorized' | 'unreachable'> {
+  try {
+    const url = `${_gatewayUrl}/health`
+    const headers: Record<string, string> = {}
+    if (_authToken) headers['Authorization'] = `Bearer ${_authToken}`
+    const res = await fetch(url, { headers })
+    if (res.status === 401) return 'unauthorized'
+    if (!res.ok) return 'unreachable'
+    const data = await res.json() as { authMode?: 'none' | 'token' | 'login' }
+
+    // 无鉴权模式：直接放行
+    if (!data.authMode || data.authMode === 'none') return 'ok'
+
+    // token 或 login 模式：需要有效 token
+    if (!_authToken) return 'needs-login'
+
+    // 有 token，验证是否真的有效（访问一个需要鉴权的接口）
+    const verifyRes = await fetch(`${_gatewayUrl}/sessions`, {
+      headers: { Authorization: `Bearer ${_authToken}` },
+    })
+    if (verifyRes.status === 401) return 'unauthorized'
+    return 'ok'
+  } catch {
+    return 'unreachable'
+  }
+}
+
+/**
+ * 用户名/密码登录，返回 token。
+ * 登录失败抛出 Error。
+ */
+export async function login(username: string, password: string): Promise<string> {
+  const url = `${_gatewayUrl}/api/login`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(body.error ?? '登录失败')
+  }
+  const data = await response.json() as { token: string; mode: string }
+  return data.token
+}
+
 // ─── 会话管理 ──────────────────────────────────────────────────────────────
 
 /** 获取所有会话列表（含历史已停止的会话） */
@@ -420,4 +473,58 @@ export async function updateAgentConfig(patch: { model?: string; permissionMode?
 export async function getAvailableModels(): Promise<ModelsResponse> {
   const res = await apiFetch('/config/models')
   return res.json()
+}
+
+// ─── 系统设置 ──────────────────────────────────────────────────────────────
+
+export interface LogEntry {
+  ts: string
+  level: 'debug' | 'info' | 'warn' | 'error'
+  msg: string
+  [key: string]: unknown
+}
+
+export interface LogsResponse {
+  logs: LogEntry[]
+  total: number
+}
+
+export interface UsageDayStats {
+  date: string
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+  calls: number
+}
+
+export interface UsageResponse {
+  sessions: UsageDayStats[]
+  totals: { inputTokens: number; outputTokens: number; costUsd: number; calls: number }
+}
+
+/** 获取系统日志 */
+export async function getLogs(limit = 200, level = 'all'): Promise<LogsResponse> {
+  const params = new URLSearchParams({ limit: String(limit), level })
+  const res = await apiFetch(`/api/logs?${params}`)
+  return res.json()
+}
+
+/** 获取模型用量统计 */
+export async function getUsageStats(): Promise<UsageResponse> {
+  const res = await apiFetch('/api/usage')
+  return res.json()
+}
+
+/** 获取 config.json 原始内容 */
+export async function getConfigFile(): Promise<{ content: string; path: string }> {
+  const res = await apiFetch('/api/config-file')
+  return res.json()
+}
+
+/** 保存 config.json 原始内容 */
+export async function saveConfigFile(content: string): Promise<void> {
+  await apiFetch('/api/config-file', {
+    method: 'PUT',
+    body: JSON.stringify({ content }),
+  })
 }

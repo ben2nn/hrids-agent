@@ -90,7 +90,7 @@ function simulateToolBlock(
   if (toolEnd.result.type === 'error') {
     msgs = updateMsg(msgs, toolEnd.id, prev => ({
       ...prev,
-      text: prev.text + logSuffix + `\n✗ ${toolEnd.name}: ${toolEnd.result.message}`,
+      text: prev.text + logSuffix + `\n✗ ${toolEnd.name}: ${(toolEnd.result as { type: 'error'; message: string }).message}`,
       color: 'red',
     }), { role: 'error', text: `✗ ${toolEnd.name}: ${toolEnd.result.message}` })
   } else {

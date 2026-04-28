@@ -9,7 +9,7 @@ import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js'
 import { saveConfig } from '../core/Config.js'
-import { App } from '../ui/App.js'
+import { App } from '../tui/App.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { LLMProvider } from '../core/providers/index.js'
 

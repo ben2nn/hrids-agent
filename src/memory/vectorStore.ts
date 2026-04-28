@@ -271,20 +271,23 @@ export class SeekDbStore implements VectorStore {
   async close(): Promise<void> { /* HTTP 无需关闭 */ }
 }
 
-// ── 工厂函数：根据环境变量创建对应后端 ──────────────────────────
+// ── 工厂函数：根据 config.json 创建对应后端 ──────────────────────────
 
 export function createVectorStore(db: Database.Database): VectorStore {
-  const backend = (process.env.VECTOR_STORE ?? 'sqlite').toLowerCase()
-  const url = process.env.VECTOR_STORE_URL ?? ''
-  const table = process.env.VECTOR_STORE_TABLE ?? 'memory_vectors'
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { loadConfig } = require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
+  const cfg = loadConfig().vectorStore ?? {}
+  const backend = (cfg.backend ?? 'sqlite').toLowerCase()
+  const url = cfg.url ?? ''
+  const table = cfg.table ?? 'memory_vectors'
 
   switch (backend) {
     case 'pgvector':
     case 'pg':
-      if (!url) throw new Error('VECTOR_STORE=pgvector 需要配置 VECTOR_STORE_URL')
+      if (!url) throw new Error('vectorStore.backend=pgvector 需要配置 vectorStore.url')
       return new PgVectorStore(url, table)
     case 'seekdb':
-      if (!url) throw new Error('VECTOR_STORE=seekdb 需要配置 VECTOR_STORE_URL')
+      if (!url) throw new Error('vectorStore.backend=seekdb 需要配置 vectorStore.url')
       return new SeekDbStore(url, table)
     default:
       return new SqliteVecStore(db)

@@ -1,23 +1,36 @@
-// Provider 初始化 —— 从 CLI 参数和环境变量创建 LLM 提供商
-import { createProvider, createProviderFromEnv } from '../core/providers/index.js'
+// Provider 初始化 —— 从 config.json 创建 LLM 提供商
+import { createProvider, createProviderFromConfig, normalizeProvider } from '../core/providers/index.js'
 import type { LLMProvider } from '../core/providers/index.js'
+import type { AgentConfig } from '../core/Config.js'
 
 export interface ProviderOpts {
-  model: string
+  /** CLI 传入的模型名（覆盖 config.model） */
+  model?: string
+  /** CLI 传入的 API Key（覆盖 config.apiKey） */
   apiKey?: string
+  /** CLI 传入的 Base URL */
   baseUrl?: string
+  /** CLI 传入的提供商名称 */
   provider?: string
+  /** 完整 config（来自 loadConfig()） */
+  config: AgentConfig
 }
 
 export function setupProvider(opts: ProviderOpts): LLMProvider {
-  const hasFallback = !!process.env.LLM_FALLBACK_1
-  if (hasFallback) {
-    return createProviderFromEnv()
+  const { config } = opts
+
+  // CLI 参数显式指定了 model/provider/apiKey → 精确创建，跳过 fallback 链
+  const hasCliOverride = opts.model || opts.provider || opts.apiKey
+  if (hasCliOverride) {
+    return createProvider({
+      model: opts.model ?? config.model,
+      apiKey: opts.apiKey ?? config.apiKey,
+      baseUrl: opts.baseUrl ?? config.baseUrl,
+      provider: opts.provider ? normalizeProvider(opts.provider) : config.provider,
+      customProviders: config.customProviders,
+    })
   }
-  return createProvider({
-    model: opts.model,
-    apiKey: opts.apiKey,
-    baseUrl: opts.baseUrl || undefined,
-    provider: opts.provider as 'anthropic' | 'openai' | 'deepseek' | 'groq' | 'ollama' | 'aliyun' | 'zhipu' | 'nvidia' | 'custom' | undefined,
-  })
+
+  // 无 CLI 覆盖 → 走 config.json 的完整配置（含 llm.fallbacks）
+  return createProviderFromConfig(config)
 }
