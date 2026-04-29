@@ -76,9 +76,11 @@ function formatMessagesForDisplay(
   // 第二遍：构建 DisplayMessage 列表
   const displayMessages: DisplayMessage[] = []
   let idx = 0
+  const baseTs = Date.now()
 
   for (const msg of rawMessages) {
-    const timestamp = Date.now() - (rawMessages.length - idx) * 1000
+    // 优先使用消息自带的 timestamp，无则用序号估算（兼容旧历史数据）
+    const timestamp = msg.timestamp ?? (baseTs - (rawMessages.length - idx) * 1000)
     idx++
 
     if (msg.role === 'user') {

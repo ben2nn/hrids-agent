@@ -1,9 +1,12 @@
 // 系统上下文构建器 —— 注入 Git 状态、AGENT.md 记忆文件等
-import { execSync } from 'child_process'
+import { exec, execSync } from 'child_process'
 import { existsSync, readFileSync, mkdirSync } from 'fs'
+import { promisify } from 'util'
 import { homedir } from 'os'
 import { join } from 'path'
 import { getMemoryStack } from '../memory/index.js'
+
+const execAsync = promisify(exec)
 
 export interface ContextInfo {
   gitStatus: string | null
@@ -44,21 +47,21 @@ export function getSessionWorkDir(sessionId: string): string {
 }
 
 // 读取 git 状态（分支、最近提交、工作区变更）
-// 结果按 cwd 分桶缓存 5 秒，避免每条消息都同步阻塞执行 3 次 git 命令
+// 结果按 cwd 分桶缓存 5 秒，避免每条消息都阻塞执行 3 次 git 命令
 // Gateway 多会话模式下不同会话的 cwd 不同，分桶避免缓存污染
 const _gitCacheMap = new Map<string, { result: string | null; ts: number }>()
 const GIT_CACHE_TTL_MS = 5000
 // 缓存条目上限，防止长期运行的 Gateway 进程内存泄漏
 const GIT_CACHE_MAX_ENTRIES = 200
 
-function getGitContext(cwd?: string): string | null {
+async function getGitContext(cwd?: string): Promise<string | null> {
   const key = cwd ?? ''
   const now = Date.now()
   const cached = _gitCacheMap.get(key)
   if (cached && now - cached.ts < GIT_CACHE_TTL_MS) {
     return cached.result
   }
-  const result = _fetchGitContext(cwd)
+  const result = await _fetchGitContext(cwd)
 
   // 超出上限时，淘汰最旧的条目（按插入顺序，Map 保证迭代顺序）
   if (!_gitCacheMap.has(key) && _gitCacheMap.size >= GIT_CACHE_MAX_ENTRIES) {
@@ -70,23 +73,21 @@ function getGitContext(cwd?: string): string | null {
   return result
 }
 
-function _fetchGitContext(cwd?: string): string | null {
-  const execOpts = cwd
-    ? { encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], cwd }
-    : { encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] }
+async function _fetchGitContext(cwd?: string): Promise<string | null> {
+  const opts = cwd ? { cwd } : {}
   try {
-    const isGit = execSync('git rev-parse --is-inside-work-tree 2>/dev/null', execOpts).trim()
-    if (isGit !== 'true') return null
+    const { stdout: isGitOut } = await execAsync('git rev-parse --is-inside-work-tree', opts)
+    if (isGitOut.trim() !== 'true') return null
 
-    const [branch, status, log] = [
-      execSync('git branch --show-current', execOpts).trim(),
-      execSync('git status --short', execOpts).trim(),
-      execSync('git log --oneline -5', execOpts).trim(),
-    ]
+    const [{ stdout: branch }, { stdout: status }, { stdout: gitLog }] = await Promise.all([
+      execAsync('git branch --show-current', opts),
+      execAsync('git status --short', opts),
+      execAsync('git log --oneline -5', opts),
+    ])
 
-    const parts = [`当前分支: ${branch}`]
-    if (status) parts.push(`工作区变更:\n${status}`)
-    if (log) parts.push(`最近提交:\n${log}`)
+    const parts = [`当前分支: ${branch.trim()}`]
+    if (status.trim()) parts.push(`工作区变更:\n${status.trim()}`)
+    if (gitLog.trim()) parts.push(`最近提交:\n${gitLog.trim()}`)
     return parts.join('\n')
   } catch {
     return null
@@ -98,7 +99,30 @@ function _fetchGitContext(cwd?: string): string | null {
 //   1. {cwd}/AGENT.md          —— 项目级记忆（随代码库存放）
 //   2. {cwd}/.hrids/AGENT.md   —— 项目级记忆（隐藏目录，适合不想提交到 git 的场景）
 //   3. ~/.hrids-agent/AGENT.md —— 用户级全局记忆（跨项目通用规则）
+//
+// 结果按 cwd 分桶缓存 30 秒，避免每条消息都重复读磁盘
+const _memFilesCacheMap = new Map<string, { result: string[]; ts: number }>()
+const MEM_FILES_CACHE_TTL_MS = 30_000
+const MEM_FILES_CACHE_MAX_ENTRIES = 100
+
 function findMemoryFiles(cwd: string): string[] {
+  const now = Date.now()
+  const cached = _memFilesCacheMap.get(cwd)
+  if (cached && now - cached.ts < MEM_FILES_CACHE_TTL_MS) {
+    return cached.result
+  }
+
+  const result = _fetchMemoryFiles(cwd)
+
+  if (!_memFilesCacheMap.has(cwd) && _memFilesCacheMap.size >= MEM_FILES_CACHE_MAX_ENTRIES) {
+    const oldestKey = _memFilesCacheMap.keys().next().value
+    if (oldestKey !== undefined) _memFilesCacheMap.delete(oldestKey)
+  }
+  _memFilesCacheMap.set(cwd, { result, ts: now })
+  return result
+}
+
+function _fetchMemoryFiles(cwd: string): string[] {
   const candidates = [
     join(cwd, 'AGENT.md'),
     join(cwd, '.hrids', 'AGENT.md'),
@@ -124,8 +148,10 @@ function findMemoryFiles(cwd: string): string[] {
 // cwd 参数可选，不传则使用 ~/.hrids-agent/work/（仅用于记忆文件查找）
 export async function buildSystemContext(basePrompt: string[], cwd?: string): Promise<string[]> {
   const resolvedCwd = cwd ?? getDefaultAgentCwd()
-  const gitCtx = getGitContext(resolvedCwd)
-  const memFiles = findMemoryFiles(resolvedCwd)
+  const [gitCtx, memFiles] = await Promise.all([
+    getGitContext(resolvedCwd),
+    Promise.resolve(findMemoryFiles(resolvedCwd)),
+  ])
 
   // 动态 section 追加到静态层之后，不影响静态层缓存
   const dynamicSections: string[] = []

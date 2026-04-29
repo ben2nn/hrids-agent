@@ -326,7 +326,9 @@ const CLASSIFY_RULES: ClassifyRule[] = [
       /写代码|修改代码|重构|debug|调试|bug|报错|错误.*修复|修复.*错误/i,
       /实现.*功能|添加.*功能|新增.*功能|开发.*模块/i,
       /typescript|javascript|python|rust|golang|java(?!script)/i,
-      /函数|类|接口|组件|模块|api/i,
+      /函数|类|接口|组件|模块/i,
+      // 只匹配"开发/实现/编写 API"，不匹配"调用 API"、"API 文档"等
+      /\bapi\b.*(开发|实现|编写|设计)|开发.*\bapi\b|实现.*\bapi\b/i,
     ],
   },
   {

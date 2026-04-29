@@ -157,6 +157,12 @@ export class AgentPool {
     const resolvers = this.taskResolvers.get(task.id) ?? []
     resolvers.forEach(r => r(task))
     this.taskResolvers.delete(task.id)
+    // 任务完成后延迟 5 分钟清理，保留一段时间供查询（如 getTask / listTasks）
+    if (task.status === 'completed' || task.status === 'failed') {
+      setTimeout(() => {
+        this.tasks.delete(task.id)
+      }, 5 * 60 * 1000)
+    }
   }
 
   private async runTask(task: AgentTask, tools: ToolDef[], systemPrompt: string[]) {

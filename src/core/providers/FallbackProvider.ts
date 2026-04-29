@@ -64,12 +64,11 @@ export class FallbackProvider implements LLMProvider {
 
   private providers: LLMProvider[]
   private groups: ProviderGroup[]
-  // 每个 provider 对应一个 circuit breaker（按扁平索引）
   private breakers: CircuitBreaker[]
-
-  // 当前活跃的平台索引和模型索引（跨重启持久化）
   private currentGroupIdx: number
   private currentModelIdx: number
+  // 互斥锁：防止并发子智能体同时修改 currentGroupIdx/currentModelIdx
+  private _advanceLock = false
 
   constructor(providers: LLMProvider[], groups?: ProviderGroup[]) {
     if (providers.length === 0) throw new Error('FallbackProvider 至少需要一个提供商')
@@ -77,58 +76,18 @@ export class FallbackProvider implements LLMProvider {
     this.groups = groups ?? []
     this.currentGroupIdx = 0
     this.currentModelIdx = 0
-    // 为每个 provider 创建独立的 circuit breaker
     const total = this.groups.length > 0
       ? this.groups.reduce((sum, g) => sum + g.providers.length, 0)
       : providers.length
     this.breakers = Array.from({ length: total }, () => new CircuitBreaker())
   }
 
-  // 获取当前 provider 对应的 circuit breaker 扁平索引
-  private currentBreakerIdx(): number {
-    if (this.groups.length === 0) return this.currentModelIdx
-    let idx = 0
-    for (let g = 0; g < this.currentGroupIdx; g++) {
-      idx += this.groups[g].providers.length
-    }
-    return idx + this.currentModelIdx
-  }
-
+  // 获取当前 provider（供 name/model/modelType getter 使用）
   private currentProvider(): LLMProvider {
     if (this.groups.length > 0) {
       return this.groups[this.currentGroupIdx].providers[this.currentModelIdx]
     }
     return this.providers[this.currentModelIdx]
-  }
-
-  // 推进到下一个可用模型，到末尾后循环回第一个，返回是否发生了循环（绕回头）
-  private advance(): { hasNext: boolean; wrapped: boolean } {
-    if (this.groups.length > 0) {
-      const group = this.groups[this.currentGroupIdx]
-      if (this.currentModelIdx < group.providers.length - 1) {
-        // 同平台下一个模型
-        this.currentModelIdx++
-        return { hasNext: true, wrapped: false }
-      }
-      if (this.currentGroupIdx < this.groups.length - 1) {
-        // 跨平台
-        this.currentGroupIdx++
-        this.currentModelIdx = 0
-        return { hasNext: true, wrapped: false }
-      }
-      // 已是最后一个，循环回第一个
-      this.currentGroupIdx = 0
-      this.currentModelIdx = 0
-      return { hasNext: true, wrapped: true }
-    }
-    // 无分组，打平列表
-    if (this.currentModelIdx < this.providers.length - 1) {
-      this.currentModelIdx++
-      return { hasNext: true, wrapped: false }
-    }
-    // 已是最后一个，循环回第一个
-    this.currentModelIdx = 0
-    return { hasNext: true, wrapped: true }
   }
 
   async *stream(
@@ -145,47 +104,69 @@ export class FallbackProvider implements LLMProvider {
       signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('aborted')) }, { once: true })
     })
 
-    // 从当前记住的位置开始尝试
-    // 每个模型最多重试 MAX_RETRIES_PER_MODEL 次，全部失败后切换下一个模型
     const totalProviders = this.groups.length > 0
       ? this.groups.reduce((sum, g) => sum + g.providers.length, 0)
       : this.providers.length
-    // failedSwitches：真实失败后切换的次数，用于判断是否所有模型都试过了
+
+    // 并发安全：每次 stream() 调用使用独立的局部索引，不修改实例状态
+    // 这样多个并发子智能体各自独立推进，不会互相干扰
+    let localGroupIdx = this.currentGroupIdx
+    let localModelIdx = this.currentModelIdx
+
+    const localCurrentProvider = () => {
+      if (this.groups.length > 0) {
+        return this.groups[localGroupIdx].providers[localModelIdx]
+      }
+      return this.providers[localModelIdx]
+    }
+
+    const localCurrentBreakerIdx = () => {
+      if (this.groups.length === 0) return localModelIdx
+      let idx = 0
+      for (let g = 0; g < localGroupIdx; g++) idx += this.groups[g].providers.length
+      return idx + localModelIdx
+    }
+
+    const localAdvance = () => {
+      if (this.groups.length > 0) {
+        const group = this.groups[localGroupIdx]
+        if (localModelIdx < group.providers.length - 1) { localModelIdx++; return }
+        if (localGroupIdx < this.groups.length - 1) { localGroupIdx++; localModelIdx = 0; return }
+        localGroupIdx = 0; localModelIdx = 0; return
+      }
+      if (localModelIdx < this.providers.length - 1) { localModelIdx++; return }
+      localModelIdx = 0
+    }
+
     let failedSwitches = 0
-    // skippedSwitches：熔断跳过的次数，用于判断是否所有模型都在熔断中
     let skippedSwitches = 0
 
     while (true) {
-      // 每次循环开头检查是否已中止
       if (signal?.aborted) return
 
-      const provider = this.currentProvider()
-      const breakerIdx = this.currentBreakerIdx()
+      const provider = localCurrentProvider()
+      const breakerIdx = localCurrentBreakerIdx()
       const breaker = this.breakers[breakerIdx]
       const platformInfo = this.groups.length > 0
-        ? `平台[${this.currentGroupIdx + 1}/${this.groups.length}]:${this.groups[this.currentGroupIdx].platformName} `
+        ? `平台[${localGroupIdx + 1}/${this.groups.length}]:${this.groups[localGroupIdx].platformName} `
         : ''
 
-      // Circuit breaker 熔断检查：跳过当前已熔断的 provider
       if (breaker.isOpen()) {
         log.warn(`${platformInfo}模型 ${provider.model} 处于熔断状态，跳过`, { breakerIdx })
-        this.advance()
+        localAdvance()
         skippedSwitches++
 
         if (skippedSwitches >= totalProviders) {
-          // 所有模型都熔断了，等待最短冷却时间后重试，避免 CPU 空转死循环
           const minWait = Math.min(...this.breakers.map(b => b.getTimeUntilOpen()))
-          const waitMs = Math.max(minWait, 1000) // 至少等 1s
+          const waitMs = Math.max(minWait, 1000)
           log.warn(`所有模型均处于熔断状态，等待 ${waitMs}ms 后重试`)
-          try { await sleep(waitMs) } catch { return } // abort 时直接退出
-          skippedSwitches = 0 // 重置计数，重新开始一轮
+          try { await sleep(waitMs) } catch { return }
+          skippedSwitches = 0
         }
         continue
       }
-      // 进入真实尝试，重置熔断跳过计数
       skippedSwitches = 0
 
-      // 对当前模型最多尝试 MAX_RETRIES_PER_MODEL 次
       let lastErr: unknown
 
       for (let attempt = 1; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
@@ -197,18 +178,18 @@ export class FallbackProvider implements LLMProvider {
 
         try {
           const gen = provider.stream(messages, tools, systemPrompt, maxTokens)
-          // 缓存实质性内容前的 usage/stop_reason 等元数据 chunk
           const preContentBuffer: StreamChunk[] = []
           let hasContent = false
 
           for await (const chunk of gen) {
-            // 已有实质性输出，锁定当前模型，直接透传剩余流（此时不再 fallback）
             if (chunk.type === 'text_delta' || chunk.type === 'tool_call') {
               if (!hasContent) {
                 hasContent = true
                 log.debug('LLM 开始输出，锁定当前模型', { model: provider.model, chunkType: chunk.type })
                 breaker.recordSuccess()
-                // 先把缓冲的元数据 chunk 补发出去
+                // 成功后同步实例状态，下次调用从此模型开始
+                this.currentGroupIdx = localGroupIdx
+                this.currentModelIdx = localModelIdx
                 for (const buffered of preContentBuffer) yield buffered
               }
               yield chunk
@@ -216,15 +197,12 @@ export class FallbackProvider implements LLMProvider {
             }
 
             if (hasContent) {
-              // 已锁定模型，直接透传所有后续 chunk（包括 done）
               yield chunk
               if (chunk.type === 'done') return
               continue
             }
 
-            // 尚未出现实质性内容，先缓冲元数据 chunk
             if (chunk.type === 'done') {
-              // 流结束但没有任何实质性内容，视为空响应，触发 fallback
               log.warn(`模型 ${provider.model} 返回空响应，触发 fallback`, { attempt })
               lastErr = new Error('模型返回空响应（无文本也无工具调用）')
               break
@@ -232,9 +210,8 @@ export class FallbackProvider implements LLMProvider {
             preContentBuffer.push(chunk)
           }
 
-          if (hasContent) return // 流正常结束（done chunk 已 yield）
+          if (hasContent) return
 
-          // 空响应（包括 generator 未发任何 chunk 就结束的情况）：继续下一次 attempt
           if (!lastErr) lastErr = new Error('模型返回空响应（generator 未发送任何 chunk）')
         } catch (err) {
           lastErr = err
@@ -243,24 +220,21 @@ export class FallbackProvider implements LLMProvider {
               `模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，将重试（${attempt}/${MAX_RETRIES_PER_MODEL}）`,
               { error: String(err) },
             )
-            // 指数退避：1s, 2s
-            try { await sleep(1000 * attempt) } catch { return } // abort 时直接退出
+            try { await sleep(1000 * attempt) } catch { return }
           }
         }
       }
 
-      // 当前模型 MAX_RETRIES_PER_MODEL 次全部失败，记录到 circuit breaker 并切换下一个模型
       breaker.recordFailure()
-      this.advance()
+      localAdvance()
       failedSwitches++
 
-      const next = this.currentProvider()
+      const next = localCurrentProvider()
       const nextPlatform = this.groups.length > 0
-        ? `平台[${this.currentGroupIdx + 1}]:${this.groups[this.currentGroupIdx].platformName}/`
+        ? `平台[${localGroupIdx + 1}]:${this.groups[localGroupIdx].platformName}/`
         : ''
 
       if (failedSwitches >= totalProviders) {
-        // 所有模型都真实失败过一次，无法继续
         log.error('所有模型均失败，无法继续', { error: String(lastErr), failedSwitches })
         throw new Error(
           `所有模型均失败（每个模型重试 ${MAX_RETRIES_PER_MODEL} 次，共切换 ${failedSwitches} 次）。` +

@@ -10,7 +10,8 @@ const log = logger.child({ component: 'query-engine' })
 export interface Message {
   role: 'user' | 'assistant'
   content: string | ContentBlock[]
-  requestId?: string   // 关联到请求 ID，用于前端消息分组
+  timestamp?: number       // 消息创建时间（ms），写入 history 时自动填充
+  requestId?: string       // 关联到请求 ID，用于前端消息分组
   trigger?: 'user' | 'cron'  // 触发来源，cron 表示定时任务触发
   cronDescription?: string   // 定时任务描述（trigger=cron 时有值）
 }
@@ -671,10 +672,10 @@ ${contentToSummarize}
       try { await this.onBeforeSend(msgText) } catch { /* 钩子失败不阻断执行 */ }
     }
 
-    // 规范化用户消息为 Message 对象，并添加 requestId 和 trigger
+    // 规范化用户消息为 Message 对象，并添加 requestId、trigger、timestamp
     const userMsg: Message = typeof userMessage === 'string'
-      ? { role: 'user', content: userMessage, requestId: this.currentRequestId ?? undefined }
-      : { ...userMessage, requestId: this.currentRequestId ?? userMessage.requestId }
+      ? { role: 'user', content: userMessage, requestId: this.currentRequestId ?? undefined, timestamp: Date.now() }
+      : { ...userMessage, requestId: this.currentRequestId ?? userMessage.requestId, timestamp: userMessage.timestamp ?? Date.now() }
     
     // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行（复用上方已提取的 msgText）
     const isQueryMode = this.isQueryIntent(msgText)
@@ -774,6 +775,7 @@ ${contentToSummarize}
           this.history.push({
             role: 'assistant',
             content: assistantBlocks,
+            timestamp: Date.now(),
             requestId: this.currentRequestId ?? undefined,
             trigger: this.currentTrigger,
             ...(this.currentCronDescription ? { cronDescription: this.currentCronDescription } : {}),
