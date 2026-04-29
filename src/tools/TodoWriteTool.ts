@@ -38,7 +38,7 @@ export interface Todo {
   priority: 'high' | 'medium' | 'low'
 }
 
-function loadTodos(): Todo[] {
+export function loadTodos(): Todo[] {
   const todoFile = getTodoFile()
   if (!existsSync(todoFile)) return []
   try {
@@ -136,24 +136,63 @@ export const TodoWriteTool: ToolDef<typeof inputSchema> = {
     const existing = loadTodos()
     const { merged, protectedCount } = mergeWithProtection(existing, todos)
 
-    saveTodos(merged)
+    // 强制约束：同一时刻只能有一个 in_progress 任务
+    // 如果 LLM 传入多个 in_progress，保留优先级最高的那个，其余降回 pending
+    const inProgressItems = merged.filter(t => t.status === 'in_progress')
+    let normalized = merged
+    if (inProgressItems.length > 1) {
+      // 按优先级排序：high > medium > low，取第一个保留，其余降为 pending
+      const priorityOrder = { high: 0, medium: 1, low: 2 }
+      inProgressItems.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority])
+      const keepId = inProgressItems[0]!.id
+      normalized = merged.map(t =>
+        t.status === 'in_progress' && t.id !== keepId
+          ? { ...t, status: 'pending' as TodoStatus }
+          : t
+      )
+    }
+
+    // 所有任务都已完成时自动清空列表（无需 LLM 手动确认）
+    const allDone = normalized.every(t => t.status === 'completed')
+    const toSave = allDone ? [] : normalized
+
+    saveTodos(toSave)
 
     // 若有 sessionId 且有回调，触发 todos_updated 推送
     const sessionId = getCurrentSessionId()
     if (sessionId && todosUpdatedCallback) {
-      todosUpdatedCallback(sessionId, merged)
+      todosUpdatedCallback(sessionId, toSave)
     }
 
-    const summary = merged.map(t => {
-      const icon = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '○'
-      return `${icon} [${t.priority}] ${t.content}`
-    }).join('\n')
+    // 统计各状态数量，用于生成驱动性返回消息
+    const inProgress = normalized.filter(t => t.status === 'in_progress')
+    const pending = normalized.filter(t => t.status === 'pending')
+    const completed = normalized.filter(t => t.status === 'completed')
 
     const protectMsg = protectedCount > 0
-      ? `\n\n⚠️ 注意：${protectedCount} 个未完成任务被自动保留（不允许删除未完成的任务）。`
+      ? `\n⚠️ ${protectedCount} 个未完成任务被自动保留。`
       : ''
 
-    return { type: 'success', output: `任务列表已更新:\n${summary}${protectMsg}` }
+    // 根据任务状态生成驱动性返回消息（参考 claude-code 的设计）
+    let statusMsg: string
+    if (allDone) {
+      // 全部完成：清空列表，提示可以输出最终结果
+      statusMsg = `所有 ${completed.length} 个任务已完成，任务列表已清空。请输出最终结果。`
+    } else if (inProgress.length > 0) {
+      // 有进行中的任务：提示继续执行
+      const currentTask = inProgress[0]!  // 已判断 length > 0，安全
+      const pendingHint = pending.length > 0 ? `，之后还有 ${pending.length} 个待执行` : ''
+      statusMsg = `任务列表已更新。当前执行中：「${currentTask.content}」${pendingHint}。请继续完成当前任务。`
+    } else if (pending.length > 0) {
+      // 只有待执行任务（刚建立计划）：提示开始第一个
+      const firstTask = pending[0]!  // 已判断 length > 0，安全
+      statusMsg = `任务计划已建立（共 ${normalized.length} 项）。请从第一个任务开始：将「${firstTask.content}」标记为 in_progress，然后执行。`
+    } else {
+      // 异常情况：没有任何任务（理论上不应该到这里，因为前面拒绝了空数组）
+      statusMsg = `任务列表已更新（${normalized.length} 项）。`
+    }
+
+    return { type: 'success', output: statusMsg + protectMsg }
   },
 }
 
@@ -174,6 +213,17 @@ export const TodoReadTool: ToolDef<typeof readSchema> = {
       const icon = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '○'
       return `${icon} [${t.id}] [${t.priority}] ${t.content} (${t.status})`
     })
-    return { type: 'success', output: lines.join('\n') }
+
+    // 附加驱动性提示：告知当前应该做什么
+    const inProgress = todos.filter(t => t.status === 'in_progress')
+    const pending = todos.filter(t => t.status === 'pending')
+    let hint = ''
+    if (inProgress.length > 0) {
+      hint = `\n当前执行中：「${inProgress[0]!.content}」，请继续完成。`
+    } else if (pending.length > 0) {
+      hint = `\n下一步：将「${pending[0]!.content}」标记为 in_progress，然后执行。`
+    }
+
+    return { type: 'success', output: lines.join('\n') + hint }
   },
 }

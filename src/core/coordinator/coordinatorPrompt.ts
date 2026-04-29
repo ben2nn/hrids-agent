@@ -60,7 +60,8 @@ const SECTION_TODO = `# 任务列表管理
  - 任务开始时一次性列出所有步骤（todos 数组不能为空）
  - 执行中只允许更新状态（pending → in_progress → completed）或在末尾新增任务
  - 严禁删除或减少未完成（pending/in_progress）的任务
- - 开始某步骤前标记 in_progress，完成后立即标记 completed
+ - 同一时刻只能有一个任务处于 in_progress 状态
+ - 完成一个步骤后立即标记 completed，再将下一个 pending 任务标记为 in_progress
  - 禁止用空 todos 数组调用 todo_write，那等于清空计划`
 
 const SECTION_DECISION = `# 决策上报

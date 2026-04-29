@@ -8,7 +8,7 @@ import { QueryEngine } from '../core/QueryEngine.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { runWithCwd, getGlobalCwd } from '../core/cwd.js'
-import { getCurrentSessionId } from '../core/sessionContext.js'
+import { getCurrentSessionId, runWithSession } from '../core/sessionContext.js'
 
 // 懒加载记忆系统，读取全局记忆（跨会话共享）
 async function getMemoryContext(): Promise<string> {
@@ -102,16 +102,20 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
 
       try {
         // runWithCwd 创建独立的 AsyncLocalStorage 上下文，不影响父调用链的 cwd
-        await runWithCwd(subCwd, async () => {
-          for await (const event of subEngine.send(input.prompt)) {
-            if (event.type === 'text_delta') {
-              result += event.delta
-            } else if (event.type === 'error') {
-              hasError = true
-              result += `\n错误: ${event.message}`
+        // runWithSession 给子智能体独立的 sessionId，避免 todo 等工具污染父会话状态
+        const subSessionId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        await runWithCwd(subCwd, () =>
+          runWithSession(subSessionId, async () => {
+            for await (const event of subEngine.send(input.prompt)) {
+              if (event.type === 'text_delta') {
+                result += event.delta
+              } else if (event.type === 'error') {
+                hasError = true
+                result += `\n错误: ${event.message}`
+              }
             }
-          }
-        })
+          })
+        )
       } catch (err) {
         return { type: 'error', message: `子智能体执行失败: ${String(err)}` }
       } finally {
