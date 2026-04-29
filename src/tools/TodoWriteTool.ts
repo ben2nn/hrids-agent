@@ -72,6 +72,46 @@ const inputSchema = z.object({
 })
 
 /**
+ * 从 XML 格式的 todos 字符串中解析任务列表。
+ * 兼容模型偶尔输出的 XML 格式：
+ *   <todos>
+ *     <item>
+ *       <id>1</id>
+ *       <content>任务内容</content>
+ *       <status>pending</status>
+ *       <priority>high</priority>
+ *     </item>
+ *   </todos>
+ */
+function parseTodosFromXml(xml: string): Todo[] {
+  const todos: Todo[] = []
+  // 提取所有 <item>...</item> 块
+  const itemRegex = /<item>([\s\S]*?)<\/item>/g
+  let itemMatch: RegExpExecArray | null
+  while ((itemMatch = itemRegex.exec(xml)) !== null) {
+    const block = itemMatch[1]!
+    const id = extractXmlTag(block, 'id')
+    const content = extractXmlTag(block, 'content')
+    const status = extractXmlTag(block, 'status')
+    const priority = extractXmlTag(block, 'priority')
+    if (!id || !content) continue
+    todos.push({
+      id,
+      content,
+      status: (['pending', 'in_progress', 'completed'].includes(status ?? '') ? status : 'pending') as TodoStatus,
+      priority: (['high', 'medium', 'low'].includes(priority ?? '') ? priority : 'medium') as 'high' | 'medium' | 'low',
+    })
+  }
+  return todos
+}
+
+/** 从 XML 片段中提取指定标签的文本内容 */
+function extractXmlTag(xml: string, tag: string): string | null {
+  const match = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`))
+  return match ? match[1]!.trim() : null
+}
+
+/**
  * 保护现有计划的完整性：
  * - 如果列表为空（初次建立），直接写入
  * - 如果列表已存在，禁止删除 pending/in_progress 的任务（只能新增或更新状态）
@@ -119,11 +159,16 @@ export const TodoWriteTool: ToolDef<typeof inputSchema> = {
     // 防御：LLM 有时会传字符串或非数组，做兼容处理
     let todos = input.todos
     if (!Array.isArray(todos)) {
+      const raw = todos as unknown as string
+      // 先尝试 JSON 解析
+      let parsed: unknown = null
       try {
-        todos = JSON.parse(todos as unknown as string)
+        parsed = JSON.parse(raw)
       } catch {
-        todos = []
+        // JSON 失败，尝试解析 XML 格式（<todos><item>...</item></todos>）
+        parsed = parseTodosFromXml(raw)
       }
+      todos = Array.isArray(parsed) ? parsed : []
     }
     if (!Array.isArray(todos)) todos = []
 
