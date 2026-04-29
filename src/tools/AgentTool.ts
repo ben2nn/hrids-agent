@@ -104,7 +104,8 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
       try {
         // runWithCwd 创建独立的 AsyncLocalStorage 上下文，不影响父调用链的 cwd
         // runWithSession 给子智能体独立的 sessionId，避免 todo 等工具污染父会话状态
-        const subSessionId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        // 使用 "ephemeral-" 前缀标记为临时会话，与 AgentPool 保持一致，便于 pruneOldSessions 清理
+        const subSessionId = `ephemeral-sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
         await runWithCwd(subCwd, () =>
           runWithSession(subSessionId, async () => {
             for await (const event of subEngine.send(input.prompt)) {

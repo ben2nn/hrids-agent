@@ -122,8 +122,8 @@ describe('PermissionManager', () => {
     it('getMode 返回当前模式', () => {
       const pm = new PermissionManager('ask', async () => false)
       expect(pm.getMode()).toBe('ask')
-      pm.setMode('auto')
-      expect(pm.getMode()).toBe('auto')
+      pm.setMode('craft')
+      expect(pm.getMode()).toBe('craft')
     })
   })
 })

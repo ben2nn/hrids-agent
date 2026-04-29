@@ -226,17 +226,24 @@ export function pruneOldSessions(opts: {
   const maxAgeDays = opts.maxAgeDays ?? 90
   const cutoff = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString()
 
-  const sessions = listSessions() // 已按 updatedAt 倒序
+  ensureDir(SESSIONS_DIR)
   let deleted = 0
 
+  // 第一步：直接扫描目录，清理所有 ephemeral- 前缀的临时会话
+  // 注意：listSessions() 已过滤 ephemeral-，所以必须直接读目录
+  const allDirs = readdirSync(SESSIONS_DIR, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+  for (const d of allDirs) {
+    if (d.name.startsWith('ephemeral-')) {
+      deleteSessionFromDisk(d.name)
+      deleted++
+    }
+  }
+
+  // 第二步：清理过期的普通会话（listSessions 已排除 ephemeral-）
+  const sessions = listSessions() // 已按 updatedAt 倒序
   for (let i = 0; i < sessions.length; i++) {
     const s = sessions[i]
-    // ephemeral- 前缀的临时会话（子智能体产生）：无论多新都直接清理
-    if (s.id.startsWith('ephemeral-')) {
-      deleteSessionFromDisk(s.id)
-      deleted++
-      continue
-    }
     // 保留最近 keepCount 个，无论多旧
     if (i < keepCount) continue
     // 超过 maxAgeDays 的才删除
