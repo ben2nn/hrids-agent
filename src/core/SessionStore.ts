@@ -1,5 +1,5 @@
 // 会话持久化 —— 将对话历史保存到本地磁盘
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, rmSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, rmSync, renameSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { Message } from './QueryEngine.js'
@@ -92,7 +92,11 @@ export function saveSession(
     lastUserMessage,
     workDir: workDir ?? existing?.workDir,
   }
-  writeFileSync(join(sessionDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8')
+  // 原子写入 meta.json：先写 .tmp 再 rename，防止并发写入时文件损坏
+  const metaPath = join(sessionDir, 'meta.json')
+  const metaTmp = metaPath + '.tmp'
+  writeFileSync(metaTmp, JSON.stringify(meta, null, 2), 'utf-8')
+  renameSync(metaTmp, metaPath)
 }
 
 export function loadSession(sessionId: string): Message[] | null {

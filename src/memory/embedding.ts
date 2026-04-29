@@ -374,5 +374,9 @@ export function getEmbeddingProvider(): AnyEmbeddingProvider {
 
 /** 重置单例（用于配置变更后重新初始化） */
 export function resetEmbeddingProvider(config?: EmbeddingConfig) {
+  // 重置时清空旧 provider 的缓存（如果是 EmbeddingProvider 实例）
+  if (_provider instanceof EmbeddingProvider) {
+    (_provider as EmbeddingProvider)['cache'].clear()
+  }
   _provider = config ? new EmbeddingProvider(config) : createEmbeddingProviderFromEnv()
 }

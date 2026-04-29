@@ -14,7 +14,7 @@ import { loadConfig } from '../core/Config.js'
 import { setGlobalCwd, getGlobalCwd, runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
-import { setTodoSessionId, setTodosUpdatedCallback } from '../tools/TodoWriteTool.js'
+import { setTodosUpdatedCallback } from '../tools/TodoWriteTool.js'
 import { resolveDecision, setGatewayDecisionCallback } from '../tools/DecisionTool.js'
 import { logger } from '../core/logger.js'
 import { auditLog } from '../core/audit.js'
@@ -201,7 +201,8 @@ export class SessionManager {
       archiveSession(sessionId, summary)
     }
 
-    setTodoSessionId(sessionId)
+    // setTodoSessionId 已是 no-op（TodoWriteTool 通过 AsyncLocalStorage 自动获取 sessionId）
+    // 仅注册 todos_updated 推送回调，供前端实时更新任务列表
     setTodosUpdatedCallback((sid, todos) => {
       const s = this.sessions.get(sid)
       if (s) {
@@ -256,7 +257,6 @@ export class SessionManager {
     session.subscribers.clear()
 
     await disconnectAllMcp(id)
-    setTodoSessionId(null)
     setGatewayAskCallback(null, id)
     setGatewayDecisionCallback(null, id)
     TeamManager.destroySession(id)
@@ -597,7 +597,7 @@ export class SessionManager {
     const coordinatorPrompt = getCoordinatorSystemPrompt(content, allTools)
 
     // 追加动态层（记忆、环境信息），确保每条消息都能看到最新的记忆和 Git 状态
-    const fullPrompt = await buildSystemContext(coordinatorPrompt, session.info.cwd)
+    const fullPrompt = await buildSystemContext(coordinatorPrompt, session.info.cwd, sessionId)
 
     // plan 模式：动态注入规划模式系统提示，让 LLM 知道只做分析不执行写操作
     if (session.permissions.getMode() === 'plan') {

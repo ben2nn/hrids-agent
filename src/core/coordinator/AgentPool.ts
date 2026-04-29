@@ -4,6 +4,7 @@ import { PermissionManager } from '../PermissionManager.js'
 import { MessageBus } from './MessageBus.js'
 import { runWithAgentName } from './agentContext.js'
 import { runWithSession } from '../sessionContext.js'
+import { runWithCwd, getGlobalCwd } from '../cwd.js'
 import type { LLMProvider } from '../providers/index.js'
 import type { ToolDef } from '../Tool.js'
 
@@ -217,22 +218,27 @@ export class AgentPool {
 
     let result = ''
     try {
-      // runWithAgentName 将智能体名称注入 AsyncLocalStorage，供 send_message 工具读取
-      // runWithSession 给子智能体独立的 sessionId 上下文，与父会话完全隔离
-      await runWithAgentName(task.name, () =>
-        runWithSession(subSessionId, async () => {
-          for await (const ev of engine.send(task.prompt)) {
-            if (ev.type === 'text_delta') result += ev.delta
-            else if (ev.type === 'error') {
-              task.status = 'failed'
-              task.error = ev.message
-              task.completedAt = Date.now()
-              this.bus.unregister(task.name)
-              this._notifyWaiters(task)
-              return
+      // 获取父会话的 cwd，子智能体继承但在独立上下文中运行，避免 cd 命令污染父会话
+      const parentCwd = getGlobalCwd()
+      // runWithCwd：子智能体的 cd 命令只影响自己的上下文，不影响父会话
+      // runWithAgentName：注入智能体名称，供 send_message 工具读取
+      // runWithSession：独立 sessionId，避免 todo 等工具污染父会话状态
+      await runWithCwd(parentCwd, () =>
+        runWithAgentName(task.name, () =>
+          runWithSession(subSessionId, async () => {
+            for await (const ev of engine.send(task.prompt)) {
+              if (ev.type === 'text_delta') result += ev.delta
+              else if (ev.type === 'error') {
+                task.status = 'failed'
+                task.error = ev.message
+                task.completedAt = Date.now()
+                this.bus.unregister(task.name)
+                this._notifyWaiters(task)
+                return
+              }
             }
-          }
-        })
+          })
+        )
       )
       task.result = result
       task.status = 'completed'

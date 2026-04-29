@@ -4,6 +4,7 @@ import type { PermissionManager } from './PermissionManager.js'
 import { CostTracker } from './CostTracker.js'
 import { logger } from './logger.js'
 import { auditLog } from './audit.js'
+import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
 
 const log = logger.child({ component: 'query-engine' })
 
@@ -57,93 +58,6 @@ export type StreamEvent =
   | { type: 'continuation_needed' }  // 非自动模式下，LLM 表达了继续意图但需用户确认
   | { type: 'done' }
   | { type: 'error'; message: string }
-
-// ── DSML 文本工具调用解析 ─────────────────────────────────────────────────────
-// DSML（DeepSeek Markup Language）是 DeepSeek 模型的私有工具调用格式。
-// 当模型不走标准 function calling 时，会以文本形式输出工具调用。
-//
-// 支持两种格式：
-//   带参数：<|DSML|invoke name="todo_write">
-//             <|DSML|parameter name="todos"><![CDATA[...]]]></|DSML|parameter>
-//           </|DSML|invoke>
-//   无参数：<|DSML|invoke name="todo_read"/>
-//
-// 此函数从文本中提取所有工具调用，返回与 function calling 相同的结构。
-// 仅对 DeepSeek 模型启用（通过 provider name 或 model 名前缀判断）
-function isDsmlProvider(providerName: string, modelName: string): boolean {
-  const name = providerName.toLowerCase()
-  const model = modelName.toLowerCase()
-  return name.includes('deepseek') || model.startsWith('deepseek-')
-}
-
-// 使用实例级计数器（在 QueryEngine 构造时创建），避免模块级全局状态
-// 在多会话并发场景下，每个 QueryEngine 实例有独立的计数器序列
-function makeDsmlIdGenerator() {
-  let counter = 0
-  return () => `dsml_${++counter}_${Date.now()}`
-}
-
-function parseDsmlToolCalls(
-  text: string,
-  genId: () => string,
-): Array<{ id: string; name: string; input: unknown }> {
-  const results: Array<{ id: string; name: string; input: unknown }> = []
-
-  // 同时匹配自闭合标签（无参数）和普通标签（有参数）
-  // 自闭合：<|DSML|invoke name="foo"/>
-  // 普通：  <|DSML|invoke name="foo">...</|DSML|invoke>
-  const invokeRegex = /<\|DSML\|invoke\s+name="([^"]+)"(?:\s*\/>|([\s\S]*?)<\/\|DSML\|invoke>)/g
-  let invokeMatch: RegExpExecArray | null
-
-  while ((invokeMatch = invokeRegex.exec(text)) !== null) {
-    const toolName = invokeMatch[1]
-    const invokeBody = invokeMatch[2] ?? ''  // 自闭合时为 undefined，用空串
-    const params: Record<string, unknown> = {}
-
-    // 匹配 <|DSML|parameter name="...">...</|DSML|parameter>（含 CDATA）
-    const paramRegex = /<\|DSML\|parameter\s+name="([^"]+)">([\s\S]*?)<\/\|DSML\|parameter>/g
-    let paramMatch: RegExpExecArray | null
-
-    while ((paramMatch = paramRegex.exec(invokeBody)) !== null) {
-      const paramName = paramMatch[1]
-      let paramValue = paramMatch[2]
-
-      // 去除 CDATA 包装（不 trim，保留内部原始内容）
-      const cdataMatch = paramValue.match(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/)
-      if (cdataMatch) {
-        paramValue = cdataMatch[1]
-      } else {
-        paramValue = paramValue.trim()
-      }
-
-      // 尝试 JSON 解析，失败则保留字符串
-      try {
-        params[paramName] = JSON.parse(paramValue)
-      } catch {
-        params[paramName] = paramValue
-      }
-    }
-
-    results.push({
-      id: genId(),
-      name: toolName,
-      input: params,
-    })
-  }
-
-  return results
-}
-
-// 从文本中移除所有 DSML 工具调用块，返回清理后的纯文本
-// 用于在解析到工具调用后，避免把 DSML 标记显示给用户
-function stripDsmlBlocks(text: string): string {
-  // 移除整个 <|DSML|tool_calls>...</|DSML|tool_calls> 外层包装（如果有）
-  let result = text.replace(/<\|DSML\|tool_calls>[\s\S]*?<\/\|DSML\|tool_calls>/g, '')
-  // 移除残留的单个 invoke 块（自闭合或普通）
-  result = result.replace(/<\|DSML\|invoke\s+name="[^"]+"\s*\/>/g, '')
-  result = result.replace(/<\|DSML\|invoke\s+name="[^"]+">([\s\S]*?)<\/\|DSML\|invoke>/g, '')
-  return result.trim()
-}
 
 // ── Token 估算 ────────────────────────────────────────────────────────────────
 // 优化1：区分中英文字符，中文约 1.5 token/字，英文约 0.25 token/字符
@@ -212,8 +126,6 @@ export class QueryEngine {
   private currentTrigger: 'user' | 'cron' = 'user'
   // 当前 cron 任务的描述（仅 trigger=cron 时有值）
   private currentCronDescription: string | undefined = undefined
-  // 实例级 DSML 工具调用 ID 生成器，避免模块级全局计数器在多会话并发时共享状态
-  private readonly _genDsmlId = makeDsmlIdGenerator()
 
   constructor(config: QueryEngineConfig) {
     this.config = config
@@ -549,18 +461,15 @@ ${contentToSummarize}
 
         if (chunk.type === 'text_delta' && chunk.delta) {
           fullText += chunk.delta
-          // DeepSeek 模型：检测到 DSML 标记前正常流式发出，检测到后停止发出。
+          // 检测到 DSML invoke 标记前正常流式发出，检测到后停止发出。
           // 流结束后在 send() 中统一处理：有工具调用则补发清理后的正文，否则补发剩余文本。
           // 这样既保留了正文部分的流式体验，又避免 DSML 标记出现在前端。
-          const isDsml = isDsmlProvider(this.config.provider.name, this.config.provider.model)
-          if (!isDsml) {
-            // 非 DeepSeek 模型：直接流式发出
-            yield { type: 'text_delta', delta: chunk.delta }
-          } else if (!fullText.includes('<|DSML|')) {
-            // DeepSeek 模型，尚未出现 DSML 标记：正常流式发出
+          // hasDsmlMarker 检测 <|DSML|invoke，不依赖 provider 名称，兼容任何输出 DSML 的模型。
+          if (!hasDsmlMarker(fullText)) {
+            // 尚未出现 DSML invoke 标记：正常流式发出
             yield { type: 'text_delta', delta: chunk.delta }
           }
-          // DeepSeek 模型，已出现 DSML 标记：停止发出后续 delta，等流结束后统一处理
+          // 已出现 DSML invoke 标记：停止发出后续 delta，等流结束后统一处理
         } else if (chunk.type === 'tool_call' && chunk.toolCall) {
           toolCalls.push(chunk.toolCall)
         } else if (chunk.type === 'usage' && chunk.usage) {
@@ -882,42 +791,37 @@ ${contentToSummarize}
           })
         }
 
-        // 没有工具调用：先尝试从文本中解析 DSML 格式工具调用（仅 DeepSeek 模型）
-        if (toolCalls.length === 0
-          && isDsmlProvider(this.config.provider.name, this.config.provider.model)
-          && fullText.includes('<|DSML|')) {
-          const dsmlCalls = parseDsmlToolCalls(fullText, this._genDsmlId)
-          if (dsmlCalls.length > 0) {
-            log.info('从文本中解析到 DSML 工具调用', { turn: turns, count: dsmlCalls.length, tools: dsmlCalls.map(t => t.name) })
-            toolCalls.push(...dsmlCalls)
-
-            // 清理 fullText：去掉 DSML 块，只保留正文部分
-            const cleanText = stripDsmlBlocks(fullText)
+        // 没有工具调用：尝试从文本中解析 DSML 格式工具调用
+        // parseDsml 内部通过 hasDsmlMarker 检测，不依赖 provider 名称
+        if (toolCalls.length === 0 && hasDsmlMarker(fullText)) {
+          const dsmlResult = parseDsml(fullText)
+          if (dsmlResult.toolCalls.length > 0) {
+            log.info('从文本中解析到 DSML 工具调用', {
+              turn: turns,
+              count: dsmlResult.toolCalls.length,
+              tools: dsmlResult.toolCalls.map(t => t.name),
+            })
+            toolCalls.push(...dsmlResult.toolCalls)
 
             // 补发清理后的正文 delta（之前在 streamOneTurn 中被缓冲了）
-            if (cleanText) yield { type: 'text_delta', delta: cleanText }
+            if (dsmlResult.cleanText) yield { type: 'text_delta', delta: dsmlResult.cleanText }
 
             // 重新构建 assistant 历史块（包含解析出的工具调用）
             const lastAssistant = this.history[this.history.length - 1]
             if (lastAssistant?.role === 'assistant') {
               const blocks: ContentBlock[] = []
-              if (cleanText) blocks.push({ type: 'text', text: cleanText })
-              for (const tc of dsmlCalls) {
+              if (dsmlResult.cleanText) blocks.push({ type: 'text', text: dsmlResult.cleanText })
+              for (const tc of dsmlResult.toolCalls) {
                 blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
               }
-              this.history[this.history.length - 1] = {
-                ...lastAssistant,
-                content: blocks,
-              }
+              this.history[this.history.length - 1] = { ...lastAssistant, content: blocks }
             }
           } else {
-            // 有 DSML 标记但解析不出工具调用（格式不完整）：补发完整 fullText 给前端
+            // 有 DSML invoke 标记但解析不出工具调用（格式不完整）：补发完整 fullText 给前端
             yield { type: 'text_delta', delta: fullText }
           }
-        } else if (isDsmlProvider(this.config.provider.name, this.config.provider.model) && toolCalls.length === 0) {
-          // DeepSeek 模型但无 DSML 标记：fullText 已全部通过流式发出，无需补发
-          // （如果有 DSML 标记但解析失败，上面的 else 分支已处理）
         }
+        // 注意：无 DSML 标记时 fullText 已在 streamOneTurn 中全部流式发出，无需补发
 
         // 没有工具调用：检查是否需要 continuation 或直接结束
         if (toolCalls.length === 0) {
