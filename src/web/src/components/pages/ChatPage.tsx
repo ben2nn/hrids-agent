@@ -6,6 +6,7 @@ import { MessageList } from '../chat/MessageList.js'
 import { InputBar } from '../chat/InputBar.js'
 import { PermissionModal } from '../modals/PermissionModal.js'
 import { AskUserModal } from '../modals/AskUserModal.js'
+import { DecisionModal } from '../modals/DecisionModal.js'
 import { Toast } from '../ui/Toast.js'
 import type { InputBarHandle } from '../chat/InputBar.js'
 
@@ -233,13 +234,16 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
   const clearWsMaxRetries = useSessionStore((s) => s.clearWsMaxRetries)
   const sendPermissionReply = useSessionStore((s) => s.sendPermissionReply)
   const sendUserReply = useSessionStore((s) => s.sendUserReply)
+  const sendDecisionReply = useSessionStore((s) => s.sendDecisionReply)
   const createSession = useSessionStore((s) => s.createSession)
   const sendMessage = useSessionStore((s) => s.sendMessage)
 
   const pendingPermission = useMessageStore((s) => s.pendingPermission)
   const pendingAskUser = useMessageStore((s) => s.pendingAskUser)
+  const pendingDecision = useMessageStore((s) => s.pendingDecision)
   const clearPermission = useMessageStore((s) => s.clearPermission)
   const clearAskUser = useMessageStore((s) => s.clearAskUser)
+  const clearDecision = useMessageStore((s) => s.clearDecision)
   const appendUserMessage = useMessageStore((s) => s.appendUserMessage)
 
   // ── 首页创建中状态 ─────────────────────────────────────────────────────
@@ -275,6 +279,11 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
     ? pendingAskUser.get(activeSessionId) ?? null
     : null
 
+  // ── decision_request 决策 ──────────────────────────────────────────────
+  const currentDecision = activeSessionId
+    ? pendingDecision.get(activeSessionId) ?? null
+    : null
+
   // ── InputBar ref（供 RightPanel 的 FileTreeNode 插入文本） ─────────────
   const inputBarRef = useRef<InputBarHandle>(null)
 
@@ -294,6 +303,13 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
     appendUserMessage(activeSessionId, answer)
     sendUserReply(activeSessionId, answer)
     clearAskUser(activeSessionId)
+  }
+
+  // ── decision_request 回复处理 ──────────────────────────────────────────
+  function handleDecisionReply(answer: string) {
+    if (!activeSessionId || !currentDecision) return
+    sendDecisionReply(activeSessionId, answer)
+    clearDecision(activeSessionId)
   }
 
   // ── WS 超限 toast 显示 ─────────────────────────────────────────────────
@@ -435,6 +451,15 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
           sessionId={activeSessionId}
           askUserState={currentAskUser}
           onReply={handleAskUserReply}
+        />
+      )}
+
+      {/* 决策请求弹窗 */}
+      {currentDecision && activeSessionId && (
+        <DecisionModal
+          sessionId={activeSessionId}
+          decision={currentDecision}
+          onReply={handleDecisionReply}
         />
       )}
 

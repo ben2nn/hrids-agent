@@ -131,7 +131,7 @@ export class SessionManager {
           type: 'permission_request',
           toolName: permReq.toolName,
           description: permReq.description,
-          isReadonly: permReq.isReadonly,
+          readonly: permReq.isReadonly,
           isDestructive: permReq.isDestructive,
           ruleContent: permReq.ruleContent,
           key,
@@ -605,21 +605,21 @@ export class SessionManager {
       const writeTools = allTools.filter(t => !t.readonly).map(t => t.name)
 
       const planModeAppendix = `## 当前模式：Plan（规划模式）
-你现在处于规划模式，所有写操作均被系统禁止。
+你现在处于规划模式，所有写操作均被系统禁止。只读工具可以正常使用，包括 ask_user（询问用户）和 web_search（搜索信息）。
 
-### 可用工具（只读）
+### 可用工具（只读，可正常调用）
 ${readonlyTools.join('、')}
 
 ### 不可用工具（写操作，调用将被拒绝）
 ${writeTools.join('、')}
 
 ### 你的任务
-1. 使用只读工具充分了解现状（读文件、搜索代码、查看目录结构等）
+1. 使用只读工具充分了解现状：可以读文件、搜索代码、搜索网络信息、询问用户等
 2. 制定详细的执行计划：列出每一步要做什么、修改哪些文件、执行什么命令
 3. 不要尝试调用写操作工具，即使调用也会被系统拒绝
 4. 计划完成后，告知用户"已完成规划，请切换到执行模式后继续"
 
-用户确认计划后，会将模式切换为 ask 或 auto，届时写操作将可用。`
+用户确认计划后，会将模式切换为 ask 或 craft，届时写操作将可用。`
       session.engine.setSystemPrompt([...fullPrompt, planModeAppendix])
     } else {
       session.engine.setSystemPrompt(fullPrompt)
@@ -637,7 +637,7 @@ ${writeTools.join('、')}
           hitTurnLimit = true
         }
         // 将 QueryEngine 内部事件格式转换为前端协议格式
-        const clientMsg = toClientMessage(ev, requestId)
+        const clientMsg = toClientMessage(ev, requestId, session.info.model)
         if (clientMsg) {
           // 过滤高频事件，避免日志爆炸
           if (ev.type !== 'text_delta' && ev.type !== 'tool_log') {
@@ -823,7 +823,7 @@ ${writeTools.join('、')}
 // QueryEngine 使用内部字段名（id/name/line/costUsd），前端期望不同的字段名
 import type { StreamEvent } from '../core/QueryEngine.js'
 
-function toClientMessage(ev: StreamEvent, requestId: string): object | null {
+function toClientMessage(ev: StreamEvent, requestId: string, model = ''): object | null {
   switch (ev.type) {
     case 'text_delta':
       return { type: 'text_delta', requestId, delta: ev.delta }
@@ -852,7 +852,7 @@ function toClientMessage(ev: StreamEvent, requestId: string): object | null {
         inputTokens: ev.inputTokens,
         outputTokens: ev.outputTokens,
         cost: ev.costUsd,
-        model: '',
+        model,
       }
 
     case 'budget_exceeded':

@@ -4,6 +4,7 @@ import type {
   DisplayMessage,
   ToolCardState,
   PermissionRequest,
+  DecisionRequest,
   CostInfo,
 } from '../lib/types.js'
 import { getSessionMessages, getHistorySegments, getArchiveMessages } from '../lib/gateway.js'
@@ -37,6 +38,8 @@ interface MessageState {
   pendingAskUser: Map<string, AskUserState>
   /** 等待用户确认的权限请求，按 sessionId */
   pendingPermission: Map<string, PermissionRequest>
+  /** 等待用户决策的请求，按 sessionId */
+  pendingDecision: Map<string, DecisionRequest>
   /** 费用信息，按 sessionId */
   costInfo: Map<string, CostInfo>
   /** plan 模式下 LLM 表达了继续执行意图，等待用户确认的会话集合 */
@@ -85,6 +88,11 @@ interface MessageState {
    * 清空指定会话的权限请求。
    */
   clearPermission: (sessionId: string) => void
+
+  /**
+   * 清空指定会话的决策请求。
+   */
+  clearDecision: (sessionId: string) => void
 
   /**
    * 清空指定会话的 ask_user 待回答状态。
@@ -139,6 +147,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   toolCards: new Map(),
   pendingAskUser: new Map(),
   pendingPermission: new Map(),
+  pendingDecision: new Map(),
   costInfo: new Map(),
   pendingContinuation: new Set(),
   historyLoaded: new Set(),
@@ -373,7 +382,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       case 'ask_user': {
         const askState: AskUserState = {
           question: msg.question,
-          options: msg.options,
+          options: Array.isArray(msg.options) ? msg.options : undefined,
         }
         const newPendingAskUser = new Map(state.pendingAskUser)
         newPendingAskUser.set(sessionId, askState)
@@ -443,12 +452,15 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         newPendingPermission.delete(sessionId)
         const newPendingAskUser = new Map(state.pendingAskUser)
         newPendingAskUser.delete(sessionId)
+        const newPendingDecision = new Map(state.pendingDecision)
+        newPendingDecision.delete(sessionId)
 
         set({
           streamingText: newStreamingText,
           toolCards: newToolCards,
           pendingPermission: newPendingPermission,
           pendingAskUser: newPendingAskUser,
+          pendingDecision: newPendingDecision,
         })
         // sessionStore 处理 session.status 更新，此处不重复处理
         break
@@ -491,6 +503,29 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         const newMessages = new Map(state.messages)
         newMessages.set(sessionId, [...getMessages(state.messages, sessionId), cronMsg])
         set({ messages: newMessages })
+        break
+      }
+
+      // ── decision_request：决策请求，设置 pendingDecision ─────────────
+      case 'decision_request': {
+        const decisionReq: DecisionRequest = {
+          title: msg.title,
+          context: msg.context,
+          options: msg.options,
+          recommendation: msg.recommendation,
+          deadline: msg.deadline,
+          impact: msg.impact,
+          requestedAt: Date.now(),
+        }
+        const newPendingDecision = new Map(state.pendingDecision)
+        newPendingDecision.set(sessionId, decisionReq)
+        set({ pendingDecision: newPendingDecision })
+        break
+      }
+      // ── model_switched：模型切换通知 ─────────────────────────────────
+      case 'model_switched': {
+        // 可选：在消息列表中插入系统提示
+        console.info('[messageStore] 模型已切换', { model: msg.model, reason: msg.reason })
         break
       }
 
@@ -543,6 +578,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const newPendingPermission = new Map(state.pendingPermission)
     newPendingPermission.delete(sessionId)
 
+    const newPendingDecision = new Map(state.pendingDecision)
+    newPendingDecision.delete(sessionId)
+
     const newCostInfo = new Map(state.costInfo)
     newCostInfo.delete(sessionId)
 
@@ -560,6 +598,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       toolCards: newToolCards,
       pendingAskUser: newPendingAskUser,
       pendingPermission: newPendingPermission,
+      pendingDecision: newPendingDecision,
       costInfo: newCostInfo,
       pendingContinuation: newPendingContinuation,
       historyLoaded: newHistoryLoaded,
@@ -681,6 +720,13 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const newPendingPermission = new Map(state.pendingPermission)
     newPendingPermission.delete(sessionId)
     set({ pendingPermission: newPendingPermission })
+  },
+
+  clearDecision(sessionId: string) {
+    const state = get()
+    const newPendingDecision = new Map(state.pendingDecision)
+    newPendingDecision.delete(sessionId)
+    set({ pendingDecision: newPendingDecision })
   },
 
   clearAskUser(sessionId: string) {

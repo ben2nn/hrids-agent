@@ -127,6 +127,11 @@ export const TodoWriteTool: ToolDef<typeof inputSchema> = {
     }
     if (!Array.isArray(todos)) todos = []
 
+    // 拒绝空数组：空 todos 没有意义，且会清空现有计划
+    if (todos.length === 0) {
+      return { type: 'error', message: '错误：todos 数组不能为空。请提供完整的任务列表，每项包含 id、content、status 和 priority。' }
+    }
+
     // 读取现有列表，执行保护性合并
     const existing = loadTodos()
     const { merged, protectedCount } = mergeWithProtection(existing, todos)

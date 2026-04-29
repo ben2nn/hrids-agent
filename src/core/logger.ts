@@ -1,7 +1,10 @@
 // 结构化日志系统 —— 支持级别控制、JSON 格式、文件持久化
 import { existsSync, mkdirSync, appendFileSync, statSync, renameSync } from 'fs'
+import { createRequire } from 'module'
 import { homedir } from 'os'
 import { join } from 'path'
+
+const _require = createRequire(import.meta.url)
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -41,8 +44,7 @@ class Logger {
     let level: LogLevel = 'info'
     try {
       // 延迟 import 避免循环依赖，且 logger 在 config 加载前就可能被使用
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { loadConfig } = require('./Config.js') as { loadConfig: () => { logLevel?: LogLevel } }
+      const { loadConfig } = _require('./Config.js') as { loadConfig: () => { logLevel?: LogLevel } }
       level = loadConfig().logLevel ?? 'info'
     } catch {
       const envLevel = process.env.LOG_LEVEL as LogLevel | undefined

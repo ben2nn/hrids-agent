@@ -26,6 +26,8 @@ const SECTION_EXECUTION = `# 执行原则
 
 找到文件/数据后立即继续处理，不能停在"找到了"这一步。多工具连续调用时，只在第一个工具前说明意图，工具之间不插入解释。任务完全完成后才输出最终结果。禁止输出计划后停止——计划和执行必须连续。
 
+**关键规则：只要任务尚未完成，必须调用工具继续执行，不能只输出文字描述后停下。** 说"需要做X"、"接下来要做X"、"需要分析X"之后，必须立即调用工具去做，而不是停下等待。只有当所有工作真正完成时，才能输出最终总结。
+
 遇到错误先分析根因，再决定修复方案。同一错误不要尝试超过 2 次相同修复方式，第 3 次必须换思路。报告结果要如实：测试失败就说失败，未验证就说未验证。`
 
 const SECTION_ACTIONS = `# 谨慎操作
@@ -55,10 +57,11 @@ const SECTION_TODO = `# 任务列表管理
 
 任务涉及 3 步以上时，必须先用 todo_write 建立完整计划再开始执行。
 
- - 任务开始时一次性列出所有步骤
+ - 任务开始时一次性列出所有步骤（todos 数组不能为空）
  - 执行中只允许更新状态（pending → in_progress → completed）或在末尾新增任务
  - 严禁删除或减少未完成（pending/in_progress）的任务
- - 开始某步骤前标记 in_progress，完成后立即标记 completed`
+ - 开始某步骤前标记 in_progress，完成后立即标记 completed
+ - 禁止用空 todos 数组调用 todo_write，那等于清空计划`
 
 const SECTION_DECISION = `# 决策上报
 
@@ -66,7 +69,9 @@ const SECTION_DECISION = `# 决策上报
 
  - 操作不可逆（删除数据、推送代码、发送消息）
  - 涉及费用或超出授权范围
- - 多个方案各有权衡，没有明显最优解`
+ - 多个方案各有权衡，没有明显最优解
+
+ask_user 使用规范：调用 ask_user 获得用户回答后，必须立即用该回答继续执行原任务，不要停下来输出确认语（如"知了"、"好的"）后就结束。继续执行时仍须遵守执行原则：先用一句话说明意图，任务涉及 3 步以上时先用 todo_write 建立完整计划再开始执行。`
 
 const SECTION_FILE_PATH = `# 文件路径
 
@@ -136,7 +141,7 @@ const BUILTIN_TOOL_GROUPS: Record<string, string> = {
  * 根据实际工具列表动态生成工具速查 section。
  * MCP 工具（mcp__server__tool）按 server 名自动分组，追加在内置工具之后。
  */
-function buildToolsReferenceSection(tools: ToolDef[]): string {
+function buildToolsReferenceSection(tools: readonly ToolDef[]): string {
   // 按分组收集内置工具
   const groups = new Map<string, string[]>()
   const mcpGroups = new Map<string, string[]>() // server → tool names
@@ -406,7 +411,7 @@ const EXTENSIONS: Record<TaskType, PromptExtension> = {
  */
 export function getCoordinatorSystemPrompt(
   message?: string,
-  tools?: ToolDef[],
+  tools?: readonly ToolDef[],
   forceExtensions?: TaskType[],
 ): string[] {
   // 工具速查：有工具列表时动态生成，否则用静态兜底

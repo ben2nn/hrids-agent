@@ -8,7 +8,6 @@ import { resolveDecision } from '../tools/DecisionTool.js'
 import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js'
-import { getSessionWorkDir } from '../core/ContextBuilder.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { LLMProvider } from '../core/providers/index.js'
 

@@ -80,7 +80,7 @@ function makeAnswerResolver(
 
 export const AskUserTool: ToolDef<typeof inputSchema> = {
   name: 'ask_user',
-  description: '当需要用户提供信息、做出选择或确认操作时，向用户提问。只在真正需要用户输入时使用。',
+  description: '当需要用户提供信息、做出选择或确认操作时，向用户提问。只在真正需要用户输入时使用。获得用户回答后，必须立即继续执行原来的任务，不要停下来等待或确认。',
   inputSchema,
   readonly: true,
 

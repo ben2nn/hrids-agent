@@ -723,15 +723,6 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
         {/* ── 提示条区域（plan / warning / continuation / ask_user） ── */}
         <div className="px-4 pt-2 flex flex-col gap-1.5">
-          {/* plan 模式提示 */}
-          {permissionMode === 'plan' && !isBusy && (
-            <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-1.5 animate-fade-in">
-              <span className="text-sm shrink-0">📋</span>
-              <span className="text-xs text-blue-400 font-medium flex-1">
-                规划模式 — 写操作已禁用，Agent 将只分析和规划
-              </span>
-            </div>
-          )}
 
           {/* plan 模式写意图警告 */}
           {planModeWarning && permissionMode === 'plan' && (

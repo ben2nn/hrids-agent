@@ -800,7 +800,34 @@ ${contentToSummarize}
           // 查询/回忆类意图：直接结束，不触发 continuation 检测
           if (isQueryMode) break
 
-          // 检测 LLM 是否在中途停下（说了"接下来要做X"但没做）
+          const mode = this.config.permissions.getMode()
+
+          // craft 模式：默认注入继续指令，让 LLM 自己判断是否完成
+          // 如果 LLM 真的完成了，它会回复确认信息，不会再调用工具，下一轮会再次进入这里并停止
+          if (mode === 'craft') {
+            // 检测是否是明确的完成信号（避免无限循环）
+            const COMPLETION_PATTERNS = [
+              /任务(已|已经|全部|完全)(完成|结束|执行完毕)/,
+              /所有(工作|任务|操作)(已|已经)(完成|结束)/,
+              /^(完成|好的|OK|Done)[。！!.]*$/i,
+              /(已|已经)按(要求|照|您的要求)(完成|执行完毕)/,
+              /没有(其他|更多|额外)(工作|任务|操作)需要(执行|完成|处理)/,
+              /task (is )?(completed|finished|done)/i,
+              /all (tasks?|work) (is |are )?(completed|finished|done)/i,
+            ]
+            const isCompleted = COMPLETION_PATTERNS.some(p => p.test(fullText))
+            if (isCompleted) {
+              log.debug('检测到完成信号，停止执行', { turn: turns })
+              break
+            }
+
+            // 未检测到完成信号：注入继续指令
+            log.debug('craft 模式：注入继续指令', { turn: turns })
+            this.history.push({ role: 'user', content: '[系统内部] 请继续执行，不要停下。直接调用工具完成任务，不要再解释计划。如果任务已完成，请明确回复"任务已完成"。' })
+            continue
+          }
+
+          // ask/plan 模式：检测是否需要 continuation
           const CONTINUATION_PATTERNS = [
             /接下来(将|我会|会|要)/,
             /然后(我会|将|要)/,
@@ -810,25 +837,20 @@ ${contentToSummarize}
             /让我(继续|读取|分析|查看|创建|编写|修复|改进|尝试|搜索|获取|爬取)/,
             /我(将|会)(读取|分析|处理|继续|创建|编写|修复|改进|尝试|搜索|获取|爬取)/,
             /发现(了|一个)(小|一个)?(bug|问题|错误|issue)/i,
-            /需要(修复|处理|解决|改进|优化)/,
+            /需要(修复|处理|解决|改进|优化|分析|测试|验证|检查|调试|实现|完成|执行)/,
             /让我(来)?(创建|改进|修改|更新|重写|优化)/,
             /现在(开始|来|我来)(执行|处理|创建|编写|修复)/,
             /马上(开始|执行|处理|创建)/,
-            /let me (create|fix|update|improve|continue|check|read|write)/i,
+            /并(完成|继续|执行|进行|实现|测试|验证|分析|处理)(测试|任务|操作|工作|验证|分析)/,
+            /let me (create|fix|update|improve|continue|check|read|write|analyze|test)/i,
             /next[,，]? (I will|I'll|we)/i,
+            /I (need to|should|will|must) (analyze|test|verify|check|fix|implement|continue)/i,
           ]
           const shouldContinue = CONTINUATION_PATTERNS.some(p => p.test(fullText))
           if (shouldContinue && turns < maxTurns) {
-            const mode = this.config.permissions.getMode()
-            if (mode === 'craft') {
-              // craft 模式：静默注入继续指令，[系统内部] 前缀供 UI 层识别
-              this.history.push({ role: 'user', content: '[系统内部] 请继续执行，不要停下。直接调用工具完成任务，不要再解释计划。' })
-              continue
-            } else {
-              // 非自动模式（ask/plan）：通知 UI 询问用户是否继续
-              yield { type: 'continuation_needed' }
-              break
-            }
+            // 非自动模式（ask/plan）：通知 UI 询问用户是否继续
+            yield { type: 'continuation_needed' }
+            break
           }
           break
         }

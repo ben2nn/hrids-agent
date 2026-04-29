@@ -3,6 +3,9 @@
 // 支持多模型 Fallback：EMBEDDING_FALLBACK_N 配置，重试三次后切换下一个模型
 // 向量维度：OpenAI text-embedding-3-small = 1536，Ollama nomic-embed-text = 768
 
+import { createRequire } from 'module'
+const _require = createRequire(import.meta.url)
+
 // 每个模型在切换前的最大重试次数（与 FallbackProvider 保持一致）
 const MAX_RETRIES_PER_MODEL = 3
 
@@ -300,8 +303,7 @@ let _provider: AnyEmbeddingProvider | null = null
  */
 function createEmbeddingProviderFromEnv(): AnyEmbeddingProvider {
   // 从 config.json 读取
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { loadConfig } = require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
+  const { loadConfig } = _require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
   const config = loadConfig()
   const embCfg = config.embedding
 

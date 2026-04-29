@@ -3,12 +3,15 @@
 // 技能安装后放入 ~/.hrids-agent/skills/，由 SkillRegistry 自动加载
 
 import { z } from 'zod'
+import { createRequire } from 'module'
 import { readFileSync, existsSync, writeFileSync, mkdirSync, cpSync, rmSync } from 'fs'
 import { resolve, join } from 'path'
 import { homedir } from 'os'
 import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { getGlobalCwd } from '../core/cwd.js'
+
+const _require = createRequire(import.meta.url)
 
 // ─────────────────────────────────────────────
 // 常量与辅助
@@ -26,8 +29,7 @@ function getProjectSkillsDir(): string {
 }
 
 function getSkillHubConfig() {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { loadConfig } = require('../core/Config.js') as typeof import('../core/Config.js')
+  const { loadConfig } = _require('../core/Config.js') as typeof import('../core/Config.js')
   return loadConfig().skillHub ?? {}
 }
 
@@ -162,8 +164,7 @@ export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
   },
 
   async execute(input) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { loadConfig, saveConfig } = require('../core/Config.js') as typeof import('../core/Config.js')
+    const { loadConfig, saveConfig } = _require('../core/Config.js') as typeof import('../core/Config.js')
 
     if (input.action === 'get') {
       const cfg = loadConfig().skillHub ?? {}

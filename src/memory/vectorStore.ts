@@ -273,9 +273,11 @@ export class SeekDbStore implements VectorStore {
 
 // ── 工厂函数：根据 config.json 创建对应后端 ──────────────────────────
 
+import { createRequire } from 'module'
+const _require = createRequire(import.meta.url)
+
 export function createVectorStore(db: Database.Database): VectorStore {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { loadConfig } = require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
+  const { loadConfig } = _require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
   const cfg = loadConfig().vectorStore ?? {}
   const backend = (cfg.backend ?? 'sqlite').toLowerCase()
   const url = cfg.url ?? ''

@@ -55,7 +55,7 @@ const IMAGE_PATTERN = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/g
  * @param idPrefix    消息 ID 前缀，用于区分来源（'' 或 'arc-'）
  */
 function formatMessagesForDisplay(
-  rawMessages: import('../core/QueryEngine.js').Message[],
+  rawMessages: readonly import('../core/QueryEngine.js').Message[],
   idPrefix = '',
 ): DisplayMessage[] {
   // 第一遍：建立 toolId → result 映射

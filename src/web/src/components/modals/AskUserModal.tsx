@@ -86,7 +86,7 @@ export function AskUserModal({ sessionId: _sessionId, askUserState, onReply }: A
           </div>
 
           {/* 快捷选项按钮 */}
-          {askUserState.options && askUserState.options.length > 0 && (
+          {Array.isArray(askUserState.options) && askUserState.options.length > 0 && (
             <div className="mb-4">
               <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-wider block mb-2">
                 快捷选项

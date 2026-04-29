@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+﻿import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { getFileContent, getGitFileContent } from '../../lib/gateway.js'
 
@@ -38,6 +38,12 @@ const TOOL_NAME_MAP: Record<string, { label: string; icon: string }> = {
   team_wait:          { label: '等待团队',     icon: 'cpu' },
   send_message:       { label: '发送消息',     icon: 'message-circle' },
   receive_message:    { label: '接收消息',     icon: 'message-circle' },
+  memory_add:         { label: '记住内容',     icon: 'memory' },
+  memory_update:      { label: '更新记忆',     icon: 'memory' },
+  memory_search:      { label: '搜索记忆',     icon: 'memory' },
+  memory_recall:      { label: '回忆内容',     icon: 'memory' },
+  memory_fact:        { label: '记录事实',     icon: 'memory' },
+  memory_status:      { label: '记忆状态',     icon: 'memory' },
 }
 
 // ─── SVG 图标（Lucide 风格，16×16） ───────────────────────────────────────
@@ -61,6 +67,7 @@ function Icon({ name, size = 13, className = '' }: { name: string; size?: number
     case 'chevron-right':return <svg {...props}><polyline points="9 18 15 12 9 6"/></svg>
     case 'chevron-down': return <svg {...props}><polyline points="6 9 12 15 18 9"/></svg>
     case 'wrench':       return <svg {...props}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+    case 'memory':       return <svg {...props}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg>
     default:             return <svg {...props}><circle cx="12" cy="12" r="3"/></svg>
   }
 }
@@ -97,6 +104,69 @@ function summarizeInput(toolName: string, input: unknown): string {
       return `${todos.length} 项 · ${done} 已完成${active ? ` · ${active} 进行中` : ''}`
     }
     case 'todo_read':   return ''
+    case 'memory_add': {
+      const content = String(inp.content ?? '')
+      const type = String(inp.type ?? '')
+      const typeLabel: Record<string, string> = { decision: '决策', preference: '偏好', milestone: '里程碑', problem: '问题', emotional: '情感', fact: '事实' }
+      const prefix = typeLabel[type] ? `[${typeLabel[type]}] ` : ''
+      const text = content.length > 50 ? content.slice(0, 50) + '…' : content
+      return prefix + text
+    }
+    case 'memory_update': {
+      const content = String(inp.content ?? '')
+      const text = content.length > 50 ? content.slice(0, 50) + '…' : content
+      return text
+    }
+    case 'memory_search': return String(inp.query ?? '')
+    case 'memory_recall': {
+      const parts = [inp.wing, inp.room].filter(Boolean).map(String)
+      return parts.length > 0 ? parts.join(' / ') : '全部'
+    }
+    case 'memory_fact':   return `${inp.subject ?? ''} → ${inp.predicate ?? ''} → ${inp.object ?? ''}`
+    case 'memory_status': return ''
+    // skill 工具
+    case 'skill':         return String(inp.skill_name ?? '')
+    case 'skill_list':    return ''
+    case 'skill_save': {
+      const scope = inp.scope === 'project' ? '项目级' : '用户级'
+      return `${inp.name ?? ''} (${scope})`
+    }
+    // skillhub 工具
+    case 'skillhub_search':    return String(inp.query ?? '')
+    case 'skillhub_install':   return String(inp.skill_id ?? '')
+    case 'skillhub_uninstall': return String(inp.skill_id ?? '')
+    case 'skillhub_upgrade':   return String(inp.skill_id ?? '')
+    case 'skillhub_list':      return ''
+    case 'skillhub_recommend': {
+      const task = String(inp.task ?? '')
+      return task.length > 50 ? task.slice(0, 50) + '…' : task
+    }
+    // schedule_cron
+    case 'schedule_cron': {
+      if (inp.action === 'create') return String(inp.description ?? '')
+      if (inp.action === 'delete') return `删除 ${inp.id ?? ''}`
+      if (inp.action === 'toggle') return `${inp.enabled ? '启用' : '禁用'} ${inp.id ?? ''}`
+      return '查看列表'
+    }
+    // agent / team
+    case 'agent':       return String(inp.description ?? '')
+    case 'agent_spawn': return `${inp.team ?? ''} / ${inp.name ?? ''}`
+    case 'team_create': return String(inp.name ?? '')
+    case 'team_delete': return String(inp.name ?? '')
+    case 'team_status': return String(inp.team ?? '')
+    case 'team_wait':   return String(inp.team ?? '')
+    // 消息
+    case 'send_message': {
+      const to = String(inp.to ?? '')
+      const content = String(inp.content ?? '')
+      return `→ ${to}: ${content.length > 40 ? content.slice(0, 40) + '…' : content}`
+    }
+    case 'receive_message': return ''
+    // request_decision
+    case 'request_decision': {
+      const title = String(inp.title ?? '')
+      return title.length > 60 ? title.slice(0, 60) + '…' : title
+    }
     default:            return ''
   }
 }
@@ -652,8 +722,763 @@ function TodoResult({ input, result }: { input: unknown; result: unknown }) {
   )
 }
 
+// ─── skill_list 技能列表结果 ──────────────────────────────────────────────
+
+function SkillListResult({ result }: { result: unknown }) {
+  const raw = typeof result === 'string' ? result : JSON.stringify(result)
+  
+  // 解析技能列表：格式 "/skill_name [source]\n   description"
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
+  const skills: Array<{ name: string; source: string; description: string; hint?: string; when?: string }> = []
+  
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    // 跳过标题行和警告行
+    if (line.startsWith('共') || line.startsWith('⚠') || line.startsWith('以下')) {
+      i++
+      continue
+    }
+    
+    // 匹配技能行：/skill_name [source] 或 /skill_name <hint> [source]
+    const match = line.match(/^\/([a-z_-]+)(?:\s+(<[^>]+>))?\s+\[([^\]]+)\]/)
+    if (match) {
+      const name = match[1]!
+      const hint = match[2]
+      const source = match[3]!
+      let description = ''
+      let when = ''
+      
+      // 读取描述和适用场景
+      i++
+      while (i < lines.length && !lines[i]!.startsWith('/')) {
+        const l = lines[i]!
+        if (l.startsWith('适用场景:')) {
+          when = l.replace('适用场景:', '').trim()
+        } else {
+          description += (description ? ' ' : '') + l
+        }
+        i++
+      }
+      
+      skills.push({ name, source, description, hint, when })
+    } else {
+      i++
+    }
+  }
+  
+  if (skills.length === 0) {
+    return <GenericResult result={result} />
+  }
+  
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+        {skills.length} 个可用技能
+      </span>
+      <div className="rounded-md overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
+        {skills.map((skill, i) => (
+          <div key={i} className="flex flex-col gap-1 px-2.5 py-2 border-b last:border-b-0"
+            style={{ borderColor: 'var(--border-subtle)' }}>
+            {/* 技能名 + 来源 */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <code className="text-[12px] font-mono font-medium" style={{ color: 'var(--accent)' }}>
+                /{skill.name}
+              </code>
+              {skill.hint && (
+                <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>{skill.hint}</span>
+              )}
+              <span className="text-[9px] px-1.5 py-0.5 rounded ml-auto"
+                style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)' }}>
+                {skill.source}
+              </span>
+            </div>
+            {/* 描述 */}
+            {skill.description && (
+              <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                {skill.description}
+              </p>
+            )}
+            {/* 适用场景 */}
+            {skill.when && (
+              <p className="text-[10px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                💡 {skill.when}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ─── skillhub_search 搜索结果 ─────────────────────────────────────────────
+
+function SkillHubSearchResult({ result, input }: { result: unknown; input: unknown }) {
+  const raw = typeof result === 'string' ? result : JSON.stringify(result)
+  const inp = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
+  const query = String(inp.query ?? '')
+  
+  // 解析搜索结果：格式 "1. **Name** v1.0\n   ID: slug\n   description\n   安装: ..."
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
+  const skills: Array<{ name: string; id: string; version?: string; description?: string }> = []
+  
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    // 跳过标题和链接行
+    if (line.startsWith('在 SkillHub') || line.startsWith('浏览更多') || line.startsWith('可直接浏览')) {
+      i++
+      continue
+    }
+    
+    // 匹配序号行：1. **Name** v1.0
+    const match = line.match(/^\d+\.\s+\*\*([^*]+)\*\*(?:\s+v([\d.]+))?/)
+    if (match) {
+      const name = match[1]!.trim()
+      const version = match[2]
+      let id = ''
+      let description = ''
+      
+      // 读取 ID 和描述
+      i++
+      while (i < lines.length && !lines[i]!.match(/^\d+\./)) {
+        const l = lines[i]!
+        if (l.startsWith('ID:')) {
+          id = l.replace('ID:', '').trim()
+        } else if (!l.startsWith('安装:')) {
+          description += (description ? ' ' : '') + l
+        }
+        i++
+      }
+      
+      if (id) skills.push({ name, id, version, description })
+    } else {
+      i++
+    }
+  }
+  
+  if (skills.length === 0) {
+    return <GenericResult result={result} />
+  }
+  
+  return (
+    <div className="flex flex-col gap-1.5">
+      {/* 搜索条件 */}
+      {query && (
+        <div className="flex items-center gap-2 text-[10px] mb-0.5">
+          <span style={{ color: 'var(--text-muted)' }}>搜索</span>
+          <code className="font-mono px-1.5 py-0.5 rounded" style={{ color: 'var(--accent)', background: 'var(--bg-tertiary, rgba(0,0,0,0.18))' }}>{query}</code>
+          <span className="ml-auto" style={{ color: 'var(--text-muted)' }}>{skills.length} 个结果</span>
+        </div>
+      )}
+      
+      {/* 技能列表 */}
+      <div className="rounded-md overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
+        {skills.map((skill, i) => (
+          <div key={i} className="flex flex-col gap-1 px-2.5 py-2 border-b last:border-b-0"
+            style={{ borderColor: 'var(--border-subtle)' }}>
+            {/* 名称 + 版本 */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                {skill.name}
+              </span>
+              {skill.version && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-mono"
+                  style={{ color: 'var(--success)', background: 'rgba(74,222,128,0.1)' }}>
+                  v{skill.version}
+                </span>
+              )}
+            </div>
+            {/* ID */}
+            <code className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
+              {skill.id}
+            </code>
+            {/* 描述 */}
+            {skill.description && (
+              <p className="text-[11px] leading-relaxed line-clamp-2" style={{ color: 'var(--text-secondary)' }}>
+                {skill.description}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ─── schedule_cron 定时任务结果 ───────────────────────────────────────────
+
+function ScheduleCronResult({ input, result }: { input: unknown; result: unknown }) {
+  const raw = typeof result === 'string' ? result : JSON.stringify(result)
+  const inp = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
+  const action = String(inp.action ?? '')
+  
+  // action=list：解析任务列表
+  if (action === 'list') {
+    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
+    const tasks: Array<{ id: string; enabled: boolean; once: boolean; expression: string; description: string; next?: string; last?: string; task: string }> = []
+    
+    let i = 0
+    while (i < lines.length) {
+      const line = lines[i]!
+      // 跳过标题行
+      if (line.startsWith('共') || line.startsWith('暂无')) {
+        i++
+        continue
+      }
+      
+      // 匹配任务行：[id] ✅ 启用 🔂一次性 | expression | description
+      const match = line.match(/^\[([^\]]+)\]\s+(✅|⏸)\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*(.+)/)
+      if (match) {
+        const id = match[1]!.trim()
+        const enabled = match[2] === '✅'
+        const statusPart = match[3]!.trim()
+        const once = statusPart.includes('一次性')
+        const expression = match[4]!.trim()
+        const description = match[5]!.trim()
+        let next = ''
+        let last = ''
+        let task = ''
+        
+        // 读取下一行（时间信息）和任务内容
+        i++
+        if (i < lines.length) {
+          const timeLine = lines[i]!
+          const nextMatch = timeLine.match(/下次:\s*([^|]+)/)
+          const lastMatch = timeLine.match(/上次:\s*(.+)/)
+          if (nextMatch) next = nextMatch[1]!.trim()
+          if (lastMatch) last = lastMatch[1]!.trim()
+          i++
+        }
+        if (i < lines.length && lines[i]!.startsWith('任务:')) {
+          task = lines[i]!.replace('任务:', '').trim()
+          i++
+        }
+        
+        tasks.push({ id, enabled, once, expression, description, next, last, task })
+      } else {
+        i++
+      }
+    }
+    
+    if (tasks.length === 0) {
+      return <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>暂无定时任务</p>
+    }
+    
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+          {tasks.length} 个定时任务
+        </span>
+        <div className="rounded-md overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
+          {tasks.map((t, i) => (
+            <div key={i} className="flex flex-col gap-1.5 px-2.5 py-2 border-b last:border-b-0"
+              style={{ borderColor: 'var(--border-subtle)', opacity: t.enabled ? 1 : 0.5 }}>
+              {/* 状态 + 描述 */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11px]" style={{ color: t.enabled ? 'var(--success)' : 'var(--text-muted)' }}>
+                  {t.enabled ? '✅' : '⏸'}
+                </span>
+                <span className="text-[12px] font-medium flex-1 min-w-0" style={{ color: 'var(--text-primary)' }}>
+                  {t.description}
+                </span>
+                {t.once && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded shrink-0"
+                    style={{ color: 'var(--warning)', border: '1px solid var(--warning)', opacity: 0.8 }}>
+                    一次性
+                  </span>
+                )}
+              </div>
+              {/* cron 表达式 + ID */}
+              <div className="flex items-center gap-2 text-[10px]">
+                <code className="font-mono" style={{ color: 'var(--accent)' }}>{t.expression}</code>
+                <span className="ml-auto font-mono" style={{ color: 'var(--text-muted)' }}>#{t.id}</span>
+              </div>
+              {/* 时间信息 */}
+              <div className="flex flex-col gap-0.5 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                {t.next && <span>⏰ {t.next}</span>}
+                {t.last && <span>📅 {t.last}</span>}
+              </div>
+              {/* 任务内容 */}
+              {t.task && (
+                <p className="text-[10px] leading-relaxed line-clamp-2 font-mono rounded px-2 py-1"
+                  style={{ color: 'var(--text-secondary)', background: 'rgba(0,0,0,0.1)' }}>
+                  {t.task}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+  
+  // 其他 action：简单展示
+  return <GenericResult result={result} />
+}
+
+// ─── team_status 团队状态结果 ─────────────────────────────────────────────
+
+function TeamStatusResult({ result }: { result: unknown }) {
+  const raw = typeof result === 'string' ? result : JSON.stringify(result)
+  
+  // 解析任务列表：格式 "✓ [name] description (status, 1.2s)"
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
+  const tasks: Array<{ status: string; name: string; description: string; time: string }> = []
+  let summary = ''
+  
+  for (const line of lines) {
+    if (line.startsWith('合计:')) {
+      summary = line
+      continue
+    }
+    
+    // 匹配任务行
+    const match = line.match(/^([✓✗▸⏳])\s+\[([^\]]+)\]\s+([^(]+)\s+\(([^,]+),\s*([^)]+)\)/)
+    if (match) {
+      const statusIcon = match[1]!
+      const name = match[2]!.trim()
+      const description = match[3]!.trim()
+      const time = match[5]!.trim()
+      tasks.push({ status: statusIcon, name, description, time })
+    }
+  }
+  
+  if (tasks.length === 0) {
+    return <GenericResult result={result} />
+  }
+  
+  const statusColor: Record<string, string> = {
+    '✓': 'var(--success)',
+    '✗': 'var(--error)',
+    '▸': 'var(--accent)',
+    '⏳': 'var(--text-muted)',
+  }
+  
+  return (
+    <div className="flex flex-col gap-2">
+      {/* 任务列表 */}
+      <div className="rounded-md overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
+        {tasks.map((t, i) => (
+          <div key={i} className="flex items-center gap-2 px-2.5 py-2 border-b last:border-b-0"
+            style={{ borderColor: 'var(--border-subtle)' }}>
+            <span className="text-[13px] shrink-0" style={{ color: statusColor[t.status] ?? 'var(--text-muted)' }}>
+              {t.status}
+            </span>
+            <div className="flex flex-col gap-0.5 flex-1 min-w-0">
+              <span className="text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                {t.name}
+              </span>
+              <span className="text-[10px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                {t.description}
+              </span>
+            </div>
+            <span className="text-[10px] font-mono tabular-nums shrink-0" style={{ color: 'var(--text-muted)' }}>
+              {t.time}
+            </span>
+          </div>
+        ))}
+      </div>
+      
+      {/* 统计摘要 */}
+      {summary && (
+        <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
+          {summary}
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ─── agent / agent_spawn / team_wait 子智能体结果 ────────────────────────
+
+function AgentResult({ result }: { result: unknown }) {
+  const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+
+  // 提取用量信息：[子智能体用量: xxx]
+  const costMatch = raw.match(/\[子智能体用量:\s*([^\]]+)\]/)
+  const cost = costMatch?.[1]?.trim()
+
+  // 提取隔离工作目录信息（用于清理正文）
+
+  // 正文：去掉末尾的用量和工作目录信息
+  const body = raw
+    .replace(/\n?\[子智能体用量:[^\]]+\]/g, '')
+    .replace(/\n?\[隔离工作目录:[^\]]+\]/g, '')
+    .trim()
+
+  const isError = raw.includes('错误:') || raw.includes('失败:')
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* 正文 */}
+      <div className="rounded-md px-2.5 py-2" style={{ background: 'rgba(0,0,0,0.15)', border: '1px solid var(--border-subtle)' }}>
+        <pre className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words max-h-64 overflow-y-auto m-0"
+          style={{ color: isError ? 'var(--error)' : 'var(--text-secondary)' }}>
+          {body.length > 1200 ? body.slice(0, 1200) + `\n…（共 ${body.length} 字符）` : body}
+        </pre>
+      </div>
+      {/* 用量 */}
+      {cost && (
+        <p className="text-[10px] text-right" style={{ color: 'var(--text-muted)' }}>
+          用量: {cost}
+        </p>
+      )}
+    </div>
+  )
+}
+// ─── memory 记忆工具结果 ──────────────────────────────────────────────────
+
+const MEMORY_TYPE_LABEL: Record<string, string> = {
+  decision: '决策', preference: '偏好', milestone: '里程碑',
+  problem: '问题', emotional: '情感', fact: '事实',
+}
+const MEMORY_TYPE_COLOR: Record<string, string> = {
+  decision:  'var(--accent, #60a5fa)',
+  preference:'var(--warning, #fb923c)',
+  milestone: 'var(--success, #4ade80)',
+  problem:   'var(--error, #f87171)',
+  emotional: '#c084fc',
+  fact:      'var(--text-secondary)',
+}
+
+/** 解析 memory_search / memory_recall 返回的文本，提取记忆条目 */
+function parseMemoryText(raw: string): Array<{ id?: string; type?: string; content: string; importance?: number; wing?: string; room?: string }> | null {
+  // 格式示例：
+  // [decision] 使用 TypeScript (重要性:4) [wing:project/room:arch]
+  // ID: abc123 | [preference] 偏好 Tailwind CSS
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
+  const items: Array<{ id?: string; type?: string; content: string; importance?: number; wing?: string; room?: string }> = []
+
+  for (const line of lines) {
+    // 跳过统计行
+    if (/^(共|找到|记忆总数|活跃|项目翼|类型分布|decision:|preference:|milestone:|problem:|emotional:|fact:)/.test(line)) continue
+
+    const idMatch = line.match(/^ID:\s*([a-z0-9-]+)\s*\|?\s*/i)
+    const id = idMatch?.[1]
+    const rest = idMatch ? line.slice(idMatch[0].length) : line
+
+    const typeMatch = rest.match(/^\[(\w+)\]\s*/)
+    const type = typeMatch?.[1]
+    const afterType = typeMatch ? rest.slice(typeMatch[0].length) : rest
+
+    const importanceMatch = afterType.match(/\s*\(重要性[:：](\d)\)\s*/)
+    const importance = importanceMatch ? parseInt(importanceMatch[1]) : undefined
+    const afterImportance = importanceMatch ? afterType.replace(importanceMatch[0], ' ').trim() : afterType
+
+    const wingMatch = afterImportance.match(/\[wing[:：]([^\]/]+)(?:\/room[:：]([^\]]+))?\]/)
+    const wing = wingMatch?.[1]
+    const room = wingMatch?.[2]
+    const content = wingMatch ? afterImportance.replace(wingMatch[0], '').trim() : afterImportance.trim()
+
+    if (content) items.push({ id, type, content, importance, wing, room })
+  }
+  return items.length > 0 ? items : null
+}
+
+function MemoryResult({ toolName, input, result }: { toolName: string; input: unknown; result: unknown }) {
+  const raw = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+  const inp = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
+
+  // ── memory_add：展示写入的内容 ──
+  if (toolName === 'memory_add') {
+    const type = String(inp.type ?? '')
+    const content = String(inp.content ?? '')
+    const wing = inp.wing ? String(inp.wing) : null
+    const room = inp.room ? String(inp.room) : null
+    const importance = inp.importance ? Number(inp.importance) : 3
+    const tags = Array.isArray(inp.tags) ? inp.tags as string[] : []
+    const typeLabel = MEMORY_TYPE_LABEL[type] ?? type
+    const typeColor = MEMORY_TYPE_COLOR[type] ?? 'var(--text-muted)'
+
+    // 解析结果中的 ID
+    const idMatch = raw.match(/ID:\s*([a-z0-9-]+)/i)
+    const memId = idMatch?.[1]
+
+    return (
+      <div className="flex flex-col gap-2">
+        {/* 类型 + 重要性 */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+            style={{ color: typeColor, border: `1px solid ${typeColor}`, opacity: 0.9 }}>
+            {typeLabel}
+          </span>
+          {importance > 0 && (
+            <span className="flex items-center gap-0.5">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <span key={i} className="text-[10px]" style={{ color: i < importance ? 'var(--warning, #fb923c)' : 'var(--border-subtle)' }}>★</span>
+              ))}
+            </span>
+          )}
+          {memId && (
+            <span className="text-[10px] font-mono ml-auto" style={{ color: 'var(--text-muted)' }}>#{memId.slice(0, 8)}</span>
+          )}
+        </div>
+
+        {/* 内容 */}
+        <div className="rounded-md px-2.5 py-2" style={{ background: 'rgba(0,0,0,0.15)', border: '1px solid var(--border-subtle)' }}>
+          <p className="text-[12px] leading-relaxed" style={{ color: 'var(--text-primary)' }}>{content}</p>
+        </div>
+
+        {/* 元信息 */}
+        {(wing || room || tags.length > 0) && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {wing && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)' }}>{wing}{room ? `/${room}` : ''}</span>}
+            {tags.map(tag => (
+              <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: 'var(--accent)', background: 'rgba(96,165,250,0.1)' }}>#{tag}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ── memory_update：展示更新内容 ──
+  if (toolName === 'memory_update') {
+    const oldId = String(inp.oldId ?? '')
+    const content = String(inp.content ?? '')
+    const type = inp.type ? String(inp.type) : null
+    const typeLabel = type ? (MEMORY_TYPE_LABEL[type] ?? type) : null
+    const typeColor = type ? (MEMORY_TYPE_COLOR[type] ?? 'var(--text-muted)') : null
+    const newIdMatch = raw.match(/新\s*ID:\s*([a-z0-9-]+)/i)
+    const newId = newIdMatch?.[1]
+
+    return (
+      <div className="flex flex-col gap-2">
+        {/* 旧 → 新 ID */}
+        <div className="flex items-center gap-1.5 text-[10px] font-mono flex-wrap" style={{ color: 'var(--text-muted)' }}>
+          <span>#{oldId.slice(0, 8)}</span>
+          <span>→</span>
+          {newId && <span style={{ color: 'var(--success)' }}>#{newId.slice(0, 8)}</span>}
+          {typeLabel && typeColor && (
+            <span className="ml-auto px-1.5 py-0.5 rounded text-[10px]"
+              style={{ color: typeColor, border: `1px solid ${typeColor}`, opacity: 0.85 }}>
+              {typeLabel}
+            </span>
+          )}
+        </div>
+        <div className="rounded-md px-2.5 py-2" style={{ background: 'rgba(0,0,0,0.15)', border: '1px solid var(--border-subtle)' }}>
+          <p className="text-[12px] leading-relaxed" style={{ color: 'var(--text-primary)' }}>{content}</p>
+        </div>
+      </div>
+    )
+  }
+
+  // ── memory_fact：展示三元组 ──
+  if (toolName === 'memory_fact') {
+    const subject = String(inp.subject ?? '')
+    const predicate = String(inp.predicate ?? '')
+    const object = String(inp.object ?? '')
+    const confidence = inp.confidence !== undefined ? Number(inp.confidence) : 1
+    const idMatch = raw.match(/ID:\s*([a-z0-9-]+)/i)
+    const factId = idMatch?.[1]
+
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2 rounded-md px-3 py-2.5 flex-wrap"
+          style={{ background: 'rgba(0,0,0,0.15)', border: '1px solid var(--border-subtle)' }}>
+          <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>{subject}</span>
+          <span className="text-[11px] px-1.5 py-0.5 rounded font-mono" style={{ color: 'var(--accent)', background: 'rgba(96,165,250,0.1)' }}>{predicate}</span>
+          <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>{object}</span>
+        </div>
+        <div className="flex items-center gap-3 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+          {confidence < 1 && <span>置信度 {Math.round(confidence * 100)}%</span>}
+          {factId && <span className="font-mono">#{factId.slice(0, 8)}</span>}
+        </div>
+      </div>
+    )
+  }
+
+  // ── memory_status：展示统计信息 ──
+  if (toolName === 'memory_status') {
+    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
+    const stats: Record<string, string> = {}
+    for (const line of lines) {
+      const m = line.match(/^(.+?)[:：]\s*(.+)$/)
+      if (m) stats[m[1].trim()] = m[2].trim()
+    }
+    const totalMemories = stats['记忆总数'] ?? '—'
+    const activeTriples = stats['活跃事实'] ?? '—'
+    const wings = stats['项目翼'] ?? '—'
+
+    // 类型分布
+    const typeEntries = lines
+      .filter(l => /^\s+(decision|preference|milestone|problem|emotional|fact):\s*\d+/.test(l))
+      .map(l => {
+        const m = l.match(/(\w+):\s*(\d+)/)
+        return m ? { type: m[1], count: parseInt(m[2]) } : null
+      })
+      .filter(Boolean) as Array<{ type: string; count: number }>
+
+    const total = typeEntries.reduce((s, e) => s + e.count, 0) || 1
+
+    return (
+      <div className="flex flex-col gap-2.5">
+        {/* 核心数字 */}
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            { label: '记忆总数', value: totalMemories },
+            { label: '活跃事实', value: activeTriples },
+            { label: '项目翼', value: wings },
+          ].map(({ label, value }) => (
+            <div key={label} className="flex flex-col items-center gap-0.5 rounded-md py-2"
+              style={{ background: 'rgba(0,0,0,0.15)', border: '1px solid var(--border-subtle)' }}>
+              <span className="text-[16px] font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>{value}</span>
+              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{label}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* 类型分布 */}
+        {typeEntries.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[10px] uppercase tracking-widest font-medium" style={{ color: 'var(--text-muted)' }}>类型分布</p>
+            {typeEntries.map(({ type, count }) => {
+              const label = MEMORY_TYPE_LABEL[type] ?? type
+              const color = MEMORY_TYPE_COLOR[type] ?? 'var(--text-muted)'
+              const pct = Math.round((count / total) * 100)
+              return (
+                <div key={type} className="flex items-center gap-2">
+                  <span className="text-[10px] w-12 text-right shrink-0" style={{ color }}>{label}</span>
+                  <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+                    <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />
+                  </div>
+                  <span className="text-[10px] tabular-nums w-6 shrink-0" style={{ color: 'var(--text-muted)' }}>{count}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ── memory_search / memory_recall：展示搜索结果 ──
+  const items = parseMemoryText(raw)
+
+  if (!items) {
+    // 无结构化结果，降级展示
+    const isEmpty = raw.trim() === '' || raw.includes('未找到') || raw.includes('暂无')
+    if (isEmpty) {
+      return <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>未找到相关记忆</p>
+    }
+    return <GenericResult result={result} />
+  }
+
+  const query = toolName === 'memory_search' ? String(inp.query ?? '') : ''
+  const scope = [inp.wing, inp.room].filter(Boolean).map(String).join(' / ')
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {/* 搜索条件 */}
+      {(query || scope) && (
+        <div className="flex items-center gap-2 text-[10px] flex-wrap mb-0.5">
+          {query && (
+            <>
+              <span style={{ color: 'var(--text-muted)' }}>关键词</span>
+              <code className="font-mono px-1.5 py-0.5 rounded" style={{ color: 'var(--accent)', background: 'var(--bg-tertiary, rgba(0,0,0,0.18))' }}>{query}</code>
+            </>
+          )}
+          {scope && (
+            <>
+              <span style={{ color: 'var(--text-muted)' }}>范围</span>
+              <code className="font-mono" style={{ color: 'var(--text-secondary)' }}>{scope}</code>
+            </>
+          )}
+          <span className="ml-auto" style={{ color: 'var(--text-muted)' }}>{items.length} 条</span>
+        </div>
+      )}
+
+      {/* 记忆列表 */}
+      <div className="rounded-md overflow-hidden" style={{ border: '1px solid var(--border-subtle)' }}>
+        {items.map((item, i) => {
+          const typeLabel = item.type ? (MEMORY_TYPE_LABEL[item.type] ?? item.type) : null
+          const typeColor = item.type ? (MEMORY_TYPE_COLOR[item.type] ?? 'var(--text-muted)') : 'var(--text-muted)'
+          return (
+            <div key={i} className="flex flex-col gap-1 px-2.5 py-2 border-b last:border-b-0"
+              style={{ borderColor: 'var(--border-subtle)' }}>
+              {/* 类型 + 重要性 + ID */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {typeLabel && (
+                  <span className="text-[9px] font-medium px-1 py-0.5 rounded shrink-0"
+                    style={{ color: typeColor, border: `1px solid ${typeColor}`, opacity: 0.85 }}>
+                    {typeLabel}
+                  </span>
+                )}
+                {item.importance !== undefined && (
+                  <span className="flex items-center gap-px shrink-0">
+                    {Array.from({ length: 5 }).map((_, j) => (
+                      <span key={j} className="text-[9px]" style={{ color: j < item.importance! ? 'var(--warning, #fb923c)' : 'var(--border-subtle)' }}>★</span>
+                    ))}
+                  </span>
+                )}
+                {(item.wing || item.room) && (
+                  <span className="text-[9px] font-mono" style={{ color: 'var(--text-muted)' }}>
+                    {[item.wing, item.room].filter(Boolean).join('/')}
+                  </span>
+                )}
+                {item.id && (
+                  <span className="text-[9px] font-mono ml-auto" style={{ color: 'var(--text-muted)' }}>#{item.id.slice(0, 8)}</span>
+                )}
+              </div>
+              {/* 内容 */}
+              <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-primary)' }}>{item.content}</p>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ─── 通用结果 ──────────────────────────────────────────────────────────────
 
+// ─── 工具渲染分发表 ────────────────────────────────────────────────────────
+
+/** 有专属渲染的工具：不显示原始 JSON 输入 */
+const NO_RAW_INPUT_TOOLS = new Set([
+  'glob', 'grep', 'web_search', 'web_fetch',
+  'todo_write', 'todo_read',
+  'memory_add', 'memory_update', 'memory_search', 'memory_recall', 'memory_fact', 'memory_status',
+  'skill_list', 'skillhub_search', 'schedule_cron', 'team_status',
+  'agent', 'agent_spawn', 'team_wait',
+])
+
+/** 有专属渲染的工具：不显示"结果"标题 */
+const NO_RESULT_LABEL_TOOLS = new Set([
+  'grep', 'glob',
+  'todo_write', 'todo_read',
+  'memory_add', 'memory_update', 'memory_search', 'memory_recall', 'memory_fact', 'memory_status',
+  'skill_list', 'skillhub_search', 'schedule_cron', 'team_status',
+  'agent', 'agent_spawn', 'team_wait',
+])
+
+function renderToolResult(toolName: string, input: unknown, result: unknown): React.ReactNode {
+  const inp = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
+  switch (toolName) {
+    case 'web_search':   return <WebSearchResult result={result} query={String(inp.query ?? '')} />
+    case 'web_fetch':    return <WebFetchResult result={result} input={input} />
+    case 'glob':         return <GlobResult result={result} input={input} />
+    case 'grep':         return <GrepResult result={result} input={input} />
+    case 'todo_write':
+    case 'todo_read':    return <TodoResult input={input} result={result} />
+    case 'memory_add':
+    case 'memory_update':
+    case 'memory_search':
+    case 'memory_recall':
+    case 'memory_fact':
+    case 'memory_status': return <MemoryResult toolName={toolName} input={input} result={result} />
+    case 'skill_list':   return <SkillListResult result={result} />
+    case 'skillhub_search': return <SkillHubSearchResult result={result} input={input} />
+    case 'schedule_cron': return <ScheduleCronResult input={input} result={result} />
+    case 'team_status':  return <TeamStatusResult result={result} />
+    case 'agent':
+    case 'agent_spawn':
+    case 'team_wait':    return <AgentResult result={result} />
+    default:             return <GenericResult result={result} />
+  }
+}
 function GenericResult({ result }: { result: unknown }) {
   const str = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
   const display = str.length > 600 ? str.slice(0, 600) + `\n…（共 ${str.length} 字符）` : str
@@ -1133,9 +1958,10 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
   const isInteractive = !(isAskUser && status === 'pending')
   const visibleLogs = logs.slice(0, 50)
 
-  // file_read：从 input 提取路径，拼接完整路径用于显示
+  // file_read / file_write：从 input 提取路径，拼接完整路径用于显示
   const isFileRead = toolName === 'file_read'
-  const filePath = isFileRead && input && typeof input === 'object'
+  const isFileWrite = toolName === 'file_write'
+  const filePath = (isFileRead || isFileWrite) && input && typeof input === 'object'
     ? String((input as Record<string, unknown>).path ?? '')
     : ''
   // 文件名（最后一段）
@@ -1157,12 +1983,12 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
     }}>
       {/* ── 标题行 ── */}
       <div
-        className={`flex items-center gap-2 px-3 py-2 ${isInteractive && !isFileRead && !isFileEdit ? 'cursor-pointer hover:bg-white/[0.025]' : 'cursor-default'} transition-colors select-none`}
-        onClick={isInteractive && !isFileRead && !isFileEdit ? onToggle : undefined}
-        role={isInteractive && !isFileRead && !isFileEdit ? 'button' : undefined}
-        tabIndex={isInteractive && !isFileRead && !isFileEdit ? 0 : undefined}
-        aria-expanded={isInteractive && !isFileRead && !isFileEdit ? isExpanded : undefined}
-        onKeyDown={isInteractive && !isFileRead && !isFileEdit ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle?.() } } : undefined}
+        className={`flex items-center gap-2 px-3 py-2 ${isInteractive && !isFileRead && !isFileWrite && !isFileEdit ? 'cursor-pointer hover:bg-white/[0.025]' : 'cursor-default'} transition-colors select-none`}
+        onClick={isInteractive && !isFileRead && !isFileWrite && !isFileEdit ? onToggle : undefined}
+        role={isInteractive && !isFileRead && !isFileWrite && !isFileEdit ? 'button' : undefined}
+        tabIndex={isInteractive && !isFileRead && !isFileWrite && !isFileEdit ? 0 : undefined}
+        aria-expanded={isInteractive && !isFileRead && !isFileWrite && !isFileEdit ? isExpanded : undefined}
+        onKeyDown={isInteractive && !isFileRead && !isFileWrite && !isFileEdit ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle?.() } } : undefined}
       >
         {/* 状态指示（最前面） */}
         <span className="shrink-0 flex items-center">
@@ -1180,8 +2006,8 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
         </span>
 
         {/* 摘要（路径 / 命令 / 查询词） */}
-        {isFileRead && fileName ? (
-          // file_read：可点击的文件名 badge
+        {(isFileRead || isFileWrite) && fileName ? (
+          // file_read / file_write：可点击的文件名 badge
           <button
             type="button"
             onClick={(e) => {
@@ -1236,8 +2062,8 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
           <span className="flex-1" />
         )}
 
-        {/* 展开箭头（file_read / file_edit 不显示） */}
-        {isInteractive && !isFileRead && !isFileEdit && (
+        {/* 展开箭头（file_read / file_write / file_edit 不显示） */}
+        {isInteractive && !isFileRead && !isFileWrite && !isFileEdit && (
           <span style={{ color: 'var(--text-muted)' }} className="shrink-0">
             <Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} size={11} />
           </span>
@@ -1258,8 +2084,22 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
         </div>
       )}
 
+      {/* ── file_write 错误信息 ── */}
+      {isFileWrite && status === 'error' && result !== undefined && (
+        <div className="px-3 py-2" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+          <p className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words"
+            style={{ color: 'var(--color-error, #f87171)' }}>
+            {typeof result === 'object' && result !== null && 'message' in result
+              ? String((result as Record<string, unknown>).message)
+              : typeof result === 'string'
+                ? result
+                : JSON.stringify(result)}
+          </p>
+        </div>
+      )}
+
       {/* ── 展开内容 ── */}
-      {isExpanded && isInteractive && !isFileRead && !isFileEdit && (
+      {isExpanded && isInteractive && !isFileRead && !isFileWrite && !isFileEdit && (
         <div className="px-3 pt-2.5 pb-3 flex flex-col gap-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
 
           {/* bash / powershell：终端一体化展示 */}
@@ -1273,8 +2113,8 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
             </div>
           ) : (
             <>
-              {/* 输入参数（glob / grep / todo / web_search / web_fetch 不显示原始 JSON） */}
-              {toolName !== 'glob' && toolName !== 'grep' && toolName !== 'todo_write' && toolName !== 'todo_read' && toolName !== 'web_search' && toolName !== 'web_fetch' && (
+              {/* 输入参数：有专属渲染的工具不显示原始 JSON */}
+              {!NO_RAW_INPUT_TOOLS.has(toolName) && (
               <div className="pt-2.5">
                 <p className="text-[10px] uppercase tracking-widest mb-1.5 font-medium" style={{ color: 'var(--text-muted)' }}>输入</p>
                 <pre className="text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words rounded-md px-2.5 py-2 overflow-x-auto"
@@ -1287,15 +2127,10 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
               {/* 执行结果 */}
               {result !== undefined && (
                 <div>
-                  {toolName !== 'grep' && toolName !== 'glob' && toolName !== 'todo_write' && toolName !== 'todo_read' && (
+                  {!NO_RESULT_LABEL_TOOLS.has(toolName) && (
                     <p className="text-[10px] uppercase tracking-widest mb-1.5 font-medium" style={{ color: 'var(--text-muted)' }}></p>
                   )}
-                  {toolName === 'web_search'                    ? <WebSearchResult result={result} query={String((input as Record<string, unknown>)?.query ?? '')} /> :
-                   toolName === 'web_fetch'                     ? <WebFetchResult result={result} input={input} /> :
-                   toolName === 'glob'                          ? <GlobResult result={result} input={input} /> :
-                   toolName === 'grep'                          ? <GrepResult result={result} input={input} /> :
-                   toolName === 'todo_write' || toolName === 'todo_read' ? <TodoResult input={input} result={result} /> :
-                   <GenericResult result={result} />}
+                  {renderToolResult(toolName, input, result)}
                 </div>
               )}
             </>

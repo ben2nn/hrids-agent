@@ -21,6 +21,17 @@ export type ServerMessage =
   | { type: 'error'; requestId: string; message: string; timestamp: number }
   | { type: 'budget_exceeded'; requestId?: string; message: string; timestamp: number }
   | { type: 'history_cleared'; requestId?: string; timestamp: number }
+  | {
+      type: 'decision_request'
+      requestId?: string
+      title: string
+      context: string
+      options: Array<{ label: string; description: string; risk?: 'low' | 'medium' | 'high' }>
+      recommendation?: string
+      deadline?: string
+      impact?: string
+      timestamp: number
+    }
 
 // ─── 客户端发送消息（WebSocket Client → Server） ───────────────────────────
 
@@ -35,6 +46,7 @@ export type ClientMessage =
   | { type: 'message'; content: string; attachments?: MessageAttachment[] }
   | { type: 'abort' }
   | { type: 'user_reply'; answer: string }
+  | { type: 'decision_reply'; answer: string }
   | { type: 'permission_reply'; key: string; granted: boolean; permanent?: boolean; session?: boolean; ruleContent?: string }
   | { type: 'set_cwd'; cwd: string }
   | { type: 'set_permission_mode'; mode: 'ask' | 'craft' | 'plan' }
@@ -200,6 +212,24 @@ export interface PermissionRequest {
   /** 规则内容（bash 命令内容或文件路径），用于前端展示和会话级批准 */
   ruleContent?: string
   /** 请求到达的时间戳（ms），用于计算 5 分钟倒计时 */
+  requestedAt: number
+}
+
+// ─── 决策请求 ──────────────────────────────────────────────────────────────
+
+export interface DecisionOption {
+  label: string
+  description: string
+  risk?: 'low' | 'medium' | 'high'
+}
+
+export interface DecisionRequest {
+  title: string
+  context: string
+  options: DecisionOption[]
+  recommendation?: string
+  deadline?: string
+  impact?: string
   requestedAt: number
 }
 

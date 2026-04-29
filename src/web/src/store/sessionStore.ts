@@ -117,6 +117,11 @@ interface SessionState {
   sendUserReply: (sessionId: string, answer: string) => void
 
   /**
+   * 通过对应会话的 WS 发送决策回复（decision_request 场景）。
+   */
+  sendDecisionReply: (sessionId: string, answer: string) => void
+
+  /**
    * 恢复历史会话：以 resume 模式创建新 session，保留对话历史。
    */
   resumeSession: (id: string) => Promise<void>
@@ -343,6 +348,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   sendUserReply(sessionId: string, answer: string) {
     _ensureWs(sessionId, set, get).send({ type: 'user_reply', answer })
+  },
+
+  sendDecisionReply(sessionId: string, answer: string) {
+    _ensureWs(sessionId, set, get).send({ type: 'decision_reply', answer })
   },
 
   clearWsMaxRetries(sessionId: string) {
