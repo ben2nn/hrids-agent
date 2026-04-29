@@ -2,6 +2,5 @@ docs
 dist
 node_modules
 refercode
-tests
 .kiro
 .vscode
