@@ -1,10 +1,9 @@
-// 系统上下文构建器 —— 注入 Git 状态、CLAUDE.md 记忆文件等
+// 系统上下文构建器 —— 注入 Git 状态、AGENT.md 记忆文件等
 import { execSync } from 'child_process'
 import { existsSync, readFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { getMemoryStack, getMemoryStackForSession } from '../memory/index.js'
-import { getCurrentSessionId } from './sessionContext.js'
+import { getMemoryStack } from '../memory/index.js'
 
 export interface ContextInfo {
   gitStatus: string | null
@@ -94,15 +93,16 @@ function _fetchGitContext(cwd?: string): string | null {
   }
 }
 
-// 查找并读取 CLAUDE.md / AGENT.md 记忆文件
-// 搜索顺序：当前目录 → 父目录 → 用户主目录
+// 查找并读取项目记忆文件（AGENT.md）
+// 搜索顺序：
+//   1. {cwd}/AGENT.md          —— 项目级记忆（随代码库存放）
+//   2. {cwd}/.hrids/AGENT.md   —— 项目级记忆（隐藏目录，适合不想提交到 git 的场景）
+//   3. ~/.hrids-agent/AGENT.md —— 用户级全局记忆（跨项目通用规则）
 function findMemoryFiles(cwd: string): string[] {
   const candidates = [
-    join(cwd, 'CLAUDE.md'),
     join(cwd, 'AGENT.md'),
-    join(cwd, '.claude', 'CLAUDE.md'),
-    join(homedir(), 'CLAUDE.md'),
-    join(homedir(), '.claude', 'CLAUDE.md'),
+    join(cwd, '.hrids', 'AGENT.md'),
+    join(homedir(), '.hrids-agent', 'AGENT.md'),
   ]
 
   const contents: string[] = []
@@ -119,52 +119,39 @@ function findMemoryFiles(cwd: string): string[] {
   return contents
 }
 
-// 构建完整的系统上下文字符串，注入到 system prompt
+// 构建完整的系统上下文，注入动态内容（记忆、环境信息）
+// 接受 string[]，追加动态 section 后返回 string[]
 // cwd 参数可选，不传则使用 ~/.hrids-agent/work/（仅用于记忆文件查找）
-export async function buildSystemContext(basePrompt: string, cwd?: string): Promise<string> {
+export async function buildSystemContext(basePrompt: string[], cwd?: string): Promise<string[]> {
   const resolvedCwd = cwd ?? getDefaultAgentCwd()
   const gitCtx = getGitContext(resolvedCwd)
   const memFiles = findMemoryFiles(resolvedCwd)
 
-  const sections: string[] = [basePrompt]
+  // 动态 section 追加到静态层之后，不影响静态层缓存
+  const dynamicSections: string[] = []
 
   // 注入记忆文件内容
   if (memFiles.length > 0) {
-    sections.push('## 项目记忆\n' + memFiles.join('\n\n'))
+    dynamicSections.push('## 项目记忆\n' + memFiles.join('\n\n'))
   }
 
-  // 注入长期记忆（L0 身份 + L1 核心摘要）
+  // 注入长期记忆（L0 身份 + L1 核心摘要）—— 读全局 store，跨会话共享
   try {
-    const sessionId = getCurrentSessionId()
-    const stack = sessionId ? getMemoryStackForSession(sessionId) : getMemoryStack()
+    const stack = getMemoryStack()
     const { l0Identity, l1Essential, totalTokens } = stack.wakeUp()
     const stats = await stack.status()
     if (stats.totalMemories > 0) {
-      sections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${l0Identity}\n\n${l1Essential}`)
+      dynamicSections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${l0Identity}\n\n${l1Essential}`)
     }
   } catch {
     // 记忆系统不可用时静默跳过
   }
 
-  // 注入记忆触发规则（让 agent 知道何时必须主动写记忆）
-  sections.push(`## 记忆规则
-遇到以下情况时，必须立即调用 memory_add，不要等到会话结束：
-- 用户表达偏好或习惯："以后都用X"、"不要用Y"、"我喜欢X风格" → type=preference
-- 做出技术决策："选择X方案"、"用X替代Y"、"因为X所以用Y" → type=decision
-- 完成重要任务："搞定了"、"上线了"、"终于解决了" → type=milestone
-- 发现 bug 根因或解决方案 → type=problem
-- 用户提到项目名、技术栈、团队成员等事实 → type=fact
-
-如果新信息与已有记忆矛盾（用户改变了决策或偏好），先用 memory_search 找到旧记忆 ID，再调用 memory_update 替换，不要重复新增。
-
-wing 填当前项目名（从工作目录或对话上下文推断），room 填具体主题（如 architecture、auth、deployment）。`)
-
-  // 注入环境信息（工作目录不在此处注入，由 getDynamicContext 动态提供）
+  // 注入环境信息
   const platform = process.platform
   const isWindows = platform === 'win32'
   const isMac = platform === 'darwin'
 
-  // 检测实际使用的 shell
   const shellEnv = process.env.SHELL ?? process.env.ComSpec ?? ''
   const shellName = isWindows
     ? (shellEnv.toLowerCase().includes('powershell') || process.env.PSModulePath ? 'PowerShell' : 'cmd.exe')
@@ -188,21 +175,11 @@ wing 填当前项目名（从工作目录或对话上下文推断），room 填�
     envInfo.push('注意: Linux 环境，使用 bash 命令')
   }
 
-  envInfo.push(`\nbash 工具超时设置（必须显式传入 timeout 参数，否则默认 60s）：
-- 快速命令（ls/cat/echo）：不传或 timeout=10000
-- 安装依赖（pip/npm install）：timeout=120000
-- 运行脚本/爬虫（短任务）：timeout=300000
-- 大批量处理/全量爬取：timeout=1800000（30分钟）
-- 超长任务：timeout=3600000（1小时）`)
-
   if (gitCtx) envInfo.push(`\nGit 状态:\n${gitCtx}`)
 
-  sections.push('## 环境信息\n' + envInfo.join('\n'))
+  dynamicSections.push('## 环境信息\n' + envInfo.join('\n'))
 
-  return sections.join('\n\n---\n\n')
+  return [...basePrompt, ...dynamicSections]
 }
 
-// 动态上下文：每次发消息前调用，返回最新工作目录信息
-export function getDynamicContext(cwd: string): string {
-  return `\n\n---\n\n## 当前工作目录\n${cwd}`
-}
+

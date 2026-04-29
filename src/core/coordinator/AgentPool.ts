@@ -2,6 +2,7 @@
 import { QueryEngine } from '../QueryEngine.js'
 import { PermissionManager } from '../PermissionManager.js'
 import { MessageBus } from './MessageBus.js'
+import { runWithAgentName } from './agentContext.js'
 import type { LLMProvider } from '../providers/index.js'
 import type { ToolDef } from '../Tool.js'
 
@@ -19,14 +20,12 @@ class Semaphore {
       this.permits--
       return
     }
-    // 没有可用槽位，挂起等待
     await new Promise<void>(resolve => this.queue.push(resolve))
   }
 
   release(): void {
     const next = this.queue.shift()
     if (next) {
-      // 直接唤醒下一个等待者，不增减 permits
       next()
     } else {
       this.permits++
@@ -38,7 +37,7 @@ export type AgentStatus = 'pending' | 'running' | 'completed' | 'failed'
 
 export interface AgentTask {
   id: string
-  name: string          // 智能体名称（用于消息寻址）
+  name: string
   description: string
   prompt: string
   status: AgentStatus
@@ -51,32 +50,30 @@ export interface AgentTask {
 
 export class AgentPool {
   private tasks = new Map<string, AgentTask>()
+  // Promise 通知：任务完成时 resolve 所有等待者，替代 200ms 轮询
+  private taskResolvers = new Map<string, Array<(task: AgentTask) => void>>()
   private bus: MessageBus
   private provider: LLMProvider
   private baseTools: ToolDef[]
   private semaphore: Semaphore
-  // 所属会话 ID（Gateway 模式下用于获取会话级记忆，CLI 模式为 undefined）
-  private sessionId: string | undefined
 
   constructor(
     provider: LLMProvider,
     baseTools: ToolDef[],
     maxConcurrent = 5,
-    sessionId?: string,
+    bus: MessageBus,
   ) {
     this.provider = provider
     this.baseTools = baseTools
     this.semaphore = new Semaphore(maxConcurrent)
-    this.bus = MessageBus.getInstance()
-    this.sessionId = sessionId
+    this.bus = bus
   }
 
-  // 提交一个新的智能体任务（立即返回任务 ID，后台运行）
   submit(
     name: string,
     description: string,
     prompt: string,
-    systemPrompt: string,
+    systemPrompt: string[],
     allowedTools?: string[],
   ): string {
     const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -89,33 +86,42 @@ export class AgentPool {
     this.tasks.set(id, task)
     this.bus.register(name)
 
-    // 异步启动，不阻塞调用方
-    // 注意：runTask 内部已有 finally 释放信号量，这里的 catch 只处理 acquire 之前的异常
     this.runTask(task, tools, systemPrompt).catch(err => {
       if (task.status === 'pending') {
-        // acquire 之前就失败了，信号量未被占用，无需释放
         task.status = 'failed'
         task.error = String(err)
         task.completedAt = Date.now()
+        this._notifyWaiters(task)
       }
     })
 
     return id
   }
 
-  // 等待指定任务完成（用 Promise 轮询，间隔 200ms）
+  // 等待指定任务完成（Promise 通知，无轮询）
   async wait(id: string, timeoutMs = 300000): Promise<AgentTask> {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      const task = this.tasks.get(id)
-      if (!task) throw new Error(`任务 ${id} 不存在`)
-      if (task.status === 'completed' || task.status === 'failed') return task
-      await new Promise(resolve => setTimeout(resolve, 200))
-    }
-    throw new Error(`任务 ${id} 超时`)
+    const task = this.tasks.get(id)
+    if (!task) throw new Error(`任务 ${id} 不存在`)
+    if (task.status === 'completed' || task.status === 'failed') return task
+
+    return new Promise<AgentTask>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const resolvers = this.taskResolvers.get(id) ?? []
+        this.taskResolvers.set(id, resolvers.filter(r => r !== resolver))
+        reject(new Error(`任务 ${id} 超时（${timeoutMs}ms）`))
+      }, timeoutMs)
+
+      const resolver = (t: AgentTask) => {
+        clearTimeout(timer)
+        resolve(t)
+      }
+
+      const resolvers = this.taskResolvers.get(id) ?? []
+      resolvers.push(resolver)
+      this.taskResolvers.set(id, resolvers)
+    })
   }
 
-  // 等待所有任务完成
   async waitAll(ids: string[], timeoutMs = 300000): Promise<AgentTask[]> {
     return Promise.all(ids.map(id => this.wait(id, timeoutMs)))
   }
@@ -136,7 +142,6 @@ export class AgentPool {
     return Array.from(this.tasks.values()).filter(t => t.status === 'running').length
   }
 
-  // 中止指定任务
   abort(id: string) {
     const task = this.tasks.get(id)
     if (task?.engine) {
@@ -144,12 +149,17 @@ export class AgentPool {
       task.status = 'failed'
       task.error = '已中止'
       task.completedAt = Date.now()
+      this._notifyWaiters(task)
     }
   }
 
-  private async runTask(task: AgentTask, tools: ToolDef[], systemPrompt: string) {
-    // 用信号量获取并发槽位（无 CPU 消耗的等待，替代忙等待轮询）
-    // 用 acquired 标志位防止 acquire 失败时 finally 中双重释放
+  private _notifyWaiters(task: AgentTask) {
+    const resolvers = this.taskResolvers.get(task.id) ?? []
+    resolvers.forEach(r => r(task))
+    this.taskResolvers.delete(task.id)
+  }
+
+  private async runTask(task: AgentTask, tools: ToolDef[], systemPrompt: string[]) {
     let acquired = false
     try {
       await this.semaphore.acquire()
@@ -158,22 +168,25 @@ export class AgentPool {
       task.status = 'failed'
       task.error = `获取并发槽位失败: ${String(err)}`
       task.completedAt = Date.now()
+      this._notifyWaiters(task)
       return
     }
 
     task.status = 'running'
     task.startedAt = Date.now()
 
-    // 注入记忆快照（L0+L1）到子智能体 system prompt
-    // 优先使用会话级记忆（Gateway 模式），CLI 模式回退到全局单例
-    let finalSystemPrompt = systemPrompt
+    // 注入全局记忆快照（L0+L1）
+    let finalSystemPrompt: string[] = [...systemPrompt]
     try {
-      const { getMemoryStack, getMemoryStackForSession } = await import('../../memory/index.js')
-      const stack = this.sessionId ? getMemoryStackForSession(this.sessionId) : getMemoryStack()
+      const { getMemoryStack } = await import('../../memory/index.js')
+      const stack = getMemoryStack()
       const stats = await stack.status()
       if (stats.totalMemories > 0) {
         const { l0Identity, l1Essential } = stack.wakeUp()
-        finalSystemPrompt = `${systemPrompt}\n\n## 继承自父智能体的记忆上下文\n\n${l0Identity}\n\n${l1Essential}`
+        finalSystemPrompt = [
+          ...systemPrompt,
+          `## 继承自父智能体的记忆上下文\n\n${l0Identity}\n\n${l1Essential}`,
+        ]
       }
     } catch { /* 记忆系统不可用时静默跳过 */ }
 
@@ -189,16 +202,21 @@ export class AgentPool {
 
     let result = ''
     try {
-      for await (const ev of engine.send(task.prompt)) {
-        if (ev.type === 'text_delta') result += ev.delta
-        else if (ev.type === 'error') {
-          task.status = 'failed'
-          task.error = ev.message
-          task.completedAt = Date.now()
-          this.bus.unregister(task.name)
-          return
+      // runWithAgentName 将智能体名称注入 AsyncLocalStorage，
+      // send_message / receive_message 工具通过 getCurrentAgentName() 读取
+      await runWithAgentName(task.name, async () => {
+        for await (const ev of engine.send(task.prompt)) {
+          if (ev.type === 'text_delta') result += ev.delta
+          else if (ev.type === 'error') {
+            task.status = 'failed'
+            task.error = ev.message
+            task.completedAt = Date.now()
+            this.bus.unregister(task.name)
+            this._notifyWaiters(task)
+            return
+          }
         }
-      }
+      })
       task.result = result
       task.status = 'completed'
     } catch (err) {
@@ -207,8 +225,8 @@ export class AgentPool {
     } finally {
       task.completedAt = Date.now()
       this.bus.unregister(task.name)
-      // 只有成功 acquire 后才释放，防止双重释放
       if (acquired) this.semaphore.release()
+      this._notifyWaiters(task)
     }
   }
 }

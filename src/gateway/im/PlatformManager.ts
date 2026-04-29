@@ -260,76 +260,34 @@ export class PlatformManager {
   }
 
   /**
-   * 通过 SessionManager 运行消息，收集完整的文本输出
-   * 同时支持流式中间编辑（Telegram 等支持编辑的平台）
+   * 通过 SessionManager 运行消息，收集完整的文本输出。
+   * 使用 runMessageWithCallback 替代 fake WebSocket，类型安全且无内存泄漏。
    */
   private async runAgentMessage(
     agentSessionId: string,
     text: string,
     sessionKey: string,
   ): Promise<string> {
-    // 使用 SessionManager 的内部 runMessage，但我们需要捕获输出
-    // 通过订阅 WebSocket 广播事件来收集输出
-    return new Promise<string>((resolve, reject) => {
-      let fullText = ''
-      let resolved = false
+    let fullText = ''
 
-      // 创建一个虚拟 WebSocket 订阅者来接收事件
-      const fakeWs = {
-        send: (data: string) => {
-          try {
-            const event = JSON.parse(data) as { type: string; delta?: string; message?: string }
-            if (event.type === 'text_delta' && event.delta) {
-              fullText += event.delta
-              // 触发流式中间编辑（异步，不阻塞）
-              void this.onStreamDelta(sessionKey, event.delta)
-            } else if (event.type === 'done') {
-              if (!resolved) {
-                resolved = true
-                resolve(fullText)
-              }
-            } else if (event.type === 'error') {
-              if (!resolved) {
-                resolved = true
-                reject(new Error(event.message ?? '未知错误'))
-              }
-            } else if (event.type === 'interrupted') {
-              if (!resolved) {
-                resolved = true
-                resolve(fullText || '（任务已中断）')
-              }
-            }
-          } catch { /* 忽略解析错误 */ }
-        },
-        // 满足 WebSocket 接口的最小实现
-        readyState: 1,
-        OPEN: 1,
-      } as unknown as import('ws').WebSocket
+    const timeoutMs = 5 * 60 * 1000
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('响应超时')), timeoutMs)
+    )
 
-      // 订阅会话事件
-      this.sessionManager.subscribe(agentSessionId, fakeWs)
-
-      // 发送消息
-      this.sessionManager.runMessage(agentSessionId, text)
-        .catch((err) => {
-          if (!resolved) {
-            resolved = true
-            reject(err)
-          }
-        })
-
-      // 超时保护（5 分钟）
-      setTimeout(() => {
-        if (!resolved) {
-          resolved = true
-          this.sessionManager.unsubscribe(agentSessionId, fakeWs)
-          resolve(fullText || '（响应超时）')
+    const runPromise = this.sessionManager.runMessageWithCallback(
+      agentSessionId,
+      text,
+      (ev) => {
+        if (ev.type === 'text_delta' && ev.delta) {
+          fullText += ev.delta
+          void this.onStreamDelta(sessionKey, ev.delta)
         }
-      }, 5 * 60 * 1000)
-    }).finally(() => {
-      // 确保取消订阅（避免内存泄漏）
-      // 注意：fakeWs 在 finally 中已不可访问，但 SessionManager 会在 done/error 后自动清理
-    })
+      },
+    )
+
+    await Promise.race([runPromise, timeoutPromise])
+    return fullText
   }
 
   /** 流式输出增量处理（可选：支持编辑的平台实时更新消息） */

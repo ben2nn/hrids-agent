@@ -27,6 +27,134 @@ function atomicWriteJson(filePath: string, data: unknown): void {
   renameSync(tmp, filePath)
 }
 
+// ── 消息格式转换 ──────────────────────────────────────────────────────────────
+
+export interface DisplayMessage {
+  id: string
+  type: string
+  content?: string
+  toolId?: string
+  toolName?: string
+  toolInput?: unknown
+  toolStatus?: 'success' | 'error'
+  toolResult?: unknown
+  images?: string[]
+  isCron?: boolean
+  cronDescription?: string
+  requestId?: string
+  timestamp: number
+}
+
+const IMAGE_PATTERN = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
+
+/**
+ * 将原始 Message[] 转换为前端 DisplayMessage[]。
+ * 两处端点（/messages 和 /history-segments/:filename/messages）共用此函数。
+ *
+ * @param rawMessages 原始消息列表
+ * @param idPrefix    消息 ID 前缀，用于区分来源（'' 或 'arc-'）
+ */
+function formatMessagesForDisplay(
+  rawMessages: import('../core/QueryEngine.js').Message[],
+  idPrefix = '',
+): DisplayMessage[] {
+  // 第一遍：建立 toolId → result 映射
+  type ToolResultEntry = { content: unknown; isError: boolean }
+  const toolResults = new Map<string, ToolResultEntry>()
+  for (const msg of rawMessages) {
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
+    for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+      if (block.type === 'tool_result' && block.tool_use_id) {
+        toolResults.set(block.tool_use_id, {
+          content: block.content,
+          isError: block.is_error === true,
+        })
+      }
+    }
+  }
+
+  // 第二遍：构建 DisplayMessage 列表
+  const displayMessages: DisplayMessage[] = []
+  let idx = 0
+
+  for (const msg of rawMessages) {
+    const timestamp = Date.now() - (rawMessages.length - idx) * 1000
+    idx++
+
+    if (msg.role === 'user') {
+      if (typeof msg.content !== 'string') continue
+      if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
+
+      const images: string[] = []
+      IMAGE_PATTERN.lastIndex = 0
+      let match: RegExpExecArray | null
+      while ((match = IMAGE_PATTERN.exec(msg.content)) !== null) {
+        images.push(match[1])
+      }
+
+      displayMessages.push({
+        id: `${idPrefix}u-${idx}`,
+        type: 'user',
+        content: msg.content,
+        timestamp,
+        ...(images.length > 0 ? { images } : {}),
+      })
+    } else if (msg.role === 'assistant') {
+      const isCron = msg.trigger === 'cron'
+      const requestId = msg.requestId
+      const cronDescription = msg.cronDescription
+
+      if (typeof msg.content === 'string') {
+        if (msg.content.trim()) {
+          displayMessages.push({
+            id: `${idPrefix}a-${idx}`,
+            type: 'assistant',
+            content: msg.content,
+            timestamp,
+            ...(isCron ? { isCron: true } : {}),
+            ...(cronDescription ? { cronDescription } : {}),
+            ...(requestId ? { requestId } : {}),
+          })
+        }
+      } else if (Array.isArray(msg.content)) {
+        const textParts = (msg.content as Array<{ type: string; text?: string }>)
+          .filter(b => b.type === 'text')
+          .map(b => b.text ?? '')
+          .join('')
+        if (textParts.trim()) {
+          displayMessages.push({
+            id: `${idPrefix}a-${idx}`,
+            type: 'assistant',
+            content: textParts,
+            timestamp,
+            ...(isCron ? { isCron: true } : {}),
+            ...(cronDescription ? { cronDescription } : {}),
+            ...(requestId ? { requestId } : {}),
+          })
+        }
+        for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
+          if (block.type === 'tool_use' && block.id && block.name) {
+            const resultEntry = toolResults.get(block.id)
+            displayMessages.push({
+              id: `${idPrefix}t-${block.id}`,
+              type: 'tool',
+              toolId: block.id,
+              toolName: block.name,
+              toolInput: block.input,
+              toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
+              toolResult: resultEntry?.content,
+              timestamp: timestamp + 1,
+              ...(requestId ? { requestId } : {}),
+            })
+          }
+        }
+      }
+    }
+  }
+
+  return displayMessages
+}
+
 export interface GatewayConfig {
   port?: number
   host?: string
@@ -418,105 +546,7 @@ export function createGateway(config: GatewayConfig = {}) {
       return
     }
 
-    // ── 第一遍：从 user 消息的 tool_result 块建立结果映射 ──────────────
-    // toolId → { content, isError }
-    type ToolResultEntry = { content: unknown; isError: boolean }
-    const toolResults = new Map<string, ToolResultEntry>()
-
-    for (const msg of rawMessages) {
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-      for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
-        if (block.type === 'tool_result' && block.tool_use_id) {
-          toolResults.set(block.tool_use_id, {
-            content: block.content,
-            isError: block.is_error === true,
-          })
-        }
-      }
-    }
-
-    // ── 第二遍：构建 DisplayMessage 列表，tool 消息附带 input/status/result ─
-    const displayMessages: Array<{
-      id: string
-      type: string
-      content?: string
-      toolId?: string
-      toolName?: string
-      toolInput?: unknown
-      toolStatus?: 'success' | 'error'
-      toolResult?: unknown
-      images?: string[]
-      isCron?: boolean
-      requestId?: string
-      timestamp: number
-    }> = []
-
-    let idx = 0
-    for (const msg of rawMessages) {
-      const timestamp = Date.now() - (rawMessages.length - idx) * 1000
-      idx++
-
-      if (msg.role === 'user') {
-        if (typeof msg.content === 'string') {
-          // 跳过系统内部注入的消息
-          if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
-          
-          // 从消息内容中提取图片引用（@filename 格式）
-          const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
-          const images: string[] = []
-          let match: RegExpExecArray | null
-          while ((match = imagePattern.exec(msg.content)) !== null) {
-            images.push(match[1])
-          }
-          
-          displayMessages.push({ 
-            id: `u-${idx}`, 
-            type: 'user', 
-            content: msg.content, 
-            timestamp,
-            ...(images.length > 0 ? { images } : {})
-          })
-        }
-        // tool_result 不单独显示（结果附在 tool 消息上）
-      } else if (msg.role === 'assistant') {
-        const isCron = msg.trigger === 'cron'
-        const requestId = msg.requestId
-        const cronDescription = msg.cronDescription
-        if (typeof msg.content === 'string') {
-          if (msg.content.trim()) {
-            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: msg.content, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
-          }
-        } else if (Array.isArray(msg.content)) {
-          // 提取 text 块
-          const textParts = (msg.content as Array<{ type: string; text?: string }>)
-            .filter(b => b.type === 'text')
-            .map(b => b.text ?? '')
-            .join('')
-          if (textParts.trim()) {
-            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: textParts, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
-          }
-          // 提取 tool_use 块，附带 input 和对应的 tool_result
-          for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
-            if (block.type === 'tool_use' && block.id && block.name) {
-              const resultEntry = toolResults.get(block.id)
-              displayMessages.push({
-                id: `t-${block.id}`,
-                type: 'tool',
-                toolId: block.id,
-                toolName: block.name,
-                toolInput: block.input,
-                toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
-                toolResult: resultEntry?.content,
-                timestamp: timestamp + 1,
-                ...(requestId ? { requestId } : {}),
-              })
-            }
-          }
-        }
-      }
-    }
-
-    res.json(displayMessages)
+    res.json(formatMessagesForDisplay(rawMessages))
   })
 
   // GET /sessions/:id/history-segments — 读取会话的压缩归档段列表
@@ -530,67 +560,11 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // GET /sessions/:id/history-segments/:filename/messages — 读取归档段的实际消息
   app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
     try {
       const rawMessages = loadSessionArchive(req.params.id, req.params.filename)
       if (!rawMessages) { res.json([]); return }
-
-      type ToolResultEntry = { content: unknown; isError: boolean }
-      const toolResults = new Map<string, ToolResultEntry>()
-      for (const msg of rawMessages) {
-        if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-        for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
-          if (block.type === 'tool_result' && block.tool_use_id) {
-            toolResults.set(block.tool_use_id, { content: block.content, isError: block.is_error === true })
-          }
-        }
-      }
-
-      const displayMessages: Array<{
-        id: string; type: string; content?: string; toolId?: string; toolName?: string
-        toolInput?: unknown; toolStatus?: 'success' | 'error'; toolResult?: unknown
-        images?: string[]; isCron?: boolean; requestId?: string; timestamp: number
-      }> = []
-
-      let idx = 0
-      for (const msg of rawMessages) {
-        const timestamp = Date.now() - (rawMessages.length - idx) * 1000
-        idx++
-        if (msg.role === 'user') {
-          if (typeof msg.content === 'string') {
-            if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
-            const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
-            const images: string[] = []
-            let match: RegExpExecArray | null
-            while ((match = imagePattern.exec(msg.content)) !== null) images.push(match[1])
-            displayMessages.push({ id: `arc-u-${idx}`, type: 'user', content: msg.content, timestamp, ...(images.length > 0 ? { images } : {}) })
-          }
-        } else if (msg.role === 'assistant') {
-          const isCron = msg.trigger === 'cron'
-          const requestId = msg.requestId
-          const cronDescription = msg.cronDescription
-          if (typeof msg.content === 'string') {
-            if (msg.content.trim()) displayMessages.push({ id: `arc-a-${idx}`, type: 'assistant', content: msg.content, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
-          } else if (Array.isArray(msg.content)) {
-            const textParts = (msg.content as Array<{ type: string; text?: string }>)
-              .filter(b => b.type === 'text').map(b => b.text ?? '').join('')
-            if (textParts.trim()) displayMessages.push({ id: `arc-a-${idx}`, type: 'assistant', content: textParts, timestamp, ...(isCron ? { isCron: true } : {}), ...(cronDescription ? { cronDescription } : {}), ...(requestId ? { requestId } : {}) })
-            for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
-              if (block.type === 'tool_use' && block.id && block.name) {
-                const resultEntry = toolResults.get(block.id)
-                displayMessages.push({
-                  id: `arc-t-${block.id}`, type: 'tool', toolId: block.id, toolName: block.name,
-                  toolInput: block.input, toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
-                  toolResult: resultEntry?.content, timestamp: timestamp + 1,
-                  ...(requestId ? { requestId } : {}),
-                })
-              }
-            }
-          }
-        }
-      }
-      res.json(displayMessages)
+      res.json(formatMessagesForDisplay(rawMessages, 'arc-'))
     } catch (err) {
       log.warn('读取归档消息失败', { error: String(err) })
       res.json([])

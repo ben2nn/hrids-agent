@@ -30,7 +30,7 @@ export interface ImageSource {
 
 export interface QueryEngineConfig {
   provider: LLMProvider
-  systemPrompt: string
+  systemPrompt: string[]
   tools: ToolDef[]
   permissions: PermissionManager
   maxTokens?: number
@@ -113,6 +113,11 @@ export class QueryEngine {
   private previousSummary: string | null = null
   // 压缩前归档回调（由外部注册，用于持久化原始历史）
   onBeforeCompact: ((summary: string) => Promise<void>) | null = null
+  // 每次 send 前的钩子（由外部注册，用于动态更新 systemPrompt、保存会话等）
+  // 替代 monkey-patch engine.send 的方式，类型安全且调用栈清晰
+  onBeforeSend: ((message: string) => Promise<void>) | null = null
+  // 每次 send 完成后的钩子
+  onAfterSend: (() => void) | null = null
   // 当前请求的 requestId，用于关联消息分组
   private currentRequestId: string | null = null
   // 当前请求的触发来源
@@ -375,7 +380,7 @@ ${contentToSummarize}
       for await (const chunk of this.config.provider.stream(
         [{ role: 'user', content: summaryPrompt }],
         [],
-        '你是一个对话摘要助手，请生成简洁准确的结构化摘要。',
+        ['你是一个对话摘要助手，请生成简洁准确的结构化摘要。'],
         3000,
       )) {
         if (chunk.type === 'text_delta' && chunk.delta) {
@@ -653,18 +658,25 @@ ${contentToSummarize}
     this.running = true
     this.abortController = new AbortController()
 
+    // 调用 onBeforeSend 钩子（动态更新 systemPrompt、保存会话等）
+    // 同时提取消息文本用于后续意图检测，避免重复计算
+    const msgText = typeof userMessage === 'string'
+      ? userMessage
+      : (Array.isArray((userMessage as Message).content)
+          ? ((userMessage as Message).content as ContentBlock[])
+              .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+              .map(b => b.text).join('')
+          : String((userMessage as Message).content))
+    if (this.onBeforeSend) {
+      try { await this.onBeforeSend(msgText) } catch { /* 钩子失败不阻断执行 */ }
+    }
+
     // 规范化用户消息为 Message 对象，并添加 requestId 和 trigger
     const userMsg: Message = typeof userMessage === 'string'
       ? { role: 'user', content: userMessage, requestId: this.currentRequestId ?? undefined }
       : { ...userMessage, requestId: this.currentRequestId ?? userMessage.requestId }
     
-    // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行
-    const msgText = typeof userMsg.content === 'string'
-      ? userMsg.content
-      : (userMsg.content as ContentBlock[])
-          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-          .map(b => b.text)
-          .join('')
+    // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行（复用上方已提取的 msgText）
     const isQueryMode = this.isQueryIntent(msgText)
 
     // craft 模式：不设轮次上限，完全依赖 autocompact 管理上下文
@@ -858,6 +870,9 @@ ${contentToSummarize}
     } finally {
       // 无论正常结束还是异常，都要释放锁并发 done
       this.running = false
+      if (this.onAfterSend) {
+        try { this.onAfterSend() } catch { /* 钩子失败不阻断 */ }
+      }
       yield { type: 'done' }
     }
   }
@@ -875,7 +890,7 @@ ${contentToSummarize}
   clearHistory() { this.history = [] }
   getHistory(): readonly Message[] { return this.history }
   setHistory(messages: Message[]) { this.history = [...messages] }
-  setSystemPrompt(prompt: string) { this.config.systemPrompt = prompt }
+  setSystemPrompt(prompt: string[]) { this.config.systemPrompt = prompt }
   setProvider(provider: LLMProvider) { this.config.provider = provider }
   getTools(): readonly ToolDef[] { return this.config.tools }
 

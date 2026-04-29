@@ -82,7 +82,8 @@ export async function setupSession(opts: SessionSetupOpts): Promise<SessionSetup
     mkdirSync(initialCwd, { recursive: true })
   }
   setGlobalCwd(initialCwd)
-  try { process.chdir(initialCwd) } catch { /* 目录不存在时忽略 */ }
+  // 注意：不调用 process.chdir，避免修改进程级工作目录影响 Gateway 多会话场景
+  // cwd 通过 AsyncLocalStorage（runWithCwd）在每次消息处理时注入
 
   return { sessionId, initialMessages, initialCwd }
 }

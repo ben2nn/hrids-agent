@@ -63,7 +63,7 @@ export interface LLMProvider {
   stream(
     messages: ChatMessage[],
     tools: ToolDef[],
-    systemPrompt: string,
+    systemPrompt: string[],
     maxTokens: number,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk>

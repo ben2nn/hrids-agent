@@ -1,7 +1,7 @@
 // 多智能体团队工具集
 import { z } from 'zod'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { MessageBus } from '../core/coordinator/MessageBus.js'
+import { getCurrentAgentName } from '../core/coordinator/agentContext.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 import type { ToolDef } from '../core/Tool.js'
 
@@ -191,10 +191,11 @@ export const SendMessageTool: ToolDef<typeof sendMessageSchema> = {
   readonly: false,
   describe: (i) => `发消息给 ${i.to}`,
   async execute(input) {
-    const bus = MessageBus.getInstance()
-    // 发送方名称从环境变量获取（由 AgentPool 在启动时注入）
-    const from = process.env.AGENT_NAME ?? 'unknown'
-    bus.send(from, input.to, input.content)
+    const mgr = getTeamManager()
+    if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
+    // 从 AsyncLocalStorage 获取当前智能体名称，避免 process.env 多并发覆盖
+    const from = getCurrentAgentName() ?? 'unknown'
+    mgr.bus.send(from, input.to, input.content)
     return {
       type: 'success',
       output: `消息已发送给 "${input.to}"`,
@@ -214,12 +215,14 @@ export const ReceiveMessageTool: ToolDef<typeof receiveMessageSchema> = {
   readonly: true,
   describe: () => '接收消息',
   async execute(input) {
-    const bus = MessageBus.getInstance()
-    const agentName = process.env.AGENT_NAME ?? 'unknown'
+    const mgr = getTeamManager()
+    if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
+    // 从 AsyncLocalStorage 获取当前智能体名称
+    const agentName = getCurrentAgentName() ?? 'unknown'
     const waitMs = (input.wait_seconds ?? 10) * 1000
 
     if (waitMs === 0) {
-      const msgs = bus.drain(agentName)
+      const msgs = mgr.bus.drain(agentName)
       if (msgs.length === 0) return { type: 'success', output: '没有新消息' }
       return {
         type: 'success',
@@ -227,7 +230,7 @@ export const ReceiveMessageTool: ToolDef<typeof receiveMessageSchema> = {
       }
     }
 
-    const msg = await bus.waitForMessage(agentName, waitMs)
+    const msg = await mgr.bus.waitForMessage(agentName, waitMs)
     if (!msg) return { type: 'success', output: '等待超时，没有收到消息' }
     return { type: 'success', output: `[来自 ${msg.from}]: ${msg.content}` }
   },

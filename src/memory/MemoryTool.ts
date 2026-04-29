@@ -1,20 +1,17 @@
 // 记忆工具集 —— 供 agent 主动读写记忆
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
-import { getMemoryStack, getMemoryStackForSession } from './layers.js'
-import { getMemoryStore, getMemoryStoreForSession } from './store.js'
-import { getCurrentSessionId } from '../core/sessionContext.js'
+import { getMemoryStack } from './layers.js'
+import { getMemoryStore } from './store.js'
 
-/** 获取当前上下文的 MemoryStack（Gateway 用会话级，CLI 用全局单例） */
+/** 获取全局 MemoryStack（记忆跨会话共享，会话 ID 仅作来源标记） */
 function resolveStack() {
-  const sid = getCurrentSessionId()
-  return sid ? getMemoryStackForSession(sid) : getMemoryStack()
+  return getMemoryStack()
 }
 
-/** 获取当前上下文的 MemoryStore（Gateway 用会话级，CLI 用全局单例） */
+/** 获取全局 MemoryStore（记忆跨会话共享，会话 ID 仅作来源标记） */
 function resolveStore() {
-  const sid = getCurrentSessionId()
-  return sid ? getMemoryStoreForSession(sid) : getMemoryStore()
+  return getMemoryStore()
 }
 
 // ── memory_add ───────────────────────────────────────────────

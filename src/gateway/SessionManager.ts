@@ -36,14 +36,12 @@ export interface ManagedSession {
   engine: QueryEngine
   provider: LLMProvider
   permissions: PermissionManager
-  // 当前连接的 WebSocket 客户端（同一会话可被多个客户端订阅，支持多标签页/多设备）
   subscribers: Set<WebSocket>
-  // 空闲超时计时器（仅基于 lastActiveAt，与订阅者数量无关）
   idleTimer: ReturnType<typeof setTimeout> | null
-  // 待处理的权限询问（key = toolName+description，value = resolve 函数）
   pendingPermissions: Map<string, (granted: boolean) => void>
-  // 事件回放缓冲区：新客户端连接时回放进行中的输出，不错过任何事件
   replayBuffer: object[]
+  // 内部事件监听器（供 runMessageWithCallback 使用，避免 fake WebSocket）
+  internalListeners: Set<(ev: { type: string; delta?: string; message?: string }) => void>
 }
 
 export interface SessionManagerConfig {
@@ -118,6 +116,7 @@ export class SessionManager {
       idleTimer: null,
       pendingPermissions: new Map(),
       replayBuffer: [],
+      internalListeners: new Set(),
     }
 
     const permissions = new PermissionManager(
@@ -181,7 +180,7 @@ export class SessionManager {
     // 恢复已有会话或新建
     const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
 
-    const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(), sessionCwd)
+    const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd)
 
     session.engine = new QueryEngine({
       provider,
@@ -322,9 +321,7 @@ export class SessionManager {
     // 注意：不重置空闲计时器 —— session 生命周期与订阅者数量无关
   }
 
-  // 向会话的所有订阅者广播消息，同时写入回放缓冲区
   broadcast(session: ManagedSession, msg: object): void {
-    // 统一注入发送时间戳
     const msgWithTs = { ...msg, timestamp: Date.now() }
     const text = JSON.stringify(msgWithTs)
     const msgType = (msg as Record<string, unknown>).type
@@ -332,7 +329,14 @@ export class SessionManager {
       log.debug('广播消息', { sessionId: session.info.id, type: msgType, subscribers: session.subscribers.size })
     }
 
-    // 写入回放缓冲区（done/error 事件后清空，避免新客户端重复看到旧轮次的输出）
+    // 触发内部监听器（供 runMessageWithCallback 使用）
+    if (session.internalListeners.size > 0) {
+      const ev = msg as { type: string; delta?: string; message?: string }
+      for (const listener of session.internalListeners) {
+        try { listener(ev) } catch { /* 忽略监听器异常 */ }
+      }
+    }
+
     if (msgType === 'done' || msgType === 'error' || msgType === 'interrupted') {
       session.replayBuffer.push(msgWithTs)
     } else if (msgType === 'message') {
@@ -414,6 +418,34 @@ export class SessionManager {
       })
     } finally {
       session.info.status = 'ready'
+    }
+  }
+
+  /**
+   * 执行用户消息，通过回调接收事件流（供 IM 平台等非 WebSocket 场景使用）。
+   * 避免 fake WebSocket 的类型不安全和内存泄漏问题。
+   *
+   * @param onEvent 事件回调，接收 { type, delta?, message? } 格式的事件
+   */
+  async runMessageWithCallback(
+    sessionId: string,
+    content: string,
+    onEvent: (ev: { type: string; delta?: string; message?: string }) => void,
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    if (session.info.status === 'busy') throw new Error('会话正忙，请等待当前任务完成')
+
+    // 注册内部监听器，broadcast 时会同步触发
+    session.internalListeners.add(onEvent)
+    try {
+      await runWithCwd(session.info.cwd, () =>
+        runWithSession(sessionId, () =>
+          this._runMessageInContext(session, sessionId, content, undefined, undefined)
+        )
+      )
+    } finally {
+      session.internalListeners.delete(onEvent)
     }
   }
 
@@ -561,18 +593,18 @@ export class SessionManager {
     }
 
     // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
-    const coordinatorPrompt = getCoordinatorSystemPrompt(content)
+    const allTools = session.engine.getTools()
+    const coordinatorPrompt = getCoordinatorSystemPrompt(content, allTools)
+
+    // 追加动态层（记忆、环境信息），确保每条消息都能看到最新的记忆和 Git 状态
+    const fullPrompt = await buildSystemContext(coordinatorPrompt, session.info.cwd)
 
     // plan 模式：动态注入规划模式系统提示，让 LLM 知道只做分析不执行写操作
     if (session.permissions.getMode() === 'plan') {
-      // 动态生成可用/不可用工具列表，基于工具的 readonly 属性
-      const allTools = session.engine.getTools()
       const readonlyTools = allTools.filter(t => t.readonly).map(t => t.name)
       const writeTools = allTools.filter(t => !t.readonly).map(t => t.name)
 
-      const planModeAppendix = `
-
-## 当前模式：Plan（规划模式）
+      const planModeAppendix = `## 当前模式：Plan（规划模式）
 你现在处于规划模式，所有写操作均被系统禁止。
 
 ### 可用工具（只读）
@@ -588,10 +620,9 @@ ${writeTools.join('、')}
 4. 计划完成后，告知用户"已完成规划，请切换到执行模式后继续"
 
 用户确认计划后，会将模式切换为 ask 或 auto，届时写操作将可用。`
-      session.engine.setSystemPrompt(coordinatorPrompt + planModeAppendix)
+      session.engine.setSystemPrompt([...fullPrompt, planModeAppendix])
     } else {
-      // 非 plan 模式：使用动态注入了任务扩展的 coordinator prompt
-      session.engine.setSystemPrompt(coordinatorPrompt)
+      session.engine.setSystemPrompt(fullPrompt)
     }
 
     const msgWithCtx = userMsg

@@ -46,11 +46,13 @@ export async function runInteractiveMode(
     archiveSession(sessionId, summary)
   }
 
-  // 自动保存会话 + 自动沉淀 skill + 动态注入扩展 prompt
-  const originalSend = engine.send.bind(engine)
-  engine.send = async function* (msg: string) {
+  // 每次 send 前：动态注入扩展 prompt
+  engine.onBeforeSend = async (msg: string) => {
     await buildPromptForMessage(msg)
-    yield* originalSend(msg)
+  }
+
+  // 每次 send 后：保存会话 + 后台钩子
+  engine.onAfterSend = () => {
     saveSession(sessionId, engine.getHistory(), model, initialCwd)
     void autoExtractMemories(engine, sessionId, provider, memoryCondense)
     void autoDistillSkill(engine, provider, skillDistill)

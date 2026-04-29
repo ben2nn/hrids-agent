@@ -134,7 +134,7 @@ export class FallbackProvider implements LLMProvider {
   async *stream(
     messages: ChatMessage[],
     tools: ToolDef[],
-    systemPrompt: string,
+    systemPrompt: string[],
     maxTokens: number,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {

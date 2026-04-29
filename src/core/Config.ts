@@ -1,6 +1,6 @@
 // 配置系统 —— 读写 ~/.hrids-agent/config.json
 // 所有运行时配置均从此文件读取，不再依赖 .env
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { McpServerConfig } from '../tools/McpTool.js'
@@ -74,6 +74,12 @@ export interface AgentBehaviorConfig {
   memoryCondense?: boolean
   /** 自动将成功任务提炼为可复用技能（实验性） */
   autoDistillSkill?: boolean
+  /** 启动时自动清理过期会话，false 可完全禁用。默认 true */
+  autoPruneSessions?: boolean
+  /** 自动清理时至少保留的最近会话数，默认 50 */
+  pruneKeepCount?: number
+  /** 自动清理时保留的最大天数，超过此天数的旧会话将被删除，默认 90 */
+  pruneMaxAgeDays?: number
 }
 
 // ── Gateway 配置 ──────────────────────────────────────────────
@@ -198,6 +204,9 @@ const DEFAULTS = {
     maxTurns: 50,
     memoryCondense: true,
     autoDistillSkill: false,
+    autoPruneSessions: true,
+    pruneKeepCount: 50,
+    pruneMaxAgeDays: 90,
   },
   gateway: {
     port: 3282,
@@ -218,6 +227,8 @@ const DEFAULTS = {
 
 // ── 单例缓存 ──────────────────────────────────────────────────
 let _cachedConfig: ResolvedConfig | null = null
+// 上次成功读取 config.json 时的文件修改时间（ms），用于检测外部修改
+let _cachedMtime = 0
 
 function ensureConfigDir() {
   if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
@@ -270,6 +281,9 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     cwd:            clean.agent?.cwd             ?? clean.agentCwd        ?? '',
     memoryCondense: clean.agent?.memoryCondense  ?? clean.memoryCondense  ?? DEFAULTS.agent.memoryCondense,
     autoDistillSkill: clean.agent?.autoDistillSkill ?? clean.autoDistillSkill ?? DEFAULTS.agent.autoDistillSkill,
+    autoPruneSessions: clean.agent?.autoPruneSessions ?? DEFAULTS.agent.autoPruneSessions,
+    pruneKeepCount:    clean.agent?.pruneKeepCount    ?? DEFAULTS.agent.pruneKeepCount,
+    pruneMaxAgeDays:   clean.agent?.pruneMaxAgeDays   ?? DEFAULTS.agent.pruneMaxAgeDays,
   }
 
   // 合并 logging 分组
@@ -324,7 +338,18 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
 }
 
 export function loadConfig(): ResolvedConfig {
-  if (_cachedConfig) return _cachedConfig
+  // 检查文件是否被外部修改（mtime 变化则使缓存失效）
+  if (_cachedConfig) {
+    try {
+      const mtime = statSync(CONFIG_FILE).mtimeMs
+      if (mtime === _cachedMtime) return _cachedConfig
+      // 文件已被外部修改，清除缓存重新读取
+      process.stderr.write(`[config] 检测到配置文件变更，重新加载\n`)
+      _cachedConfig = null
+    } catch {
+      // 文件不存在等异常，继续走下面的逻辑
+    }
+  }
 
   ensureConfigDir()
 
@@ -343,7 +368,8 @@ export function loadConfig(): ResolvedConfig {
   }
 
   try {
-    const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')) as Partial<AgentConfig>
+    // 读取时剥离 UTF-8 BOM（\uFEFF），防止 JSON.parse 因 BOM 失败
+    const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8').replace(/^\uFEFF/, '')) as Partial<AgentConfig>
     const config = normalize(raw)
     // 合并 mcp.json
     const mcpFileServers = loadMcpFile()
@@ -355,11 +381,12 @@ export function loadConfig(): ResolvedConfig {
       ]
     }
     _cachedConfig = config
+    _cachedMtime = statSync(CONFIG_FILE).mtimeMs
     return config
   } catch {
     process.stderr.write(`[config] 配置文件解析失败，使用默认配置\n`)
-    _cachedConfig = normalize({})
-    return _cachedConfig
+    // 注意：解析失败时不缓存，下次调用仍会重试读取文件（修复文件后无需重启）
+    return normalize({})
   }
 }
 
@@ -400,6 +427,7 @@ export function saveConfig(patch: Partial<AgentConfig>) {
 /** 清除单例缓存（测试用） */
 export function _resetConfigCache() {
   _cachedConfig = null
+  _cachedMtime = 0
 }
 
 export function getConfigDir(): string {

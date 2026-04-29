@@ -101,7 +101,10 @@
     "maxTokens": 8096,
     "maxTurns": 50,
     "memoryCondense": true,
-    "autoDistillSkill": false
+    "autoDistillSkill": false,
+    "autoPruneSessions": true,
+    "pruneKeepCount": 50,
+    "pruneMaxAgeDays": 90
   },
 
   "gateway": {

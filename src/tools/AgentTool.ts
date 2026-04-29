@@ -10,12 +10,11 @@ import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { runWithCwd, getGlobalCwd } from '../core/cwd.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 
-// 懒加载记忆系统，避免未初始化时报错
-// 优先使用当前会话的记忆（Gateway 多会话隔离），CLI 模式回退到全局
-async function getMemoryContext(sessionId?: string): Promise<string> {
+// 懒加载记忆系统，读取全局记忆（跨会话共享）
+async function getMemoryContext(): Promise<string> {
   try {
-    const { getMemoryStack, getMemoryStackForSession } = await import('../memory/index.js')
-    const stack = sessionId ? getMemoryStackForSession(sessionId) : getMemoryStack()
+    const { getMemoryStack } = await import('../memory/index.js')
+    const stack = getMemoryStack()
     const stats = await stack.status()
     if (stats.totalMemories === 0) return ''
     const { l0Identity, l1Essential } = stack.wakeUp()
@@ -54,9 +53,8 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
     },
 
     async execute(input) {
-      // 获取记忆快照，注入子智能体的 system prompt（按会话隔离）
-      const sessionId = getCurrentSessionId()
-      const memoryContext = await getMemoryContext(sessionId)
+      // 获取全局记忆快照，注入子智能体的 system prompt
+      const memoryContext = await getMemoryContext()
       const systemPrompt = memoryContext
         ? `${SUB_AGENT_SYSTEM_PROMPT}\n\n${memoryContext}`
         : SUB_AGENT_SYSTEM_PROMPT
@@ -75,6 +73,7 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
       })()
 
       // 从会话级（Gateway）或全局（CLI）TeamManager 继承 provider 和 tools
+      const sessionId = getCurrentSessionId()
       const mgr = sessionId ? TeamManager.getForSession(sessionId) : TeamManager.get()
 
       if (!mgr) {
@@ -89,7 +88,9 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
       const permissions = new PermissionManager('craft', async () => true)
       const subEngine = new QueryEngine({
         provider: mgr.getProvider(),
-        systemPrompt,
+        systemPrompt: memoryContext
+          ? [`${SUB_AGENT_SYSTEM_PROMPT}\n\n${memoryContext}`]
+          : [SUB_AGENT_SYSTEM_PROMPT],
         tools,
         permissions,
         maxTurns: 30,

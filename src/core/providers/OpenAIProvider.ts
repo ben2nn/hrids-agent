@@ -34,8 +34,9 @@ function toOAITool(tool: ToolDef): OAITool {
 }
 
 // 将通用消息转换为 OpenAI 格式
-function toOAIMessages(messages: ChatMessage[], systemPrompt: string): OAIMessage[] {
-  const result: OAIMessage[] = [{ role: 'system', content: systemPrompt }]
+function toOAIMessages(messages: ChatMessage[], systemPrompt: string[]): OAIMessage[] {
+  // OpenAI 不支持 system 数组，合并为单个 system 消息
+  const result: OAIMessage[] = [{ role: 'system', content: systemPrompt.join('\n\n') }]
 
   for (const msg of messages) {
     if (msg.role === 'user' || msg.role === 'assistant') {
@@ -122,7 +123,7 @@ export class OpenAIProvider implements LLMProvider {
   async *stream(
     messages: ChatMessage[],
     tools: ToolDef[],
-    systemPrompt: string,
+    systemPrompt: string[],
     maxTokens: number,
   ): AsyncGenerator<StreamChunk> {
     const baseUrl = this.config.baseUrl ?? 'https://api.openai.com/v1'

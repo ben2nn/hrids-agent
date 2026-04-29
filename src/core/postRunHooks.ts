@@ -117,7 +117,7 @@ ${condensed}`
     for await (const chunk of provider.stream(
       [{ role: 'user', content: distillPrompt }],
       [],
-      '你是一个 skill 提炼助手，只输出 null 或 JSON，不输出任何其他内容。',
+      ['你是一个 skill 提炼助手，只输出 null 或 JSON，不输出任何其他内容。'],
       2000,
     )) {
       if (chunk.type === 'text_delta' && chunk.delta) raw += chunk.delta

@@ -1,8 +1,7 @@
 // 记忆提炼管道：提取 → LLM 提炼 → 向量去重 → 动态评分 → 写入
 // 流程：extractFromConversation → [condense via LLM] → dedup → addMemory
 import { extractFromConversation } from './extractor.js'
-import { getMemoryStore, getMemoryStoreForSession } from './store.js'
-import { getCurrentSessionId } from '../core/sessionContext.js'
+import { getMemoryStore } from './store.js'
 import type { Memory } from './types.js'
 import type { LLMProvider } from '../core/providers/types.js'
 
@@ -49,9 +48,10 @@ export async function runMemoryPipeline(
   )
   if (extracted.length === 0) return result
 
-  // 优先使用会话级 store（Gateway 模式），否则用全局单例（CLI 模式）
-  const ctxSessionId = sessionId ?? getCurrentSessionId()
-  const store = ctxSessionId ? getMemoryStoreForSession(ctxSessionId) : getMemoryStore()
+  // 记忆写入全局 store（跨会话积累知识）
+  // 会话 ID 仅作为来源标记（sourceSession），不影响写入目标
+  // 这样用户在任意会话里积累的记忆，在所有会话中都可见
+  const store = getMemoryStore()
 
   // ② LLM 批量提炼：一次调用压缩所有需要提炼的条目
   let condensedContents: (string | null)[] = extracted.map(() => null)
@@ -142,7 +142,7 @@ ${numbered}`
     for await (const chunk of provider.stream(
       [{ role: 'user', content: prompt }],
       [],
-      '你是记忆提炼助手，严格按编号格式输出压缩结果，不输出任何其他内容。',
+      ['你是记忆提炼助手，严格按编号格式输出压缩结果，不输出任何其他内容。'],
       Math.min(200 * contents.length, 2000),
     )) {
       if (chunk.type === 'text_delta' && chunk.delta) raw += chunk.delta

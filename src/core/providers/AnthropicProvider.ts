@@ -5,6 +5,7 @@ import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
 import { withRetry } from '../retry.js'
 import { logger } from '../logger.js'
+import { STATIC_SECTION_COUNT } from '../coordinator/coordinatorPrompt.js'
 
 const log = logger.child({ component: 'anthropic-provider' })
 
@@ -26,7 +27,7 @@ export class AnthropicProvider implements LLMProvider {
   async *stream(
     messages: ChatMessage[],
     tools: ToolDef[],
-    systemPrompt: string,
+    systemPrompt: string[],
     maxTokens: number,
   ): AsyncGenerator<StreamChunk> {
     const anthropicMessages = messages.map(m => ({
@@ -34,12 +35,26 @@ export class AnthropicProvider implements LLMProvider {
       content: m.content as Anthropic.MessageParam['content'],
     }))
 
+    // 将 string[] 转为 Anthropic system blocks，精确控制缓存边界：
+    //
+    // 数组结构（由 getCoordinatorSystemPrompt + buildSystemContext 保证）：
+    //   [0..STATIC_SECTION_COUNT-1] 静态层 —— 内容固定，打 cache_control
+    //   [STATIC_SECTION_COUNT..]    动态层 —— 工具速查、扩展层、记忆、环境，不缓存
+    //
+    // STATIC_SECTION_COUNT 从 coordinatorPrompt.ts 导入，与 STATIC_SECTIONS.length 自动同步。
+    const systemBlocks: Anthropic.TextBlockParam[] = systemPrompt.map((text, i) => {
+      const isStatic = i < STATIC_SECTION_COUNT
+      return isStatic
+        ? { type: 'text', text, cache_control: { type: 'ephemeral' } as Anthropic.CacheControlEphemeral }
+        : { type: 'text', text }
+    })
+
     // 用 withRetry 包装 stream 创建（网络错误/限流时自动退避重试）
     const stream = await withRetry(
       () => Promise.resolve(this.client.messages.stream({
         model: this.model,
         max_tokens: maxTokens,
-        system: systemPrompt,
+        system: systemBlocks,
         tools: tools.map(toAnthropicTool) as Anthropic.Tool[],
         messages: anthropicMessages,
       })),

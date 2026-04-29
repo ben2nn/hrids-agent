@@ -8,7 +8,7 @@ import { loadConfig, saveConfig } from './core/Config.js'
 import { QueryEngine } from './core/QueryEngine.js'
 import { PermissionManager } from './core/PermissionManager.js'
 import { listSessions, pruneOldSessions } from './core/SessionStore.js'
-import { buildSystemContext, getDynamicContext } from './core/ContextBuilder.js'
+import { buildSystemContext } from './core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt } from './core/coordinator/coordinatorPrompt.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { getGlobalCwd } from './core/cwd.js'
@@ -49,7 +49,9 @@ function validateStartupConfig(config: import('./core/Config.js').AgentConfig, c
 
 // 启动时用基础层（不含扩展）构建初始 systemPrompt
 // 每次用户发消息时，根据消息内容动态注入对应扩展块
-const BASE_SYSTEM_PROMPT = getCoordinatorSystemPrompt()
+// 注意：此处不含 MCP 工具（MCP 在 main() 内部加载），仅含内置工具
+// 实际运行时每条消息前会调用 buildPromptForMessage 重新生成含完整工具列表的 prompt
+const BASE_SYSTEM_PROMPT = getCoordinatorSystemPrompt(undefined, ALL_TOOLS)
 
 async function main() {
   const program = new Command()
@@ -160,8 +162,17 @@ async function main() {
       const memoryCondense = config.memoryCondense ?? false
       const skillDistill = config.autoDistillSkill ?? false
 
-      // 后台清理过期会话（默认保留最近 30 个）
-      setImmediate(() => { try { pruneOldSessions() } catch { /* 忽略 */ } })
+      // 后台清理过期会话（可通过 agent.autoPruneSessions 关闭，keepCount/maxAgeDays 可调）
+      if (config.agent?.autoPruneSessions !== false) {
+        setImmediate(() => {
+          try {
+            pruneOldSessions({
+              keepCount:   config.agent?.pruneKeepCount,
+              maxAgeDays:  config.agent?.pruneMaxAgeDays,
+            })
+          } catch { /* 忽略 */ }
+        })
+      }
 
       // 初始化会话和工作目录
       const { sessionId, initialMessages, initialCwd } = await setupSession({
@@ -223,7 +234,9 @@ async function main() {
       // 初始化全局 TeamManager（多智能体协调）
       TeamManager.init(provider, tools)
 
-      const systemPrompt = await buildSystemContext(BASE_SYSTEM_PROMPT)
+      // 用完整工具列表（含 MCP）构建初始 systemPrompt
+      const initialPrompt = getCoordinatorSystemPrompt(undefined, tools)
+      const systemPrompt = await buildSystemContext(initialPrompt)
 
       const engine = new QueryEngine({
         provider,
@@ -239,8 +252,7 @@ async function main() {
 
       // 根据用户消息动态更新 systemPrompt（按任务类型注入扩展块）
       const buildPromptForMessage = async (msg: string): Promise<void> => {
-        const { classifyTask } = await import('./core/coordinator/coordinatorPrompt.js')
-        const taskPrompt = getCoordinatorSystemPrompt(msg)
+        const taskPrompt = getCoordinatorSystemPrompt(msg, tools)
         const fullPrompt = await buildSystemContext(taskPrompt, getGlobalCwd())
         engine.setSystemPrompt(fullPrompt)
       }
