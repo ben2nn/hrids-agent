@@ -183,6 +183,17 @@ export class PermissionManager {
   }
 
   async check(req: PermissionRequest): Promise<boolean> {
+    // 只读操作无需检查规则，直接放行（同时避免不必要的磁盘 I/O）
+    if (req.isReadonly) {
+      this.denial.consecutive = 0
+      return true
+    }
+
+    // 写操作：重新读取磁盘规则，确保能看到其他会话写入的最新规则
+    // 性能影响：loadRules() 是同步文件读取，但只读工具已在上方短路，
+    // 写操作频率远低于读操作，实际 I/O 开销可接受
+    this.rules = loadRules()
+
     const result = await this._check(req)
 
     // 更新拒绝追踪
@@ -277,62 +288,79 @@ export class PermissionManager {
   }
 
   // 永久批准（持久化到磁盘）
+  // 采用 read-then-write 模式：每次写入前重新读取磁盘最新状态，
+  // 防止多个 Gateway 会话并发修改时互相覆盖对方的规则。
   approvePermanent(rule: string) {
-    if (!this.rules.alwaysAllow.includes(rule)) {
-      this.rules.alwaysAllow.push(rule)
-      saveRules(this.rules)
+    const fresh = loadRules()
+    if (!fresh.alwaysAllow.includes(rule)) {
+      fresh.alwaysAllow.push(rule)
+      saveRules(fresh)
     }
+    // 同步内存副本，保持一致
+    this.rules = fresh
   }
 
   // 永久拒绝
   denyPermanent(rule: string) {
-    if (!this.rules.alwaysDeny.includes(rule)) {
-      this.rules.alwaysDeny.push(rule)
-      saveRules(this.rules)
+    const fresh = loadRules()
+    if (!fresh.alwaysDeny.includes(rule)) {
+      fresh.alwaysDeny.push(rule)
+      saveRules(fresh)
     }
+    this.rules = fresh
   }
 
   // 永久强制询问（即使在 auto 模式下）
   askPermanent(rule: string) {
-    if (!this.rules.alwaysAsk.includes(rule)) {
-      this.rules.alwaysAsk.push(rule)
-      saveRules(this.rules)
+    const fresh = loadRules()
+    if (!fresh.alwaysAsk.includes(rule)) {
+      fresh.alwaysAsk.push(rule)
+      saveRules(fresh)
     }
+    this.rules = fresh
   }
 
   // 添加路径白名单（只允许写这些路径）
   allowPath(pathPrefix: string) {
     const p = resolve(pathPrefix)
-    if (!this.rules.allowedPaths.includes(p)) {
-      this.rules.allowedPaths.push(p)
-      saveRules(this.rules)
+    const fresh = loadRules()
+    if (!fresh.allowedPaths.includes(p)) {
+      fresh.allowedPaths.push(p)
+      saveRules(fresh)
     }
+    this.rules = fresh
   }
 
   // 添加路径黑名单（禁止写这些路径）
   denyPath(pathPrefix: string) {
     const p = resolve(pathPrefix)
-    if (!this.rules.deniedPaths.includes(p)) {
-      this.rules.deniedPaths.push(p)
-      saveRules(this.rules)
+    const fresh = loadRules()
+    if (!fresh.deniedPaths.includes(p)) {
+      fresh.deniedPaths.push(p)
+      saveRules(fresh)
     }
+    this.rules = fresh
   }
 
   // 移除路径规则
   clearPathRule(pathPrefix: string) {
     const p = resolve(pathPrefix)
-    this.rules.allowedPaths = this.rules.allowedPaths.filter(r => r !== p)
-    this.rules.deniedPaths = this.rules.deniedPaths.filter(r => r !== p)
-    saveRules(this.rules)
+    const fresh = loadRules()
+    fresh.allowedPaths = fresh.allowedPaths.filter(r => r !== p)
+    fresh.deniedPaths = fresh.deniedPaths.filter(r => r !== p)
+    saveRules(fresh)
+    this.rules = fresh
   }
 
   // 移除某工具的所有持久化规则（兼容旧接口，按工具名前缀清除）
   clearRules(toolName: string) {
     const matches = (rule: string) => parseRule(rule).toolName === toolName
-    this.rules.alwaysAllow = this.rules.alwaysAllow.filter(r => !matches(r))
-    this.rules.alwaysDeny = this.rules.alwaysDeny.filter(r => !matches(r))
-    this.rules.alwaysAsk = this.rules.alwaysAsk.filter(r => !matches(r))
-    saveRules(this.rules)
+    const fresh = loadRules()
+    fresh.alwaysAllow = fresh.alwaysAllow.filter(r => !matches(r))
+    fresh.alwaysDeny = fresh.alwaysDeny.filter(r => !matches(r))
+    fresh.alwaysAsk = fresh.alwaysAsk.filter(r => !matches(r))
+    saveRules(fresh)
+    this.rules = fresh
   }
 
   getRules(): Readonly<PersistedRules> {

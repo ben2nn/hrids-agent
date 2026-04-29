@@ -10,11 +10,14 @@ import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { runWithCwd, getGlobalCwd } from '../core/cwd.js'
 import { getCurrentSessionId, runWithSession } from '../core/sessionContext.js'
 
-// 懒加载记忆系统，读取全局记忆（跨会话共享）
-async function getMemoryContext(): Promise<string> {
+// 懒加载记忆系统，优先使用当前会话的会话级记忆，降级到全局记忆
+// 与 AgentPool 保持一致的记忆获取策略
+async function getMemoryContext(sessionId?: string): Promise<string> {
   try {
-    const { getMemoryStack } = await import('../memory/index.js')
-    const stack = getMemoryStack()
+    const { getMemoryStackForSession, getMemoryStack } = await import('../memory/index.js')
+    const stack = sessionId
+      ? getMemoryStackForSession(sessionId)
+      : getMemoryStack()
     const stats = await stack.status()
     if (stats.totalMemories === 0) return ''
     const { l0Identity, l1Essential } = stack.wakeUp()
@@ -53,8 +56,16 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
     },
 
     async execute(input) {
-      // 获取全局记忆快照，注入子智能体的 system prompt
-      const memoryContext = await getMemoryContext()
+      // 从会话级（Gateway）或全局（CLI）TeamManager 继承 provider 和 tools
+      const sessionId = getCurrentSessionId()
+      const mgr = sessionId ? TeamManager.getForSession(sessionId) : TeamManager.get()
+
+      if (!mgr) {
+        return { type: 'error', message: '子智能体无法启动：TeamManager 未初始化' }
+      }
+
+      // 获取记忆快照，优先使用当前会话的会话级记忆（与 AgentPool 保持一致）
+      const memoryContext = await getMemoryContext(sessionId ?? undefined)
       const systemPrompt = memoryContext
         ? `${SUB_AGENT_SYSTEM_PROMPT}\n\n${memoryContext}`
         : SUB_AGENT_SYSTEM_PROMPT
@@ -72,14 +83,6 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
         return parentCwd
       })()
 
-      // 从会话级（Gateway）或全局（CLI）TeamManager 继承 provider 和 tools
-      const sessionId = getCurrentSessionId()
-      const mgr = sessionId ? TeamManager.getForSession(sessionId) : TeamManager.get()
-
-      if (!mgr) {
-        return { type: 'error', message: '子智能体无法启动：TeamManager 未初始化' }
-      }
-
       const allTools = mgr.getBaseTools()
       const tools = input.allowed_tools
         ? allTools.filter(t => input.allowed_tools!.includes(t.name))
@@ -88,9 +91,7 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
       const permissions = new PermissionManager('craft', async () => true)
       const subEngine = new QueryEngine({
         provider: mgr.getProvider(),
-        systemPrompt: memoryContext
-          ? [`${SUB_AGENT_SYSTEM_PROMPT}\n\n${memoryContext}`]
-          : [SUB_AGENT_SYSTEM_PROMPT],
+        systemPrompt: [systemPrompt],
         tools,
         permissions,
         maxTurns: 30,

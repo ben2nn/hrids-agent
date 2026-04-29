@@ -113,6 +113,7 @@ export function listSessions(): SessionMeta[] {
   ensureDir(SESSIONS_DIR)
   const dirs = readdirSync(SESSIONS_DIR, { withFileTypes: true })
     .filter(d => d.isDirectory())
+    .filter(d => !d.name.startsWith('ephemeral-'))  // 过滤子智能体临时会话
     .map(d => loadSessionMeta(d.name))
     .filter((m): m is SessionMeta => m !== null)
 
@@ -210,6 +211,7 @@ export function loadArchive(sessionId: string, filename: string): Message[] | nu
 
 /**
  * 清理过期会话（保留最近 N 个，删除超过 maxAgeDays 天的旧会话）
+ * 同时清理 ephemeral- 前缀的临时会话（子智能体产生的，无需保留）。
  * 建议在应用启动时调用一次，避免 sessions/ 目录无限增长。
  */
 export function pruneOldSessions(opts: {
@@ -225,6 +227,12 @@ export function pruneOldSessions(opts: {
 
   for (let i = 0; i < sessions.length; i++) {
     const s = sessions[i]
+    // ephemeral- 前缀的临时会话（子智能体产生）：无论多新都直接清理
+    if (s.id.startsWith('ephemeral-')) {
+      deleteSessionFromDisk(s.id)
+      deleted++
+      continue
+    }
     // 保留最近 keepCount 个，无论多旧
     if (i < keepCount) continue
     // 超过 maxAgeDays 的才删除

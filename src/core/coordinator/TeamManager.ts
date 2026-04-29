@@ -30,11 +30,15 @@ export class TeamManager {
   private baseTools: ToolDef[]
   // 每个 TeamManager 持有独立的 MessageBus，多会话完全隔离
   readonly bus: MessageBus
+  // 当前 TeamManager 绑定的会话 ID（Gateway 模式下有值，CLI 模式下为 undefined）
+  // 用于子智能体继承正确的会话级记忆，而非全局记忆
+  private sessionId: string | undefined
 
-  constructor(provider: LLMProvider, baseTools: ToolDef[]) {
+  constructor(provider: LLMProvider, baseTools: ToolDef[], sessionId?: string) {
     this.provider = provider
     this.baseTools = baseTools
     this.bus = new MessageBus()
+    this.sessionId = sessionId
   }
 
   /** CLI 模式：初始化进程级全局单例 */
@@ -48,9 +52,9 @@ export class TeamManager {
     return globalTeamManager
   }
 
-  /** Gateway 模式：为指定会话创建独立实例 */
+  /** Gateway 模式：为指定会话创建独立实例，绑定 sessionId 用于记忆隔离 */
   static initForSession(sessionId: string, provider: LLMProvider, baseTools: ToolDef[]): TeamManager {
-    const mgr = new TeamManager(provider, baseTools)
+    const mgr = new TeamManager(provider, baseTools, sessionId)
     sessionManagers.set(sessionId, mgr)
     return mgr
   }
@@ -121,7 +125,8 @@ export class TeamManager {
     const sp: string[] = systemPrompt ?? [`你是团队 "${teamName}" 中的智能体 "${agentName}"。
 专注完成分配的任务，可以通过 send_message 工具与团队其他成员通信。`]
 
-    const id = team.pool.submit(agentName, description, prompt, sp, allowedTools)
+    // 传入父会话 ID，子智能体将继承父会话的记忆而非全局记忆
+    const id = team.pool.submit(agentName, description, prompt, sp, allowedTools, this.sessionId)
     team.agentIds.push(id)
     return id
   }

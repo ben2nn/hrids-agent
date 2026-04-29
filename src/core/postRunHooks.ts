@@ -1,12 +1,11 @@
 // 会话结束后的后台钩子：记忆提炼 + Skill 自动沉淀
 // 供 CLI 模式（main.ts）和 Gateway 模式（SessionManager.ts）共用
 
-import { mkdirSync, writeFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, renameSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { runMemoryPipeline } from '../memory/index.js'
 import { logger } from './logger.js'
-import { getCurrentSessionId } from './sessionContext.js'
 import type { QueryEngine, ContentBlock } from './QueryEngine.js'
 import type { LLMProvider } from './providers/types.js'
 
@@ -153,7 +152,10 @@ ${condensed}`
     const content = frontmatter + '\n\n' + parsed.prompt.trim() + '\n'
 
     mkdirSync(skillDir, { recursive: true })
-    writeFileSync(skillMdPath, content, 'utf-8')
+    // 原子写入：先写 .tmp 再 rename，防止并发会话同时提炼同名 skill 时文件损坏
+    const tmpPath = skillMdPath + '.tmp'
+    writeFileSync(tmpPath, content, 'utf-8')
+    renameSync(tmpPath, skillMdPath)
 
     log.info(`自动沉淀 skill: ${parsed.name}（${isUpdate ? '更新' : '新建'}）`, { path: skillMdPath })
   } catch {

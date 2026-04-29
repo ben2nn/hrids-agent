@@ -67,8 +67,6 @@ export class FallbackProvider implements LLMProvider {
   private breakers: CircuitBreaker[]
   private currentGroupIdx: number
   private currentModelIdx: number
-  // 互斥锁：防止并发子智能体同时修改 currentGroupIdx/currentModelIdx
-  private _advanceLock = false
 
   constructor(providers: LLMProvider[], groups?: ProviderGroup[]) {
     if (providers.length === 0) throw new Error('FallbackProvider 至少需要一个提供商')
@@ -187,9 +185,9 @@ export class FallbackProvider implements LLMProvider {
                 hasContent = true
                 log.debug('LLM 开始输出，锁定当前模型', { model: provider.model, chunkType: chunk.type })
                 breaker.recordSuccess()
-                // 成功后同步实例状态，下次调用从此模型开始
-                this.currentGroupIdx = localGroupIdx
-                this.currentModelIdx = localModelIdx
+                // 成功后原子更新实例状态（单次赋值，避免分步赋值的中间状态）
+                // JS 单线程，两次赋值之间不会被抢占，但合并为语义上的原子操作更清晰
+                ;[this.currentGroupIdx, this.currentModelIdx] = [localGroupIdx, localModelIdx]
                 for (const buffered of preContentBuffer) yield buffered
               }
               yield chunk

@@ -3,6 +3,7 @@ import { QueryEngine } from '../QueryEngine.js'
 import { PermissionManager } from '../PermissionManager.js'
 import { MessageBus } from './MessageBus.js'
 import { runWithAgentName } from './agentContext.js'
+import { runWithSession } from '../sessionContext.js'
 import type { LLMProvider } from '../providers/index.js'
 import type { ToolDef } from '../Tool.js'
 
@@ -75,6 +76,7 @@ export class AgentPool {
     prompt: string,
     systemPrompt: string[],
     allowedTools?: string[],
+    parentSessionId?: string,
   ): string {
     const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
@@ -86,7 +88,7 @@ export class AgentPool {
     this.tasks.set(id, task)
     this.bus.register(name)
 
-    this.runTask(task, tools, systemPrompt).catch(err => {
+    this.runTask(task, tools, systemPrompt, parentSessionId).catch(err => {
       if (task.status === 'pending') {
         task.status = 'failed'
         task.error = String(err)
@@ -165,7 +167,7 @@ export class AgentPool {
     }
   }
 
-  private async runTask(task: AgentTask, tools: ToolDef[], systemPrompt: string[]) {
+  private async runTask(task: AgentTask, tools: ToolDef[], systemPrompt: string[], parentSessionId?: string) {
     let acquired = false
     try {
       await this.semaphore.acquire()
@@ -181,11 +183,14 @@ export class AgentPool {
     task.status = 'running'
     task.startedAt = Date.now()
 
-    // 注入全局记忆快照（L0+L1）
+    // 注入记忆快照（L0+L1）：优先使用父会话的会话级记忆，降级到全局记忆
+    // 这样 Gateway 多会话场景下，子智能体继承的是正确的父会话记忆，而非其他用户的数据
     let finalSystemPrompt: string[] = [...systemPrompt]
     try {
-      const { getMemoryStack } = await import('../../memory/index.js')
-      const stack = getMemoryStack()
+      const { getMemoryStackForSession, getMemoryStack } = await import('../../memory/index.js')
+      const stack = parentSessionId
+        ? getMemoryStackForSession(parentSessionId)
+        : getMemoryStack()
       const stats = await stack.status()
       if (stats.totalMemories > 0) {
         const { l0Identity, l1Essential } = stack.wakeUp()
@@ -206,23 +211,29 @@ export class AgentPool {
     })
     task.engine = engine
 
+    // 为子智能体生成独立的 sessionId，避免 todo 等工具污染父会话状态
+    // 使用 "ephemeral-" 前缀标记为临时会话，便于后续清理策略识别
+    const subSessionId = `ephemeral-${task.id}`
+
     let result = ''
     try {
-      // runWithAgentName 将智能体名称注入 AsyncLocalStorage，
-      // send_message / receive_message 工具通过 getCurrentAgentName() 读取
-      await runWithAgentName(task.name, async () => {
-        for await (const ev of engine.send(task.prompt)) {
-          if (ev.type === 'text_delta') result += ev.delta
-          else if (ev.type === 'error') {
-            task.status = 'failed'
-            task.error = ev.message
-            task.completedAt = Date.now()
-            this.bus.unregister(task.name)
-            this._notifyWaiters(task)
-            return
+      // runWithAgentName 将智能体名称注入 AsyncLocalStorage，供 send_message 工具读取
+      // runWithSession 给子智能体独立的 sessionId 上下文，与父会话完全隔离
+      await runWithAgentName(task.name, () =>
+        runWithSession(subSessionId, async () => {
+          for await (const ev of engine.send(task.prompt)) {
+            if (ev.type === 'text_delta') result += ev.delta
+            else if (ev.type === 'error') {
+              task.status = 'failed'
+              task.error = ev.message
+              task.completedAt = Date.now()
+              this.bus.unregister(task.name)
+              this._notifyWaiters(task)
+              return
+            }
           }
-        }
-      })
+        })
+      )
       task.result = result
       task.status = 'completed'
     } catch (err) {

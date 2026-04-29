@@ -4,7 +4,6 @@ import { existsSync, readFileSync, mkdirSync } from 'fs'
 import { promisify } from 'util'
 import { homedir } from 'os'
 import { join } from 'path'
-import { getMemoryStack } from '../memory/index.js'
 
 const execAsync = promisify(exec)
 
@@ -59,11 +58,14 @@ async function getGitContext(cwd?: string): Promise<string | null> {
   const now = Date.now()
   const cached = _gitCacheMap.get(key)
   if (cached && now - cached.ts < GIT_CACHE_TTL_MS) {
+    // LRU：命中时将条目移到 Map 末尾（删除再重新插入）
+    _gitCacheMap.delete(key)
+    _gitCacheMap.set(key, cached)
     return cached.result
   }
   const result = await _fetchGitContext(cwd)
 
-  // 超出上限时，淘汰最旧的条目（按插入顺序，Map 保证迭代顺序）
+  // 超出上限时，淘汰最旧（最久未访问）的条目（Map 迭代顺序即插入/访问顺序）
   if (!_gitCacheMap.has(key) && _gitCacheMap.size >= GIT_CACHE_MAX_ENTRIES) {
     const oldestKey = _gitCacheMap.keys().next().value
     if (oldestKey !== undefined) _gitCacheMap.delete(oldestKey)
@@ -109,6 +111,9 @@ function findMemoryFiles(cwd: string): string[] {
   const now = Date.now()
   const cached = _memFilesCacheMap.get(cwd)
   if (cached && now - cached.ts < MEM_FILES_CACHE_TTL_MS) {
+    // LRU：命中时将条目移到 Map 末尾
+    _memFilesCacheMap.delete(cwd)
+    _memFilesCacheMap.set(cwd, cached)
     return cached.result
   }
 
@@ -146,7 +151,8 @@ function _fetchMemoryFiles(cwd: string): string[] {
 // 构建完整的系统上下文，注入动态内容（记忆、环境信息）
 // 接受 string[]，追加动态 section 后返回 string[]
 // cwd 参数可选，不传则使用 ~/.hrids-agent/work/（仅用于记忆文件查找）
-export async function buildSystemContext(basePrompt: string[], cwd?: string): Promise<string[]> {
+// sessionId 参数可选，传入时注入会话级记忆（Gateway 多会话隔离），否则注入全局记忆
+export async function buildSystemContext(basePrompt: string[], cwd?: string, sessionId?: string): Promise<string[]> {
   const resolvedCwd = cwd ?? getDefaultAgentCwd()
   const [gitCtx, memFiles] = await Promise.all([
     getGitContext(resolvedCwd),
@@ -161,9 +167,12 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string): Pr
     dynamicSections.push('## 项目记忆\n' + memFiles.join('\n\n'))
   }
 
-  // 注入长期记忆（L0 身份 + L1 核心摘要）—— 读全局 store，跨会话共享
+  // 注入长期记忆（L0 身份 + L1 核心摘要）
+  // Gateway 多会话模式：使用会话级记忆（按 sessionId 隔离，防止跨用户泄漏）
+  // CLI 单会话模式：使用全局记忆（跨会话积累知识）
   try {
-    const stack = getMemoryStack()
+    const { getMemoryStackForSession, getMemoryStack } = await import('../memory/index.js')
+    const stack = sessionId ? getMemoryStackForSession(sessionId) : getMemoryStack()
     const { l0Identity, l1Essential, totalTokens } = stack.wakeUp()
     const stats = await stack.status()
     if (stats.totalMemories > 0) {

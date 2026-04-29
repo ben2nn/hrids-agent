@@ -422,6 +422,12 @@ export function saveConfig(patch: Partial<AgentConfig>) {
   writeFileSync(tmpFile, JSON.stringify(updated, null, 2), 'utf-8')
   renameSync(tmpFile, CONFIG_FILE)
   _cachedConfig = updated
+  // 同步 mtime，避免下次 loadConfig 因 mtime 不匹配触发不必要的重新读取
+  try {
+    _cachedMtime = statSync(CONFIG_FILE).mtimeMs
+  } catch {
+    _cachedMtime = 0
+  }
 }
 
 /** 清除单例缓存（测试用） */

@@ -180,7 +180,7 @@ export class SessionManager {
     // 恢复已有会话或新建
     const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
 
-    const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd)
+    const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd, sessionId)
 
     session.engine = new QueryEngine({
       provider,
