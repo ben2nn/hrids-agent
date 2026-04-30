@@ -6,7 +6,7 @@
 
 ## 任务列表
 
-- [~] 1. 创建 TodoTool.ts 核心基础设施
+- [x] 1. 创建 TodoTool.ts 核心基础设施
   - 新建 `src/tools/TodoTool.ts` 文件
   - 实现 `getTodoFile()`：使用 `resolve(getGlobalCwd(), '.hrids', 'tasks', 'todos.json')` 解析路径
   - 实现 `loadTodos()`：读取并解析 `todos.json`，文件不存在时返回空数组
@@ -28,7 +28,7 @@
     - 测试目录不存在时 `saveTodos()` 自动创建目录
     - _需求：12.1、12.2、12.3_
 
-- [~] 2. 实现有向图环检测
+- [x] 2. 实现有向图环检测
   - 在 `src/tools/TodoTool.ts` 中实现 `detectCycle(allTodos)`
   - 构建邻接表，使用 DFS + `inStack` 集合检测有向环
   - 返回 `{ hasCycle: boolean, cyclePath: string | null }`，`cyclePath` 格式为 `"任务 1 → 3 → 1 形成循环"`
@@ -41,7 +41,7 @@
     - 写入成功的任务列表经 `detectCycle()` 检测后始终返回 `hasCycle = false`
     - **验证：需求 6.1、6.2、6.3**
 
-- [~] 3. 实现 `todo_write` 工具
+- [x] 3. 实现 `todo_write` 工具
   - 在 `src/tools/TodoTool.ts` 中实现并导出 `TodoWriteTool`
   - `inputSchema` 使用 `z.strictObject()`，`todos` 数组加 `.min(1)` 约束，子项使用 `z.strictObject()`，包含 `content`、`priority`（枚举）、`acceptance?`、`dependsOn?`、`context?`，不含 `id` 字段
   - 执行逻辑：列表非空时拒绝并返回当前计划快照；调用 `detectCycle()` 检测环；调用 `assignIds()` 分配 id；自动将第一个任务标记为 `in_progress`；原子写入；触发推送回调
@@ -58,7 +58,7 @@
     - 对任意合法的 `todo_write` 调用，写入成功后第一个任务的 `status` 为 `in_progress`，无需额外调用 `todo_update`
     - **验证：需求 1.3**
 
-- [~] 4. 实现 `todo_update` 工具
+- [x] 4. 实现 `todo_update` 工具
   - 在 `src/tools/TodoTool.ts` 中实现并导出 `TodoUpdateTool`
   - `inputSchema` 使用 `z.strictObject()`，包含 `id: z.string()`、`status: z.enum(['in_progress', 'completed'])`、`confirmations?: z.array(z.boolean())`
   - 标记 `in_progress` 逻辑：检查 `dependsOn` 依赖是否全部 `completed`；将其他 `in_progress` 任务降为 `pending`
@@ -91,10 +91,10 @@
     - 对任意 `todo_update(id, 'completed')` 成功调用（无验收标准或验收全部通过），若存在满足依赖条件的 `pending` 任务，则下一个任务自动标记为 `in_progress`，无需 LLM 额外调用 `todo_update`
     - **验证：需求 3.3、3.4**
 
-- [~] 5. 检查点 — 确保所有测试通过
+- [x] 5. 检查点 — 确保所有测试通过
   - 确保所有测试通过，如有问题请向用户说明。
 
-- [ ] 6. 实现 `todo_append` 工具
+- [x] 6. 实现 `todo_append` 工具
   - 在 `src/tools/TodoTool.ts` 中实现并导出 `TodoAppendTool`
   - `inputSchema` 与 `todo_write` 相同（`z.strictObject()`，`todos.min(1)`，子项不含 `id`）
   - 执行逻辑：验证 `dependsOn` 引用的 id 均存在于当前列表；调用 `detectCycle()` 检测环（含新任务）；调用 `assignIds()` 从当前最大 id + 1 开始分配；追加到列表末尾，不修改已有任务；原子写入；触发推送回调
@@ -106,7 +106,7 @@
     - 对任意 `todo_append` 调用，执行后已有任务的所有字段（id、content、status、priority、acceptance、dependsOn、context、createdAt）保持不变
     - **验证：需求 7.1**
 
-- [ ] 7. 实现 `todo_reset` 工具
+- [x] 7. 实现 `todo_reset` 工具
   - 在 `src/tools/TodoTool.ts` 中实现并导出 `TodoResetTool`
   - `inputSchema`：`z.strictObject({ reason: z.string(), newPlan: z.string().optional() })`
   - 执行逻辑：列表为空时返回错误；先备份当前列表到 `todos.bak.{timestamp}.json`（原子写入）；复用 `resolveDecision` 机制触发用户决策；使用 `Promise.race` + `setTimeout(5 * 60 * 1000)` 实现 5 分钟超时自动拒绝；用户允许后清空列表并触发推送回调；用户拒绝或超时后保留列表并返回当前执行中任务信息
@@ -118,7 +118,7 @@
     - 测试超时（mock 5 分钟）后自动视为拒绝，列表保持不变
     - _需求：8.1、8.5、8.6_
 
-- [ ] 8. 实现 `todo_read` 工具
+- [x] 8. 实现 `todo_read` 工具
   - 在 `src/tools/TodoTool.ts` 中实现并导出 `TodoReadTool`
   - `inputSchema`：`z.strictObject({})`，`readonly: true`
   - 列表为空时返回提示调用 `todo_write` 的消息
@@ -132,16 +132,16 @@
     - 测试只读：调用前后任务列表完全一致
     - _需求：9.1、9.2、9.3、9.4_
 
-- [ ] 9. 更新 `src/tools/index.ts`
+- [x] 9. 更新 `src/tools/index.ts`
   - 移除旧 `TodoWriteTool`、`TodoReadTool` 的导入和注册（来自 `TodoWriteTool.ts`）
   - 从新 `TodoTool.ts` 导入并注册 `TodoWriteTool`、`TodoUpdateTool`、`TodoAppendTool`、`TodoResetTool`、`TodoReadTool`
   - 确认 `ALL_TOOLS` 数组中旧工具已移除、新工具已添加
   - _需求：1.1（工具注册）_
 
-- [ ] 10. 检查点 — 确保所有测试通过
+- [x] 10. 检查点 — 确保所有测试通过
   - 确保所有测试通过，如有问题请向用户说明。
 
-- [ ] 11. 更新 `src/core/QueryEngine.ts`（动态任务状态注入）
+- [x] 11. 更新 `src/core/QueryEngine.ts`（动态任务状态注入）
   - 从 `TodoTool.ts` 导入 `loadTodos`
   - 实现 `buildLiveTodoContext()` 函数：
     - 调用 `loadTodos()` 实时读取文件（不缓存）
@@ -160,30 +160,30 @@
     - 文件不存在时返回 `null`，不抛出异常
     - **验证：需求 10.1、10.2、10.3、10.4**
 
-- [ ] 12. 更新 `src/gateway/SessionManager.ts`
+- [x] 12. 更新 `src/gateway/SessionManager.ts`
   - 将 `setTodosUpdatedCallback` 的 import 来源从旧 `TodoWriteTool.ts` 更新为新 `TodoTool.ts`
   - 确认推送回调注册逻辑不变（仅更新 import 路径）
   - 确认 `todo_reset` 的决策推送复用 `gatewayDecisionCallbacks` / `sessionDecisionResolves` 机制，`setGatewayDecisionCallback` 已注册
   - _需求：11.1、11.2、11.3_
 
-- [ ] 13. 更新 `src/core/coordinator/coordinatorPrompt.ts`
+- [x] 13. 更新 `src/core/coordinator/coordinatorPrompt.ts`
   - 将 `SECTION_TODO` 替换为状态机描述（参考设计文档"System Prompt 状态机"章节）
   - 加入规划确认的判断标准（高/低不确定性两条路径）
   - 更新工具速查表：新增 `todo_update`、`todo_append`、`todo_reset`，更新 `todo_write` 的语义说明
   - _需求：14.1、14.2、14.3_
 
-- [ ] 14. 更新前端类型定义 `src/web/src/lib/types.ts`
+- [x] 14. 更新前端类型定义 `src/web/src/lib/types.ts`
   - 在 `Todo` 接口中新增字段：`acceptance?: string[]`、`dependsOn?: string[]`、`context?: string`、`createdAt: number`
   - 确认 `todos_updated` WebSocket 消息类型自动生效（无需单独修改消息类型）
   - _需求：15.1_
 
-- [ ] 15. 删除旧文件 `src/tools/TodoWriteTool.ts`
+- [x] 15. 删除旧文件 `src/tools/TodoWriteTool.ts`
   - 确认没有其他文件仍在 import 旧 `TodoWriteTool.ts`（使用 grep 搜索）
   - 确认旧文件中的 `setTodosUpdatedCallback`、`getTodoFile` 等逻辑已全部迁移到新 `TodoTool.ts`
   - 删除 `src/tools/TodoWriteTool.ts`
   - _需求：（清理旧实现）_
 
-- [ ] 16. 最终检查点 — 确保所有测试通过
+- [x] 16. 最终检查点 — 确保所有测试通过
   - 确保所有测试通过，如有问题请向用户说明。
 
 - [ ] 17. 更新前端 TodoItem 组件（可选）

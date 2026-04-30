@@ -8,7 +8,7 @@ import { GrepTool } from './GrepTool.js'
 import { WebFetchTool } from './WebFetchTool.js'
 import { WebSearchTool } from './WebSearchTool.js'
 import { AskUserTool } from './AskUserTool.js'
-import { TodoWriteTool, TodoReadTool } from './TodoWriteTool.js'
+import { TodoWriteTool, TodoUpdateTool, TodoAppendTool, TodoResetTool, TodoReadTool } from './TodoTool.js'
 import { DecisionTool } from './DecisionTool.js'
 import { ScheduleCronTool } from './ScheduleCronTool.js'
 import { SkillTool, SkillListTool, SkillSaveTool } from './SkillTool.js'
@@ -23,7 +23,7 @@ const shellTool = process.platform === 'win32' ? PowerShellTool : BashTool
 export {
   BashTool, PowerShellTool, FileReadTool, FileWriteTool, FileEditTool,
   GlobTool, GrepTool, WebFetchTool, WebSearchTool,
-  AskUserTool, TodoWriteTool, TodoReadTool,
+  AskUserTool, TodoWriteTool, TodoUpdateTool, TodoAppendTool, TodoResetTool, TodoReadTool,
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
   SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool,
   SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
@@ -42,6 +42,9 @@ export const ALL_TOOLS: ToolDef[] = [
   WebSearchTool,
   AskUserTool,
   TodoWriteTool,
+  TodoUpdateTool,
+  TodoAppendTool,
+  TodoResetTool,
   TodoReadTool,
   DecisionTool,
   ScheduleCronTool,

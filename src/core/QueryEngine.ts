@@ -5,8 +5,59 @@ import { CostTracker } from './CostTracker.js'
 import { logger } from './logger.js'
 import { auditLog } from './audit.js'
 import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
+import { loadTodos } from '../tools/TodoTool.js'
 
 const log = logger.child({ component: 'query-engine' })
+
+/**
+ * 实时读取 todos.json，构建任务状态快照字符串，注入到 system prompt。
+ * 无活跃任务（pending/in_progress）时返回 null，避免无意义 token 消耗。
+ * 文件不存在或读取失败时静默返回 null，不影响正常请求。
+ */
+function buildLiveTodoContext(): string | null {
+  try {
+    const todos = loadTodos()
+    const active = todos.filter(t => t.status !== 'completed')
+    if (active.length === 0) return null
+
+    const completedCount = todos.filter(t => t.status === 'completed').length
+    const lines: string[] = [
+      '## 当前任务状态（实时）',
+      `进度：${completedCount}/${todos.length}`,
+    ]
+
+    for (const t of active) {
+      const icon = t.status === 'in_progress' ? '▸' : '○'
+      lines.push(`${icon} [${t.id}] ${t.content}`)
+
+      if (t.status === 'in_progress') {
+        if (t.context) {
+          lines.push(`  背景：${t.context}`)
+        }
+        if (t.dependsOn && t.dependsOn.length > 0) {
+          lines.push(`  依赖：${t.dependsOn.join(', ')}`)
+        }
+        if (t.acceptance && t.acceptance.length > 0) {
+          lines.push('  验收标准：')
+          t.acceptance.forEach((a, i) => {
+            lines.push(`    □ [${i}] ${a}`)
+          })
+        }
+      }
+    }
+
+    const inProgress = active.find(t => t.status === 'in_progress')
+    if (inProgress) {
+      lines.push(`当前执行中：「${inProgress.content}」（id: ${inProgress.id}）`)
+      lines.push(`完成后调用：todo_update(id='${inProgress.id}', status='completed')`)
+    }
+
+    return lines.join('\n')
+  } catch {
+    // 文件不存在或读取失败时静默跳过
+    return null
+  }
+}
 
 export interface Message {
   role: 'user' | 'assistant'
@@ -449,10 +500,15 @@ ${contentToSummarize}
     log.debug('调用 LLM stream', { model: this.config.provider.model, turn: turns })
 
     try {
+      const liveTodo = buildLiveTodoContext()
+      const systemPromptForThisTurn = liveTodo
+        ? [...this.config.systemPrompt, liveTodo]
+        : this.config.systemPrompt
+
       const streamFn = () => this.config.provider.stream(
         this.history as never,
         toolsForLLM,
-        this.config.systemPrompt,
+        systemPromptForThisTurn,
         this.config.maxTokens ?? 8096,
         this.abortController.signal,
       )

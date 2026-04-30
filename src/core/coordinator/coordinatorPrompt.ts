@@ -53,16 +53,34 @@ const SECTION_TOOLS = `# 工具使用
 
 多个工具调用之间无依赖时，在同一轮次并行发起，提高效率。`
 
-const SECTION_TODO = `# 任务列表管理
+const SECTION_TODO = `# 任务列表管理（状态机）
 
-任务涉及 3 步以上时，必须先用 todo_write 建立完整计划再开始执行。
+收到任务后，根据当前状态选择唯一正确的下一步：
 
- - 任务开始时一次性列出所有步骤（todos 数组不能为空）
- - 执行中只允许更新状态（pending → in_progress → completed）或在末尾新增任务
- - 严禁删除或减少未完成（pending/in_progress）的任务
- - 同一时刻只能有一个任务处于 in_progress 状态
- - 完成一个步骤后立即标记 completed，再将下一个 pending 任务标记为 in_progress
- - 禁止用空 todos 数组调用 todo_write，那等于清空计划`
+**状态 1：无任务计划（todo_read 返回空 / 从未调用过）**
+→ 先判断不确定性，再决定是否直接建立计划：
+  - 低不确定性（直接执行）：单文件修改、局部变更、意图明确
+    → 直接调用 todo_write 建立计划，第一个任务自动 in_progress，立即开始执行
+  - 高不确定性（先确认）：架构决策、影响多个模块、不可逆操作、意图模糊
+    → 先输出规划方案（目标描述 + 步骤列表 + 影响范围 + 预计任务数），等用户确认后再调用 todo_write
+
+**状态 2：有任务计划，有 in_progress 任务**
+→ 执行当前 in_progress 任务（调用其他工具完成实际工作）
+→ 完成后调用 todo_update(id, 'completed')，系统自动推进下一个任务
+
+**状态 3：有任务计划，无 in_progress 任务（存在 pending 任务）**
+→ 调用 todo_update(id, 'in_progress') 开始下一个 pending 任务
+→ 系统按 high→medium→low 优先级、同优先级按 id 升序自动选择
+
+**状态 4：所有任务均已 completed**
+→ 不再调用任务工具，直接输出最终结果给用户
+
+**工具速查（任务管理）**：
+ - todo_write：仅在列表为空时建立计划；系统自动分配 id，LLM 不传 id；第一个任务自动 in_progress
+ - todo_update：更新单条任务状态（in_progress 或 completed）；有 acceptance 时需提供 confirmations
+ - todo_append：追加新任务到列表末尾；不影响已有任务；继续执行当前任务，不切换
+ - todo_reset：请求重置计划（需用户确认）；重置前自动备份；超时 5 分钟自动视为拒绝
+ - todo_read：只读查看当前任务状态`
 
 const SECTION_DECISION = `# 决策上报
 
@@ -123,6 +141,9 @@ const BUILTIN_TOOL_GROUPS: Record<string, string> = {
   bash: '执行命令',
   powershell: '执行命令',
   todo_write: '任务管理',
+  todo_update: '任务管理',
+  todo_append: '任务管理',
+  todo_reset: '任务管理',
   todo_read: '任务管理',
   ask_user: '人机交互',
   request_decision: '人机交互',
@@ -437,7 +458,7 @@ const SECTION_TOOLS_REFERENCE_FALLBACK = `# 工具速查
  - 信息获取：web_search / web_fetch / file_read / grep / glob / memory_search
  - 文件操作：file_write / file_edit（优先 file_edit 做最小改动）
  - 执行命令：${SHELL_TOOL_NAME}
- - 任务管理：todo_write / todo_read
+ - 任务管理：todo_write（建立计划，列表为空时才可调用）/ todo_update（更新单条状态）/ todo_append（追加任务）/ todo_reset（请求重置，需用户确认）/ todo_read（只读查看）
  - 人机交互：ask_user（简单问答）/ request_decision（决策上报）
  - 协作：agent（子工作者）/ schedule_cron（定时任务）
  - 技能管理：skill / skill_list / skill_save

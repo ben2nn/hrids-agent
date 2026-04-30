@@ -14,7 +14,7 @@ import { loadConfig } from '../core/Config.js'
 import { setGlobalCwd, getGlobalCwd, runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
-import { setTodosUpdatedCallback } from '../tools/TodoWriteTool.js'
+import { setTodosUpdatedCallback, setResetDecisionCallback, resolveResetDecision, loadTodos } from '../tools/TodoTool.js'
 import { resolveDecision, setGatewayDecisionCallback } from '../tools/DecisionTool.js'
 import { logger } from '../core/logger.js'
 import { auditLog } from '../core/audit.js'
@@ -203,9 +203,10 @@ export class SessionManager {
 
     // setTodoSessionId 已是 no-op（TodoWriteTool 通过 AsyncLocalStorage 自动获取 sessionId）
     // 仅注册 todos_updated 推送回调，供前端实时更新任务列表
-    setTodosUpdatedCallback((sid, todos) => {
-      const s = this.sessions.get(sid)
+    setTodosUpdatedCallback(() => {
+      const s = this.sessions.get(sessionId)
       if (s) {
+        const todos = loadTodos()
         this.broadcast(s, { type: 'todos_updated', todos })
       }
     })
@@ -217,6 +218,11 @@ export class SessionManager {
 
     // Gateway 模式：注册 decision_request 回调，将决策请求广播给前端（按 sessionId 隔离）
     setGatewayDecisionCallback((payload) => {
+      this.broadcast(session, payload)
+    }, sessionId)
+
+    // Gateway 模式：注册 todo_reset 决策推送回调，将重置请求广播给前端（按 sessionId 隔离）
+    setResetDecisionCallback((payload) => {
       this.broadcast(session, payload)
     }, sessionId)
 
@@ -259,6 +265,7 @@ export class SessionManager {
     await disconnectAllMcp(id)
     setGatewayAskCallback(null, id)
     setGatewayDecisionCallback(null, id)
+    setResetDecisionCallback(null, id)
     TeamManager.destroySession(id)
     // 清理会话级记忆实例（释放 SQLite 连接）
     destroyMemoryStackForSession(id)
@@ -729,6 +736,9 @@ ${writeTools.join('、')}
         break
       case 'decision_reply':
         resolveDecision(String(msg.answer ?? ''), sessionId)
+        break
+      case 'todo_reset_reply':
+        resolveResetDecision(String(msg.answer ?? ''), sessionId)
         break
       // 客户端回复权限询问
       case 'permission_reply': {

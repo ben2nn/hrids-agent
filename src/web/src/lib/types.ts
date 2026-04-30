@@ -125,6 +125,10 @@ export interface Todo {
   content: string
   status: 'pending' | 'in_progress' | 'completed'
   priority: 'high' | 'medium' | 'low'
+  acceptance?: string[]
+  dependsOn?: string[]
+  context?: string
+  createdAt: number
 }
 
 // ─── 定时任务 ──────────────────────────────────────────────────────────────
