@@ -166,22 +166,30 @@ function UserMenuCollapsed({ wsStatus }: UserMenuCollapsedProps) {
   const isDark = theme === 'dark'
   const [open, setOpen] = useState(false)
   const [showWeixin, setShowWeixin] = useState(false)
+  const [weixinBound, setWeixinBound] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const wsColor = wsStatus === 'connected' ? '#4ade80' : wsStatus === 'reconnecting' ? '#fbbf24' : '#f87171'
   const wsLabel = wsStatus === 'connected' ? '已连接' : wsStatus === 'reconnecting' ? '重连中' : '已断开'
 
+  // 菜单打开时检查微信绑定状态
   useEffect(() => {
     if (!open) return
+    void (async () => {
+      try {
+        const { getWeixinConfig, getIMStatus } = await import('../../lib/gateway.js')
+        const [cfg, status] = await Promise.all([getWeixinConfig(), getIMStatus()])
+        const wx = (cfg.platforms as Record<string, unknown>[] | undefined)?.find(p => p.platform === 'weixin')
+        const running = status.status?.find((s: { platform: string; running: boolean }) => s.platform === 'weixin')?.running ?? false
+        setWeixinBound(!!(wx && wx.enabled === true && running))
+      } catch { /* 忽略 */ }
+    })()
     function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false)
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
   }, [open])
-
   return (
     <div ref={menuRef} className="relative flex flex-col items-center">
       {/* 弹出菜单（向右展开） */}
@@ -207,18 +215,21 @@ function UserMenuCollapsed({ wsStatus }: UserMenuCollapsedProps) {
           </div>
           {/* 操作项 */}
           <div className="py-1">
-            {/* 连接微信 */}
+            {/* 微信绑定状态 */}
             <button
               type="button"
               onClick={() => { setShowWeixin(true); setOpen(false) }}
               className="flex items-center gap-2.5 w-full px-3.5 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors border-0 cursor-pointer text-left"
             >
-              <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0 text-[#07C160]">
+              <span className="relative w-3.5 h-3.5 flex items-center justify-center shrink-0 text-[#07C160]">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.019.07-.048.141-.048.213 0 .163.13.295.29.295a.326.326 0 0 0 .167-.054l1.903-1.114a.864.864 0 0 1 .717-.098 10.16 10.16 0 0 0 2.837.403c.276 0 .543-.027.811-.05-.857-2.578.157-4.972 1.932-6.446 1.703-1.415 3.882-1.98 5.853-1.838-.576-3.583-4.196-6.348-8.596-6.348zM5.785 5.991c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178A1.17 1.17 0 0 1 4.623 7.17c0-.651.52-1.18 1.162-1.18zm5.813 0c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178 1.17 1.17 0 0 1-1.162-1.178c0-.651.52-1.18 1.162-1.18zm5.34 2.867c-1.797-.052-3.746.512-5.28 1.786-1.72 1.428-2.687 3.72-1.78 6.22.942 2.453 3.666 4.229 6.884 4.229.826 0 1.622-.12 2.361-.336a.722.722 0 0 1 .598.082l1.584.926a.272.272 0 0 0 .14.047c.134 0 .24-.111.24-.247 0-.06-.023-.12-.038-.177l-.327-1.233a.582.582 0 0 1-.023-.156.49.49 0 0 1 .201-.398C23.024 18.48 24 16.82 24 14.98c0-3.21-2.931-5.837-7.062-6.122zm-3.74 2.632c.535 0 .969.44.969.982a.976.976 0 0 1-.969.983.976.976 0 0 1-.969-.983c0-.542.434-.982.97-.982zm5.4 0c.535 0 .969.44.969.982a.976.976 0 0 1-.969.983.976.976 0 0 1-.969-.983c0-.542.434-.982.97-.982z" />
                 </svg>
+                {weixinBound && (
+                  <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 border border-[var(--bg-elevated)]" />
+                )}
               </span>
-              连接微信
+              {weixinBound ? '微信已绑定' : '连接微信'}
             </button>
             <button
               type="button"
@@ -282,7 +293,7 @@ function UserMenuCollapsed({ wsStatus }: UserMenuCollapsedProps) {
       </button>
 
       {/* 微信连接弹窗 */}
-      {showWeixin && <WeixinConnectModal onClose={() => setShowWeixin(false)} />}
+      {showWeixin && <WeixinConnectModal onClose={() => setShowWeixin(false)} onDisconnected={() => setWeixinBound(false)} />}
     </div>
   )
 }
@@ -299,15 +310,23 @@ function UserMenu({ onViewChange, wsStatus }: UserMenuProps) {
   const isDark = theme === 'dark'
   const [open, setOpen] = useState(false)
   const [showWeixin, setShowWeixin] = useState(false)
+  const [weixinBound, setWeixinBound] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
-  // 点击外部关闭
+  // 点击外部关闭 + 菜单打开时检查微信绑定状态
   useEffect(() => {
     if (!open) return
+    void (async () => {
+      try {
+        const { getWeixinConfig, getIMStatus } = await import('../../lib/gateway.js')
+        const [cfg, status] = await Promise.all([getWeixinConfig(), getIMStatus()])
+        const wx = (cfg.platforms as Record<string, unknown>[] | undefined)?.find(p => p.platform === 'weixin')
+        const running = status.status?.find((s: { platform: string; running: boolean }) => s.platform === 'weixin')?.running ?? false
+        setWeixinBound(!!(wx && wx.enabled === true && running))
+      } catch { /* 忽略 */ }
+    })()
     function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false)
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
@@ -351,18 +370,21 @@ function UserMenu({ onViewChange, wsStatus }: UserMenuProps) {
 
           {/* 功能菜单 */}
           <div className="py-1.5">
-            {/* 连接微信 */}
+            {/* 微信绑定状态 */}
             <button
               type="button"
               onClick={() => { setShowWeixin(true); setOpen(false) }}
               className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors duration-100 border-0 cursor-pointer text-left"
             >
-              <span className="w-4 h-4 flex items-center justify-center shrink-0 text-[#07C160]">
+              <span className="relative w-4 h-4 flex items-center justify-center shrink-0 text-[#07C160]">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M8.691 2.188C3.891 2.188 0 5.476 0 9.53c0 2.212 1.17 4.203 3.002 5.55a.59.59 0 0 1 .213.665l-.39 1.48c-.019.07-.048.141-.048.213 0 .163.13.295.29.295a.326.326 0 0 0 .167-.054l1.903-1.114a.864.864 0 0 1 .717-.098 10.16 10.16 0 0 0 2.837.403c.276 0 .543-.027.811-.05-.857-2.578.157-4.972 1.932-6.446 1.703-1.415 3.882-1.98 5.853-1.838-.576-3.583-4.196-6.348-8.596-6.348zM5.785 5.991c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178A1.17 1.17 0 0 1 4.623 7.17c0-.651.52-1.18 1.162-1.18zm5.813 0c.642 0 1.162.529 1.162 1.18a1.17 1.17 0 0 1-1.162 1.178 1.17 1.17 0 0 1-1.162-1.178c0-.651.52-1.18 1.162-1.18zm5.34 2.867c-1.797-.052-3.746.512-5.28 1.786-1.72 1.428-2.687 3.72-1.78 6.22.942 2.453 3.666 4.229 6.884 4.229.826 0 1.622-.12 2.361-.336a.722.722 0 0 1 .598.082l1.584.926a.272.272 0 0 0 .14.047c.134 0 .24-.111.24-.247 0-.06-.023-.12-.038-.177l-.327-1.233a.582.582 0 0 1-.023-.156.49.49 0 0 1 .201-.398C23.024 18.48 24 16.82 24 14.98c0-3.21-2.931-5.837-7.062-6.122zm-3.74 2.632c.535 0 .969.44.969.982a.976.976 0 0 1-.969.983.976.976 0 0 1-.969-.983c0-.542.434-.982.97-.982zm5.4 0c.535 0 .969.44.969.982a.976.976 0 0 1-.969.983.976.976 0 0 1-.969-.983c0-.542.434-.982.97-.982z" />
                 </svg>
+                {weixinBound && (
+                  <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 border border-[var(--bg-elevated)]" />
+                )}
               </span>
-              <span className="flex-1">连接微信</span>
+              <span className="flex-1">{weixinBound ? '微信已绑定' : '连接微信'}</span>
             </button>
 
             {/* 主题切换 */}
@@ -458,7 +480,7 @@ function UserMenu({ onViewChange, wsStatus }: UserMenuProps) {
       </button>
 
       {/* 微信连接弹窗 */}
-      {showWeixin && <WeixinConnectModal onClose={() => setShowWeixin(false)} />}
+      {showWeixin && <WeixinConnectModal onClose={() => setShowWeixin(false)} onDisconnected={() => setWeixinBound(false)} />}
     </div>
   )
 }

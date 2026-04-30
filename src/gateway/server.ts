@@ -1445,6 +1445,27 @@ export function createGateway(config: GatewayConfig = {}) {
     res.json({ status: platformManager.getStatus() })
   })
 
+  // POST /im/platforms/weixin/login — 发起微信扫码登录，返回二维码
+  app.post('/im/platforms/weixin/login', async (_req, res) => {
+    try {
+      const qr = await platformManager.startWeixinLogin()
+      res.json({
+        qrcodeKey: qr.qrcodeKey,
+        qrcodeImgUrl: qr.qrcodeImgUrl,
+      })
+    } catch (err) {
+      log.error('发起微信扫码登录失败', { error: String(err) })
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /im/platforms/weixin/login/status — 轮询微信扫码状态
+  // status: pending | scaned | confirmed | expired | error
+  app.get('/im/platforms/weixin/login/status', (_req, res) => {
+    const result = platformManager.getWeixinLoginStatus()
+    res.json(result)
+  })
+
   // GET /sessions/:id/image?path= — 直接返回图片二进制（用于前端 <img> 标签显示）
   app.get('/sessions/:id/image', (req, res) => {
     const activeSession = manager.getSession(req.params.id)

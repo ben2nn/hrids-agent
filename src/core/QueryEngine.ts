@@ -644,6 +644,21 @@ ${contentToSummarize}
       auditLog({ action: tc.name as never, resource: description, result: 'allowed', details: { toolName: tc.name } })
     }
 
+    // Zod 参数校验：在执行前验证 LLM 传入的参数格式，避免运行时崩溃
+    if (tool.inputSchema) {
+      const parseResult = tool.inputSchema.safeParse(tc.input)
+      if (!parseResult.success) {
+        const issues = parseResult.error.issues
+          .map(i => `  - ${i.path.join('.')}: ${i.message}`)
+          .join('\n')
+        const errMsg = `工具参数校验失败 [${tc.name}]:\n${issues}`
+        log.warn('工具参数校验失败', { toolName: tc.name, issues: parseResult.error.issues })
+        yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errMsg } }
+        yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: `错误: ${errMsg}`, is_error: true } }
+        return
+      }
+    }
+
     // 工具执行：用 Promise.race 统一处理超时、abort、正常完成三种情况
     // 优先使用工具输入中指定的 timeout（如 bash 工具的 timeout 参数），否则用默认值 10 分钟
     const inputTimeout = (tc.input as Record<string, unknown>)?.timeout

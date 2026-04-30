@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from '
 import https from 'https'
 import { homedir } from 'os'
 import { join } from 'path'
+import QRCode from 'qrcode'
 import { logger } from '../../../core/logger.js'
 import { BasePlatformAdapter, type SendOptions } from '../BasePlatformAdapter.js'
 import type { InboundMessage, MessageSource, MessageType, SendResult, WeixinConfig } from '../types.js'
@@ -34,6 +35,8 @@ const EP_GET_UPDATES = 'ilink/bot/getupdates'
 const EP_SEND_MESSAGE = 'ilink/bot/sendmessage'
 const EP_SEND_TYPING = 'ilink/bot/sendtyping'
 const EP_GET_CONFIG = 'ilink/bot/getconfig'
+const EP_GET_BOT_QRCODE = 'ilink/bot/get_bot_qrcode'
+const EP_GET_QRCODE_STATUS = 'ilink/bot/get_qrcode_status'
 
 const LONG_POLL_TIMEOUT_MS = 35_000
 const API_TIMEOUT_MS = 15_000
@@ -238,6 +241,122 @@ function apiPost(
     req.write(bodyBytes)
     req.end()
   })
+}
+
+// ── 扫码登录：GET 请求封装 ────────────────────────────────────────────────────
+// 注意：登录接口只需要 iLink-App-ClientVersion: 1，不需要其他头
+function apiGet(path: string, timeoutMs = API_TIMEOUT_MS): Promise<Record<string, unknown>> {
+  const url = new URL(`${ILINK_BASE_URL}/${path}`)
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: 'GET',
+        headers: {
+          'iLink-App-ClientVersion': '1',
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let raw = ''
+        res.on('data', (chunk) => { raw += chunk })
+        res.on('end', () => {
+          if (!res.statusCode || res.statusCode >= 400) {
+            reject(new Error(`iLink GET ${path} HTTP ${res.statusCode}: ${raw.slice(0, 200)}`))
+            return
+          }
+          try {
+            resolve(JSON.parse(raw.trim()) as Record<string, unknown>)
+          } catch (err) {
+            reject(new Error(`JSON 解析失败: ${String(err)}, 原始: ${raw.slice(0, 200)}`))
+          }
+        })
+      },
+    )
+    req.on('error', reject)
+    req.on('timeout', () => {
+      req.destroy()
+      reject(new Error(`请求超时 (${timeoutMs}ms): ${path}`))
+    })
+    req.end()
+  })
+}
+
+// 扫码登录结果类型
+export interface WeixinQrCodeResult {
+  /** 二维码 key（用于轮询状态） */
+  qrcodeKey: string
+  /** 二维码图片 URL（展示给用户扫描） */
+  qrcodeImgUrl: string
+}
+
+export interface WeixinLoginResult {
+  status: 'pending' | 'scaned' | 'confirmed' | 'expired' | 'error'
+  /** 登录成功后的 bot token */
+  botToken?: string
+  /** 登录成功后的 account ID */
+  accountId?: string
+  /** 登录成功后的 user ID */
+  userId?: string
+  /** 错误信息 */
+  error?: string
+}
+
+/**
+ * 获取微信扫码登录二维码
+ * 对应接口：GET /ilink/bot/get_bot_qrcode?bot_type=3
+ *
+ * qrcode_img_content 是一个微信网页 URL（扫码后跳转的页面），
+ * 把它作为二维码内容，用 qrcode 包在服务端生成 PNG data URL 返回给前端。
+ */
+export async function getWeixinQrCode(): Promise<WeixinQrCodeResult> {
+  const data = await apiGet(`${EP_GET_BOT_QRCODE}?bot_type=3`)
+  const qrcodeKey = String(data.qrcode ?? '')
+  const loginUrl = String(data.qrcode_img_content ?? '')
+  if (!qrcodeKey) throw new Error('获取二维码失败：响应中缺少 qrcode 字段')
+  if (!loginUrl) throw new Error('获取二维码失败：响应中缺少 qrcode_img_content 字段')
+
+  // 用 qrcode 包把登录 URL 生成为 PNG data URL，前端直接用 <img src> 展示
+  const qrcodeImgUrl = await QRCode.toDataURL(loginUrl, {
+    width: 300,
+    margin: 2,
+    color: { dark: '#000000', light: '#ffffff' },
+  })
+
+  return { qrcodeKey, qrcodeImgUrl }
+}
+
+/**
+ * 轮询微信扫码状态
+ * 对应接口：GET /ilink/bot/get_qrcode_status?qrcode=xxx
+ * status: pending（等待扫码）| scaned（已扫码待确认）| confirmed（已确认）| expired（已过期）
+ */
+export async function pollWeixinQrCodeStatus(qrcodeKey: string): Promise<WeixinLoginResult> {
+  try {
+    const data = await apiGet(
+      `${EP_GET_QRCODE_STATUS}?qrcode=${encodeURIComponent(qrcodeKey)}`,
+      40_000, // 长轮询，服务端最多挂 35s
+    )
+
+    log.debug('get_qrcode_status 响应', { data })
+
+    const status = String(data.status ?? 'pending')
+
+    if (status === 'confirmed') {
+      const botToken = String(data.bot_token ?? '')
+      const accountId = String(data.ilink_bot_id ?? '')
+      const userId = String(data.ilink_user_id ?? '')
+      log.info('扫码确认成功', { accountId, hasToken: !!botToken })
+      return { status: 'confirmed', botToken, accountId, userId }
+    }
+    if (status === 'scaned') return { status: 'scaned' }
+    if (status === 'expired') return { status: 'expired' }
+    return { status: 'pending' }
+  } catch (err) {
+    log.warn('get_qrcode_status 出错', { error: String(err) })
+    return { status: 'error', error: String(err) }
+  }
 }
 
 // ── getupdates（长轮询，超时返回空结果而非抛出）──────────────────────────────
@@ -502,6 +621,25 @@ export class WeixinAdapter extends BasePlatformAdapter {
       if (i < chunks.length - 1) await sleep(SEND_CHUNK_DELAY_MS)
     }
     return result
+  }
+
+  /**
+   * 持续发送 typing 状态直到 stopSignal 触发或 doneSignal resolve。
+   * 微信 typing 状态约 5s 后自动消失，需要每 4s 续发一次。
+   */
+  async keepTyping(chatId: string, doneSignal: Promise<unknown>): Promise<void> {
+    const TYPING_INTERVAL_MS = 4_000
+    let stopped = false
+    doneSignal.finally(() => { stopped = true })
+
+    while (!stopped && !this.stopSignal) {
+      await this.sendTyping(chatId)
+      // 等待 interval 或 done，先到先退
+      await Promise.race([
+        new Promise(r => setTimeout(r, TYPING_INTERVAL_MS)),
+        doneSignal.catch(() => {}),
+      ])
+    }
   }
 
   async sendTyping(chatId: string): Promise<void> {

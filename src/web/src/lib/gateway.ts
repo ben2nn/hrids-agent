@@ -574,3 +574,44 @@ export async function saveWeixinConfig(cfg: {
     }),
   })
 }
+
+// ─── 微信扫码登录 ──────────────────────────────────────────────────────────
+
+export interface WeixinQrCodeResponse {
+  qrcodeKey: string
+  qrcodeImgUrl: string
+}
+
+export type WeixinLoginStatus =
+  | 'pending'    // 等待扫码
+  | 'scaned'     // 已扫码，等待手机确认
+  | 'confirmed'  // 已确认，登录成功
+  | 'expired'    // 二维码已过期
+  | 'error'      // 出错
+
+export interface WeixinLoginStatusResponse {
+  status: WeixinLoginStatus
+  qrcodeImgUrl?: string
+  botToken?: string
+  accountId?: string
+  userId?: string
+  error?: string
+}
+
+/**
+ * 发起微信扫码登录，返回二维码信息。
+ * 后端同时启动后台轮询，前端只需轮询 getWeixinLoginStatus。
+ */
+export async function startWeixinLogin(): Promise<WeixinQrCodeResponse> {
+  const res = await apiFetch('/im/platforms/weixin/login', { method: 'POST' })
+  return res.json()
+}
+
+/**
+ * 查询微信扫码登录状态。
+ * 前端每隔 2s 轮询，直到 status 为 confirmed / expired / error。
+ */
+export async function getWeixinLoginStatus(): Promise<WeixinLoginStatusResponse> {
+  const res = await apiFetch('/im/platforms/weixin/login/status')
+  return res.json()
+}

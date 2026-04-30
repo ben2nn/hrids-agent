@@ -18,6 +18,8 @@ import type { SessionManager } from '../SessionManager.js'
 import { BasePlatformAdapter, buildIMSessionKey } from './BasePlatformAdapter.js'
 import { TelegramAdapter } from './platforms/telegram.js'
 import { WeixinAdapter } from './platforms/weixin.js'
+import { getWeixinQrCode, pollWeixinQrCodeStatus } from './platforms/weixin.js'
+import type { WeixinQrCodeResult, WeixinLoginResult } from './platforms/weixin.js'
 import { WebhookAdapter } from './platforms/webhook.js'
 import type {
   IMGatewayConfig,
@@ -67,6 +69,15 @@ export class PlatformManager {
   private processingLocks = new Set<string>()
   /** IM session key → 待处理的消息队列（处理中时排队） */
   private pendingMessages = new Map<string, InboundMessage>()
+
+  /** 微信扫码登录状态（同时只允许一个进行中的登录流程） */
+  private weixinLoginState: {
+    qrcodeKey: string
+    qrcodeImgUrl: string
+    startedAt: number
+    polling: boolean
+    result?: WeixinLoginResult
+  } | null = null
 
   constructor(sessionManager: SessionManager) {
     this.sessionManager = sessionManager
@@ -182,6 +193,139 @@ export class PlatformManager {
     return result
   }
 
+  // ── 微信扫码登录 ──────────────────────────────────────────────────────────
+
+  /**
+   * 发起微信扫码登录流程。
+   * 返回二维码信息，同时在后台启动轮询。
+   * 二维码有效期约 5 分钟，过期后需重新调用。
+   */
+  async startWeixinLogin(): Promise<WeixinQrCodeResult> {
+    // 如果已有进行中的登录且未过期（5 分钟内），直接复用
+    if (this.weixinLoginState && !this.weixinLoginState.result) {
+      const elapsed = Date.now() - this.weixinLoginState.startedAt
+      if (elapsed < 4.5 * 60 * 1000) {
+        return {
+          qrcodeKey: this.weixinLoginState.qrcodeKey,
+          qrcodeImgUrl: this.weixinLoginState.qrcodeImgUrl,
+        }
+      }
+    }
+
+    // 获取新二维码
+    const qr = await getWeixinQrCode()
+    this.weixinLoginState = {
+      qrcodeKey: qr.qrcodeKey,
+      qrcodeImgUrl: qr.qrcodeImgUrl,
+      startedAt: Date.now(),
+      polling: true,
+    }
+
+    // 后台轮询扫码状态
+    void this.pollWeixinLoginLoop(qr.qrcodeKey)
+
+    log.info('微信扫码登录已发起', { qrcodeKey: qr.qrcodeKey.slice(0, 8) + '...' })
+    return qr
+  }
+
+  /**
+   * 查询当前微信扫码登录状态。
+   * 前端应每隔 2s 轮询此接口，直到 status 为 confirmed / expired / error。
+   */
+  getWeixinLoginStatus(): WeixinLoginResult & { qrcodeImgUrl?: string } {
+    if (!this.weixinLoginState) {
+      return { status: 'error', error: '尚未发起扫码登录，请先调用 POST /im/platforms/weixin/login' }
+    }
+    const state = this.weixinLoginState
+    const base = state.result ?? { status: 'pending' as const }
+    return { ...base, qrcodeImgUrl: state.qrcodeImgUrl }
+  }
+
+  /** 后台轮询扫码状态，确认后自动保存配置并启动适配器 */
+  private async pollWeixinLoginLoop(qrcodeKey: string): Promise<void> {
+    const DEADLINE_MS = 5 * 60 * 1000 // 最多等 5 分钟
+    const POLL_INTERVAL_MS = 2_000     // 短轮询间隔 2s
+    const startedAt = Date.now()
+
+    while (Date.now() - startedAt < DEADLINE_MS) {
+      // 检查是否仍是当前登录流程（防止重新发起后旧轮询干扰）
+      if (!this.weixinLoginState || this.weixinLoginState.qrcodeKey !== qrcodeKey) {
+        log.debug('微信扫码轮询：检测到新登录流程，停止旧轮询')
+        return
+      }
+
+      const result = await pollWeixinQrCodeStatus(qrcodeKey)
+
+      if (result.status === 'confirmed') {
+        log.info('微信扫码登录成功', { accountId: result.accountId })
+        this.weixinLoginState.result = result
+        this.weixinLoginState.polling = false
+        await this.applyWeixinLoginResult(result)
+        return
+      }
+
+      if (result.status === 'expired') {
+        log.info('微信扫码二维码已过期')
+        this.weixinLoginState.result = { status: 'expired' }
+        this.weixinLoginState.polling = false
+        return
+      }
+
+      if (result.status === 'scaned') {
+        this.weixinLoginState.result = { status: 'scaned' }
+      } else if (result.status === 'error') {
+        log.warn('微信扫码轮询出错，3s 后重试', { error: result.error })
+        await new Promise(r => setTimeout(r, 3_000))
+        continue
+      }
+      // pending / scaned：等待后继续轮询
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+    }
+
+    // 超时
+    if (this.weixinLoginState?.qrcodeKey === qrcodeKey) {
+      this.weixinLoginState.result = { status: 'expired' }
+      this.weixinLoginState.polling = false
+    }
+  }
+
+  /** 扫码确认后：保存配置 + 启动/重启微信适配器 */
+  private async applyWeixinLoginResult(result: WeixinLoginResult): Promise<void> {
+    if (!result.botToken || !result.accountId) {
+      log.error('微信登录结果缺少 botToken 或 accountId', { result })
+      return
+    }
+
+    const cfg = PlatformManager.loadConfig()
+    const weixinCfg: WeixinConfig = {
+      platform: 'weixin',
+      enabled: true,
+      token: result.botToken,
+      accountId: result.accountId,
+    }
+
+    const idx = cfg.platforms.findIndex(p => p.platform === 'weixin')
+    if (idx >= 0) {
+      // 保留原有的 allowedUsers 等配置
+      const existing = cfg.platforms[idx] as WeixinConfig
+      weixinCfg.allowedUsers = existing.allowedUsers
+      cfg.platforms[idx] = weixinCfg
+    } else {
+      cfg.platforms.push(weixinCfg)
+    }
+
+    PlatformManager.saveConfig(cfg)
+    log.info('微信配置已保存', { accountId: result.accountId })
+
+    // 启动/重启适配器
+    try {
+      await this.startPlatform(weixinCfg)
+      log.info('微信适配器已自动启动')
+    } catch (err) {
+      log.error('微信适配器自动启动失败', { error: String(err) })
+    }
+  }
+
   // ── 消息路由 ──────────────────────────────────────────────────────────────
 
   /** 收到 IM 消息时的处理入口 */
@@ -219,27 +363,39 @@ export class PlatformManager {
       const adapter = this.adapters.get(msg.source.platform)
       if (!adapter) return
 
-      // 发送"正在输入"指示器
-      await adapter.sendTyping(msg.source.chatId)
+      // 微信不支持消息编辑，不使用流式缓冲器
+      const isWeixin = msg.source.platform === 'weixin'
 
-      // 初始化流式缓冲器
-      const buffer: StreamBuffer = {
-        text: '',
-        lastEditAt: 0,
-        done: false,
+      // 非微信平台：初始化流式缓冲器，支持实时编辑
+      if (!isWeixin) {
+        const buffer: StreamBuffer = {
+          text: '',
+          lastEditAt: 0,
+          done: false,
+        }
+        this.streamBuffers.set(sessionKey, buffer)
       }
-      this.streamBuffers.set(sessionKey, buffer)
 
       // 通过 SessionManager 运行消息，收集流式输出
-      const fullText = await this.runAgentMessage(agentSessionId, msg.text, sessionKey)
-
+      // 微信平台：持续发送 typing 状态，等 LLM 完整输出后一次性发送
+      // 其他平台：流式推送中间状态（实时编辑消息）
+      let fullText: string
+      if (isWeixin) {
+        const weixinAdapter = adapter as import('./platforms/weixin.js').WeixinAdapter
+        const agentPromise = this.runAgentMessage(agentSessionId, msg.text, sessionKey, true)
+        void weixinAdapter.keepTyping(msg.source.chatId, agentPromise)
+        fullText = await agentPromise
+      } else {
+        await adapter.sendTyping(msg.source.chatId)
+        fullText = await this.runAgentMessage(agentSessionId, msg.text, sessionKey, false)
+      }
       // 发送最终回复
       if (fullText.trim()) {
-        await this.sendReply(adapter, msg, fullText, buffer.sentMessageId)
+        const buffer = this.streamBuffers.get(sessionKey)
+        await this.sendReply(adapter, msg, fullText, isWeixin ? undefined : buffer?.sentMessageId)
       }
     } catch (err) {
       log.error('消息处理失败', { sessionKey, error: String(err) })
-      // 尝试发送错误提示
       const adapter = this.adapters.get(msg.source.platform)
       if (adapter) {
         await adapter.sendText(msg.source.chatId, `⚠️ 处理消息时出错：${String(err)}`, {
@@ -261,12 +417,13 @@ export class PlatformManager {
 
   /**
    * 通过 SessionManager 运行消息，收集完整的文本输出。
-   * 使用 runMessageWithCallback 替代 fake WebSocket，类型安全且无内存泄漏。
+   * skipStreaming=true 时（微信等不支持编辑的平台）只累积文本，不触发流式推送。
    */
   private async runAgentMessage(
     agentSessionId: string,
     text: string,
     sessionKey: string,
+    skipStreaming = false,
   ): Promise<string> {
     let fullText = ''
 
@@ -281,7 +438,10 @@ export class PlatformManager {
       (ev) => {
         if (ev.type === 'text_delta' && ev.delta) {
           fullText += ev.delta
-          void this.onStreamDelta(sessionKey, ev.delta)
+          // 微信平台跳过流式推送，等完整输出后一次性发送
+          if (!skipStreaming) {
+            void this.onStreamDelta(sessionKey, ev.delta)
+          }
         }
       },
     )
