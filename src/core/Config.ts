@@ -24,6 +24,12 @@ export interface ModelFallbackGroup {
   apiKey?: string
   /** 覆盖该平台的 Base URL（可选） */
   baseUrl?: string
+  /**
+   * 工具调用模式（可选，默认 "native"）：
+   *   - "native"：使用原生 function calling（OpenAI tool_calls / Anthropic tool_use），稳定可靠
+   *   - "dsml"：强制走 DSML 文本解析，适用于 DS2API 等不支持原生工具调用的兼容层
+   */
+  toolMode?: 'native' | 'dsml'
 }
 
 // ── 模型类型配置 ──────────────────────────────────────────────

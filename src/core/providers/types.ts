@@ -60,6 +60,12 @@ export interface LLMProvider {
   readonly name: string
   readonly model: string
   readonly modelType: ModelType
+  /**
+   * 工具调用模式（默认 "native"）：
+   *   - "native"：原生 function calling（OpenAI tool_calls / Anthropic tool_use）
+   *   - "dsml"：不传 tools，模型输出 DSML 文本，由 QueryEngine 解析
+   */
+  readonly toolMode?: 'native' | 'dsml'
   stream(
     messages: ChatMessage[],
     tools: ToolDef[],

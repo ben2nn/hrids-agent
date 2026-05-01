@@ -513,13 +513,14 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   // GET /todos — 读取所有活跃会话的任务列表（聚合）
-  // 注意：todos 现在按会话存储，此端点聚合所有活跃会话的 todos 供全局视图使用
+  // todos 按会话工作目录存储，路径为 <session.cwd>/.hrids/tasks/todos.json
   app.get('/todos', (_req, res) => {
     try {
       const allTodos: Array<Record<string, unknown>> = []
       const activeSessions = manager.listSessions()
       for (const session of activeSessions) {
-        const todoFile = join(homedir(), '.hrids-agent', 'sessions', session.id, 'todos.json')
+        if (!session.cwd) continue
+        const todoFile = join(session.cwd, '.hrids', 'tasks', 'todos.json')
         if (!existsSync(todoFile)) continue
         try {
           const raw = JSON.parse(readFileSync(todoFile, 'utf-8'))
@@ -574,8 +575,18 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）
+  // todos 存储在会话工作目录下：<session.cwd>/.hrids/tasks/todos.json
   app.get('/sessions/:id/todos', (req, res) => {
-    const todoFile = join(homedir(), '.hrids-agent', 'sessions', req.params.id, 'todos.json')
+    // 优先从内存中取 cwd（活跃会话），历史会话则从磁盘 meta 读取
+    const activeSession = manager.getSession(req.params.id)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+
+    if (!cwd) {
+      res.json([])
+      return
+    }
+
+    const todoFile = join(cwd, '.hrids', 'tasks', 'todos.json')
     if (!existsSync(todoFile)) {
       res.json([])
       return
@@ -900,8 +911,8 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // PUT /crons/:id/toggle — 启用/禁用定时任务
-  app.put('/crons/:id/toggle', (req, res) => {
+  // PUT /crons/:id/toggle — 启用/禁用定时任务（同步更新文件和内存调度器）
+  app.put('/crons/:id/toggle', async (req, res) => {
     const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
@@ -917,14 +928,21 @@ export function createGateway(config: GatewayConfig = {}) {
       const { enabled } = req.body as { enabled: boolean }
       crons[idx].enabled = enabled
       atomicWriteJson(cronFile, crons)
+
+      // 同步更新内存调度器，避免"显示改了但实际还在跑/没跑"的问题
+      try {
+        const { toggleJobInScheduler } = await import('../tools/ScheduleCronTool.js')
+        toggleJobInScheduler(req.params.id, enabled)
+      } catch { /* 调度器不可用时忽略 */ }
+
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
     }
   })
 
-  // DELETE /crons/:id — 删除定时任务
-  app.delete('/crons/:id', (req, res) => {
+  // DELETE /crons/:id — 删除定时任务（同步清除内存调度器中的 timer）
+  app.delete('/crons/:id', async (req, res) => {
     const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
@@ -938,6 +956,13 @@ export function createGateway(config: GatewayConfig = {}) {
         return
       }
       atomicWriteJson(cronFile, filtered)
+
+      // 同步清除内存中的 timer，避免已删除的任务仍然触发
+      try {
+        const { deleteJobFromScheduler } = await import('../tools/ScheduleCronTool.js')
+        deleteJobFromScheduler(req.params.id)
+      } catch { /* 调度器不可用时忽略 */ }
+
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
@@ -956,6 +981,7 @@ export function createGateway(config: GatewayConfig = {}) {
         once?: boolean
         startDate?: string
         endDate?: string
+        sessionId?: string
       }
       if (!body.expression || !body.description || !body.task) {
         res.status(400).json({ error: '缺少必填字段：expression、description、task' })
@@ -968,6 +994,18 @@ export function createGateway(config: GatewayConfig = {}) {
         try { crons = JSON.parse(readFileSync(cronFile, 'utf-8')) } catch { crons = [] }
       } else {
         if (!existsSync(cronDir)) mkdirSync(cronDir, { recursive: true })
+      }
+
+      // 去重检查：相同 expression + description + sessionId 的任务已存在时直接返回
+      const sessionId = body.sessionId ?? ''
+      const duplicate = crons.find(c =>
+        c['expression'] === body.expression &&
+        c['description'] === body.description &&
+        ((c['sessionId'] ?? '') === sessionId)
+      )
+      if (duplicate) {
+        res.json(duplicate)
+        return
       }
 
       // 计算下次执行时间（使用 ScheduleCronTool 的完整解析器）
@@ -996,6 +1034,7 @@ export function createGateway(config: GatewayConfig = {}) {
         once,
         ...(body.startDate ? { startDate: body.startDate } : {}),
         ...(body.endDate ? { endDate: body.endDate } : {}),
+        ...(body.sessionId ? { sessionId: body.sessionId } : {}),
       }
 
       crons.push(job)
@@ -1722,6 +1761,10 @@ export function createGateway(config: GatewayConfig = {}) {
           platformManager.start().catch(err => {
             log.warn('IM 平台管理器启动时出现错误', { error: String(err) })
           })
+          // 注册 cron → IM 推送回调：cron 触发时将提醒文本推送到对应 IM 会话
+          manager.setCronIMCallback((agentSessionId, text) =>
+            platformManager.sendCronToIM(agentSessionId, text)
+          )
           resolve()
         })
       })

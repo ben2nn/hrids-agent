@@ -81,9 +81,14 @@ export class AgentPool {
   ): string {
     const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
+    // 子智能体默认排除 todo 写工具，防止子任务修改共享任务计划文件后
+    // 父 QueryEngine 的 activeTodoSnapshot 不刷新，导致双真相问题。
+    // todo_read 保留：只读操作，子智能体可以查看任务状态。
+    // 显式传入 allowedTools 时不受此限制（高级场景可按需开放）。
+    const SUB_AGENT_EXCLUDED_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset'])
     const tools = allowedTools
       ? this.baseTools.filter(t => allowedTools.includes(t.name))
-      : this.baseTools
+      : this.baseTools.filter(t => !SUB_AGENT_EXCLUDED_TOOLS.has(t.name))
 
     const task: AgentTask = { id, name, description, prompt, status: 'pending' }
     this.tasks.set(id, task)

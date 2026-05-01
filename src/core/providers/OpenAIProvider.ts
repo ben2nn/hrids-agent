@@ -9,6 +9,35 @@ import { zodToJsonSchema } from '../schema.js'
 
 const log = logger.child({ component: 'openai-provider' })
 
+/**
+ * DeepSeek 模型 DSML 工具调用格式说明。
+ *
+ * DeepSeek 在某些情况下不走 function calling，而以文本形式输出 DSML 格式的工具调用。
+ * 注入此说明可减少 LLM 在数组参数写法上的格式错误（嵌套 parameter、整体 JSON 对象等）。
+ *
+ * 关键规则：
+ * - 数组参数必须用 JSON 数组字符串，不能用嵌套 <|DSML|parameter>
+ * - 不能把整个工具参数对象 {"todos":[...]} 作为单个参数值传入
+ */
+const DEEPSEEK_DSML_FORMAT_HINT = `## 工具调用格式规范（DSML）
+
+当使用 DSML 格式调用工具时，数组参数必须写成 JSON 数组字符串，不能用嵌套标签：
+
+✅ 正确写法（数组用 JSON）：
+<|DSML|invoke name="todo_write">
+  <|DSML|parameter name="todos"><![CDATA[[{"content":"任务1","priority":"high"},{"content":"任务2","priority":"medium"}]]]></|DSML|parameter>
+</|DSML|invoke>
+
+❌ 错误写法（不能用嵌套 parameter 表达数组）：
+<|DSML|invoke name="todo_write">
+  <|DSML|parameter name="todos">
+    <|DSML|parameter name="item"><![CDATA[{"content":"任务1"}]]></|DSML|parameter>
+  </|DSML|parameter>
+</|DSML|invoke>
+
+❌ 错误写法（不能把整个参数对象作为单个参数值）：
+<|DSML|parameter name="todos"><![CDATA[{"todos":[...]}]]></|DSML|parameter>`
+
 interface OAIMessage {
   role: string
   content: string | null
@@ -34,9 +63,18 @@ function toOAITool(tool: ToolDef): OAITool {
 }
 
 // 将通用消息转换为 OpenAI 格式
-function toOAIMessages(messages: ChatMessage[], systemPrompt: string[]): OAIMessage[] {
+function toOAIMessages(messages: ChatMessage[], systemPrompt: string[], providerName?: string): OAIMessage[] {
   // OpenAI 不支持 system 数组，合并为单个 system 消息
-  const result: OAIMessage[] = [{ role: 'system', content: systemPrompt.join('\n\n') }]
+  let systemContent = systemPrompt.join('\n\n')
+
+  // DeepSeek 模型有时不走 function calling 而输出 DSML 文本格式，
+  // 且对数组参数的写法不稳定（嵌套 parameter、整体 JSON 对象等）。
+  // 注入明确的格式说明，减少格式错误概率。
+  if (providerName === 'deepseek') {
+    systemContent += '\n\n' + DEEPSEEK_DSML_FORMAT_HINT
+  }
+
+  const result: OAIMessage[] = [{ role: 'system', content: systemContent }]
 
   for (const msg of messages) {
     if (msg.role === 'user' || msg.role === 'assistant') {
@@ -111,13 +149,18 @@ export class OpenAIProvider implements LLMProvider {
   readonly name: string
   readonly model: string
   readonly modelType: ModelType
+  readonly toolMode: 'native' | 'dsml'
   private config: ProviderConfig
+  /** dsml 模式：不向 API 传 tools，让模型输出 DSML 文本格式的工具调用 */
+  private disableNativeTools: boolean
 
-  constructor(config: ProviderConfig, providerName = 'openai') {
+  constructor(config: ProviderConfig, providerName = 'openai', disableNativeTools = false) {
     this.config = config
     this.model = config.model
     this.modelType = config.modelType ?? 'llm'
     this.name = providerName
+    this.disableNativeTools = disableNativeTools
+    this.toolMode = disableNativeTools ? 'dsml' : 'native'
   }
 
   async *stream(
@@ -127,8 +170,8 @@ export class OpenAIProvider implements LLMProvider {
     maxTokens: number,
   ): AsyncGenerator<StreamChunk> {
     const baseUrl = this.config.baseUrl ?? 'https://api.openai.com/v1'
-    const oaiMessages = toOAIMessages(messages, systemPrompt)
-    const oaiTools = tools.length > 0 ? tools.map(toOAITool) : undefined
+    const oaiMessages = toOAIMessages(messages, systemPrompt, this.name)
+    const oaiTools = (!this.disableNativeTools && tools.length > 0) ? tools.map(toOAITool) : undefined
 
     const body: Record<string, unknown> = {
       model: this.model,

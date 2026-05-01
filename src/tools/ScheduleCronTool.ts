@@ -5,8 +5,13 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from '
 import { homedir } from 'os'
 import { join } from 'path'
 import type { ToolDef } from '../core/Tool.js'
+import { getCurrentSessionId } from '../core/sessionContext.js'
 
 const CRON_FILE = join(homedir(), '.hrids-agent', 'crons.json')
+
+// ── 并发写入保护：防止同一轮次并行工具调用导致重复创建 ──────────────────────
+// 使用内存级互斥锁，确保 create 操作串行执行（读-检查-写 原子化）
+let createLock: Promise<void> = Promise.resolve()
 
 export interface CronJob {
   id: string
@@ -20,6 +25,7 @@ export interface CronJob {
   once?: boolean       // 一次性任务：触发后自动删除
   startDate?: string   // 生效开始日期（ISO 日期字符串，如 "2026-05-01"）
   endDate?: string     // 生效结束日期（ISO 日期字符串，如 "2026-12-31"）
+  sessionId?: string   // 归属会话 ID（Gateway 多会话下精确路由触发目标）
 }
 
 // ── 持久化 ──────────────────────────────────────────────────────────────────
@@ -223,21 +229,72 @@ export function scheduleNewJob(job: CronJob) {
   scheduleJob(job)
 }
 
+/**
+ * 供外部（server.ts PUT /crons/:id/toggle）调用，同步更新内存调度器。
+ * 禁用时清除 timer，启用时重新调度。
+ */
+export function toggleJobInScheduler(id: string, enabled: boolean): void {
+  if (!enabled) {
+    const timer = activeTimers.get(id)
+    if (timer) { clearTimeout(timer); activeTimers.delete(id) }
+  } else {
+    // 从文件读取最新状态后重新调度
+    const crons = loadCrons()
+    const job = crons.find(c => c.id === id)
+    if (job && job.enabled) scheduleJob(job)
+  }
+}
+
+/**
+ * 供外部（server.ts DELETE /crons/:id）调用，清除内存中的 timer。
+ */
+export function deleteJobFromScheduler(id: string): void {
+  const timer = activeTimers.get(id)
+  if (timer) { clearTimeout(timer); activeTimers.delete(id) }
+}
+
 function scheduleJob(job: CronJob) {
   if (!job.enabled) return
 
+  const now = Date.now()
+
+  // 检查 endDate：已过有效期则跳过调度（契约落地）
+  if (job.endDate) {
+    // 使用当天结束时间（23:59:59.999），确保 endDate 当天全天都有效
+    // 避免 new Date('2026-05-01') 解析为 00:00:00 导致当天就失效的问题
+    const endDay = new Date(job.endDate)
+    endDay.setHours(23, 59, 59, 999)
+    const end = endDay.getTime()
+    if (!isNaN(end) && now > end) {
+      console.info(`[cron] 任务已过有效期，跳过调度: ${job.id} (endDate: ${job.endDate})`)
+      return
+    }
+  }
+
+  // 检查 startDate：未到生效日期则从 startDate 当天开始时间起算第一次执行时间
+  let fromTime: number | undefined
+  if (job.startDate) {
+    // 使用当天开始时间（00:00:00.000），确保 startDate 当天就能触发
+    const startDay = new Date(job.startDate)
+    startDay.setHours(0, 0, 0, 0)
+    const start = startDay.getTime()
+    if (!isNaN(start) && now < start) {
+      fromTime = start  // parseNextRun 将从此时间点开始搜索
+    }
+  }
+
   // 计算下次执行时间：优先使用已保存的 nextRunAt，若已过期则重新计算
   let nextRun = job.nextRunAt
-  let delay = nextRun ? nextRun - Date.now() : -1
+  let delay = nextRun ? nextRun - now : -1
 
   if (delay <= 0) {
-    // 已过期或未设置，重新计算
-    nextRun = parseNextRun(job.expression)
+    // 已过期或未设置，重新计算（传入 fromTime 影响起算点）
+    nextRun = parseNextRun(job.expression, fromTime)
     if (!nextRun) {
       console.warn(`[cron] 无法解析 cron 表达式，跳过任务: ${job.id} (${job.expression})`)
       return
     }
-    delay = nextRun - Date.now()
+    delay = nextRun - now
     // 更新到磁盘，避免下次重启再次过期
     const crons = loadCrons()
     const idx = crons.findIndex(c => c.id === job.id)
@@ -302,8 +359,9 @@ const createSchema = z.object({
 
 const deleteSchema = z.object({
   action: z.literal('delete'),
-  id: z.string().describe('要删除的 cron 任务 ID'),
-})
+  id: z.string().optional().describe('要删除的 cron 任务 ID（精确匹配，优先使用）'),
+  description: z.string().optional().describe('任务描述关键词（模糊匹配，id 未知时使用）'),
+}).refine(d => d.id || d.description, { message: '必须提供 id 或 description 之一' })
 
 const listSchema = z.object({
   action: z.literal('list'),
@@ -373,6 +431,32 @@ cron 表达式格式（5位）：分 时 日 月 周
     }
 
     if (input.action === 'create') {
+      // ── 串行化保护：防止并行工具调用导致重复创建（竞态条件）──
+      let resolveCreate!: () => void
+      const prevLock = createLock
+      createLock = new Promise<void>(resolve => { resolveCreate = resolve })
+      await prevLock
+
+      try {
+      // ── 去重检查：相同 expression + description 的任务已存在时，直接返回已有任务 ──
+      const sessionId = getCurrentSessionId()
+      const crons = loadCrons()
+      const duplicate = crons.find(c =>
+        c.expression === input.expression &&
+        c.description === input.description &&
+        // 同一会话内去重（sessionId 相同或均为空）
+        (c.sessionId ?? '') === (sessionId ?? '')
+      )
+      if (duplicate) {
+        const nextStr = duplicate.nextRunAt
+          ? `下次执行: ${new Date(duplicate.nextRunAt).toLocaleString('zh-CN')}`
+          : '未调度'
+        return {
+          type: 'success',
+          output: `⚠️ 相同的定时任务已存在，未重复创建，操作已完成。\nID: ${duplicate.id}\n表达式: ${duplicate.expression}\n描述: ${duplicate.description}\n${nextStr}`,
+        }
+      }
+
       const id = `cron-${Date.now().toString(36)}`
       const nextRunAt = parseNextRun(input.expression)
 
@@ -389,6 +473,7 @@ cron 表达式格式（5位）：分 时 日 月 周
         nextRunAt,
         enabled: true,
         once,
+        ...(sessionId ? { sessionId } : {}),
       }
       crons.push(job)
       saveCrons(crons)
@@ -401,18 +486,38 @@ cron 表达式格式（5位）：分 时 日 月 周
       const correctedStr = (isRecurring && input.once === true) ? '\n📌 注意：检测到周期性 cron 表达式，已自动将 once 修正为 false' : ''
       return {
         type: 'success',
-        output: `✅ 定时任务已创建\nID: ${id}\n表达式: ${input.expression}\n描述: ${input.description}\n${nextStr}${onceStr}${correctedStr}`,
+        output: `✅ 定时任务已创建，无需再次查询验证，操作已完成。\nID: ${id}\n表达式: ${input.expression}\n描述: ${input.description}\n${nextStr}${onceStr}${correctedStr}`,
+      }
+      } finally {
+        resolveCreate()
       }
     }
 
     if (input.action === 'delete') {
-      const idx = crons.findIndex(c => c.id === input.id)
-      if (idx === -1) return { type: 'error', message: `未找到任务 ID: ${input.id}` }
-      const timer = activeTimers.get(input.id)
-      if (timer) { clearTimeout(timer); activeTimers.delete(input.id) }
+      const crons = loadCrons()
+
+      // 优先按 id 精确匹配，否则按 description 模糊匹配
+      let idx = -1
+      if (input.id) {
+        idx = crons.findIndex(c => c.id === input.id)
+      } else if (input.description) {
+        const keyword = input.description.toLowerCase()
+        idx = crons.findIndex(c => c.description.toLowerCase().includes(keyword))
+      }
+
+      if (idx === -1) {
+        const hint = input.id
+          ? `未找到 ID 为 "${input.id}" 的定时任务`
+          : `未找到描述包含 "${input.description}" 的定时任务`
+        return { type: 'error', message: `${hint}，无需删除，操作已完成。` }
+      }
+
+      const job = crons[idx]
+      const timer = activeTimers.get(job.id)
+      if (timer) { clearTimeout(timer); activeTimers.delete(job.id) }
       crons.splice(idx, 1)
       saveCrons(crons)
-      return { type: 'success', output: `✅ 定时任务 ${input.id} 已删除` }
+      return { type: 'success', output: `✅ 定时任务已删除，无需再次查询验证，操作已完成。\nID: ${job.id}\n描述: ${job.description}` }
     }
 
     if (input.action === 'toggle') {

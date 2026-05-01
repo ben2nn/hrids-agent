@@ -94,6 +94,30 @@ function escapeMarkdownV2(text: string): string {
 }
 
 /**
+ * 分割已格式化的 MarkdownV2 文本，尽量在换行处断开，不破坏转义序列。
+ * 用于 sendFormatted 内部，避免在 \* 等转义序列中间截断。
+ */
+function splitFormattedText(text: string, maxLength: number): string[] {
+  if (text.length <= maxLength) return [text]
+  const chunks: string[] = []
+  let remaining = text
+  while (remaining.length > maxLength) {
+    // 优先在换行处断开
+    let cutAt = remaining.lastIndexOf('\n', maxLength)
+    if (cutAt < maxLength * 0.5) {
+      cutAt = remaining.lastIndexOf(' ', maxLength)
+    }
+    if (cutAt <= 0) cutAt = maxLength
+    // 确保不在转义序列 \X 中间截断
+    while (cutAt > 1 && remaining[cutAt - 1] === '\\') cutAt--
+    chunks.push(remaining.slice(0, cutAt).trimEnd())
+    remaining = remaining.slice(cutAt).trimStart()
+  }
+  if (remaining.length > 0) chunks.push(remaining)
+  return chunks
+}
+
+/**
  * 将标准 Markdown 转换为 Telegram MarkdownV2 格式
  * 只处理常见语法，复杂情况降级为纯文本
  */
@@ -148,6 +172,26 @@ export class TelegramAdapter extends BasePlatformAdapter {
   constructor(config: TelegramConfig) {
     super('telegram', config)
     this.telegramConfig = config
+  }
+
+  /**
+   * Telegram 能力声明：
+   * - 支持编辑消息 → 启用流式推送
+   * - 需要持续 typing → Telegram typing 约 5s 自动消失，长任务需续发
+   */
+  override get capabilities() {
+    return {
+      supportsMessageEdit: true,
+      supportsKeepTyping: true,
+    }
+  }
+
+  /**
+   * Telegram 出站格式化：将标准 Markdown 转换为 MarkdownV2。
+   * 由 sendText / editMessage 在内部调用，调用方传入原始 Markdown 即可。
+   */
+  protected override formatOutbound(text: string): string {
+    return convertToTelegramMarkdown(text)
   }
 
   async connect(): Promise<void> {
@@ -206,10 +250,33 @@ export class TelegramAdapter extends BasePlatformAdapter {
   async sendText(chatId: string, text: string, options?: SendOptions): Promise<SendResult> {
     if (!this.bot) return { success: false, error: '适配器未连接' }
 
-    // 分割长消息
-    const maxLen = TELEGRAM_MAX_LENGTH - 100 // 留余量
-    if (text.length > maxLen) {
-      return this.sendLongText(chatId, text, maxLen, options)
+    const formatted = this.formatOutbound(text)
+    return this.sendFormatted(chatId, text, formatted, options)
+  }
+
+  /**
+   * 内部发送方法，接收已格式化的文本，避免 sendLongText 递归时重复格式化。
+   * sendLongText 分割的是已格式化文本，每个 chunk 直接走这里。
+   */
+  private async sendFormatted(
+    chatId: string,
+    rawText: string,
+    formatted: string,
+    options?: SendOptions,
+  ): Promise<SendResult> {
+    if (!this.bot) return { success: false, error: '适配器未连接' }
+
+    // 分割长消息（按已格式化长度判断）
+    const maxLen = TELEGRAM_MAX_LENGTH - 100
+    if (formatted.length > maxLen) {
+      // 分割已格式化文本，每段直接发送，不再经过 formatOutbound
+      const chunks = splitFormattedText(formatted, maxLen)
+      let result: SendResult = { success: true }
+      for (const chunk of chunks) {
+        result = await this.sendFormatted(chatId, chunk, chunk, options)
+        if (!result.success) break
+      }
+      return result
     }
 
     try {
@@ -224,14 +291,13 @@ export class TelegramAdapter extends BasePlatformAdapter {
         tgOptions.message_thread_id = parseInt(options.threadId)
       }
 
-      const converted = convertToTelegramMarkdown(text)
-      const sent = await this.bot.sendMessage(chatId, converted, tgOptions)
+      const sent = await this.bot.sendMessage(chatId, formatted, tgOptions)
       return { success: true, messageId: String(sent.message_id) }
     } catch (err) {
       // MarkdownV2 解析失败时降级为纯文本
       log.warn('MarkdownV2 发送失败，降级为纯文本', { chatId, error: String(err) })
       try {
-        const sent = await this.bot!.sendMessage(chatId, text, {
+        const sent = await this.bot!.sendMessage(chatId, rawText, {
           disable_web_page_preview: true,
           ...(options?.replyToMessageId ? { reply_to_message_id: parseInt(options.replyToMessageId) } : {}),
           ...(options?.threadId ? { message_thread_id: parseInt(options.threadId) } : {}),
@@ -247,13 +313,15 @@ export class TelegramAdapter extends BasePlatformAdapter {
   async editMessage(chatId: string, messageId: string, text: string): Promise<SendResult> {
     if (!this.bot) return { success: false, error: '适配器未连接' }
 
+    const formatted = this.formatOutbound(text)
+
     // 截断超长消息
-    const truncated = text.length > TELEGRAM_MAX_LENGTH - 100
-      ? text.slice(0, TELEGRAM_MAX_LENGTH - 200) + '\n\n…（内容过长已截断）'
-      : text
+    const truncated = formatted.length > TELEGRAM_MAX_LENGTH - 100
+      ? formatted.slice(0, TELEGRAM_MAX_LENGTH - 200) + '\n\n…（内容过长已截断）'
+      : formatted
 
     try {
-      await this.bot.editMessageText(convertToTelegramMarkdown(truncated), {
+      await this.bot.editMessageText(truncated, {
         chat_id: chatId,
         message_id: parseInt(messageId),
         parse_mode: 'MarkdownV2',
@@ -261,9 +329,9 @@ export class TelegramAdapter extends BasePlatformAdapter {
       })
       return { success: true, messageId }
     } catch (err) {
-      // 降级为纯文本编辑
+      // 降级为纯文本编辑（传入原始文本）
       try {
-        await this.bot!.editMessageText(truncated, {
+        await this.bot!.editMessageText(text, {
           chat_id: chatId,
           message_id: parseInt(messageId),
         })

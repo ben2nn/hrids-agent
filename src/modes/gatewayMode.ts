@@ -34,41 +34,50 @@ export async function runGatewayMode(opts: GatewayModeOpts): Promise<void> {
 
   const webUrl = `http://${opts.gatewayHost}:${opts.gatewayPort}`
 
-  // 注册 cron 触发回调，将任务发送到知了专属会话
+  // 注册 cron 触发回调：优先按 job.sessionId 路由，无归属时降级到知了会话（兼容旧数据）
   setCronTriggerCallback((job) => {
     void (async () => {
       try {
-        const zhileFile = join(homedir(), '.hrids-agent', 'zhile-session.json')
-        if (!existsSync(zhileFile)) {
-          logger.warn('[cron] 知了会话文件不存在，跳过触发', { jobId: job.id })
+        // 优先使用 job 自身的 sessionId 归属（新数据）
+        let targetSessionId: string | undefined = job.sessionId
+
+        // 降级：无归属时回退到知了会话（兼容旧 cron 数据）
+        if (!targetSessionId) {
+          const zhileFile = join(homedir(), '.hrids-agent', 'zhile-session.json')
+          if (!existsSync(zhileFile)) {
+            logger.warn('[cron] 任务无 sessionId 归属且知了会话文件不存在，跳过触发', { jobId: job.id })
+            return
+          }
+          const parsed = JSON.parse(readFileSync(zhileFile, 'utf-8')) as { sessionId?: string }
+          targetSessionId = parsed.sessionId
+        }
+
+        if (!targetSessionId) {
+          logger.warn('[cron] 无法确定目标会话，跳过触发', { jobId: job.id })
           return
         }
-        const { sessionId } = JSON.parse(readFileSync(zhileFile, 'utf-8')) as { sessionId?: string }
-        if (!sessionId) {
-          logger.warn('[cron] 知了会话 ID 为空，跳过触发', { jobId: job.id })
-          return
-        }
-        let session = gateway.manager.getSession(sessionId)
+
+        let session = gateway.manager.getSession(targetSessionId)
         if (!session) {
-          logger.warn('[cron] 知了会话不在内存中，尝试恢复', { jobId: job.id, sessionId })
+          logger.warn('[cron] 目标会话不在内存中，尝试恢复', { jobId: job.id, sessionId: targetSessionId })
           try {
-            await gateway.manager.createSession({ resume: sessionId })
-            session = gateway.manager.getSession(sessionId)
+            await gateway.manager.createSession({ resume: targetSessionId })
+            session = gateway.manager.getSession(targetSessionId)
           } catch (err) {
-            logger.error('[cron] 恢复知了会话失败', { error: String(err) })
+            logger.error('[cron] 恢复目标会话失败', { error: String(err) })
             return
           }
         }
         if (!session) {
-          logger.error('[cron] 知了会话恢复后仍不存在', { jobId: job.id, sessionId })
+          logger.error('[cron] 目标会话恢复后仍不存在', { jobId: job.id, sessionId: targetSessionId })
           return
         }
-        logger.info('[cron] 触发定时任务，发送提醒到知了会话', {
+        logger.info('[cron] 触发定时任务，发送提醒到目标会话', {
           jobId: job.id,
-          sessionId,
+          sessionId: targetSessionId,
           task: job.task.slice(0, 80),
         })
-        await gateway.manager.sendCronReminder(sessionId, {
+        await gateway.manager.sendCronReminder(targetSessionId, {
           id: job.id,
           description: job.description,
           task: job.task,

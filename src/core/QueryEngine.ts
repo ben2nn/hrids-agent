@@ -5,25 +5,37 @@ import { CostTracker } from './CostTracker.js'
 import { logger } from './logger.js'
 import { auditLog } from './audit.js'
 import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
-import { loadTodos } from '../tools/TodoTool.js'
+import { loadTodos, type Todo } from '../tools/TodoTool.js'
 
 const log = logger.child({ component: 'query-engine' })
 
 /**
- * 实时读取 todos.json，构建任务状态快照字符串，注入到 system prompt。
- * 无活跃任务（pending/in_progress）时返回 null，避免无意义 token 消耗。
- * 文件不存在或读取失败时静默返回 null，不影响正常请求。
+ * 根据会话级任务快照构建任务状态字符串，注入到 system prompt。
+ *
+ * 接受快照而非直接读文件，由调用方（QueryEngine）控制何时刷新快照：
+ *   - 快照为 null：本会话尚未执行过任何任务工具，不注入任何内容
+ *   - 快照非空但无活跃任务：所有任务已完成，不注入（避免无意义 token）
+ *   - 快照有活跃任务：注入完整状态 + 执行驱动指令
+ *
+ * 这样"你好"等简单消息在会话初始状态（快照为 null）时不会触发工具调用，
+ * 只有任务工具实际执行后快照才会被填充，后续轮次才注入执行指令。
  */
-function buildLiveTodoContext(): string | null {
-  try {
-    const todos = loadTodos()
-    const active = todos.filter(t => t.status !== 'completed')
-    if (active.length === 0) return null
+function buildLiveTodoContext(snapshot: Todo[] | null): string | null {
+  if (snapshot === null) return null
 
-    const completedCount = todos.filter(t => t.status === 'completed').length
+  try {
+    const active = snapshot.filter(t => t.status !== 'completed')
+    // 所有任务已完成：注入一条简短的完成提示，让 LLM 知道不需要再调用任务工具
+    // 避免 LLM 在最后一轮看不到任务状态而重复执行或调用 todo_read 确认
+    if (active.length === 0) {
+      if (snapshot.length === 0) return null
+      return `## 当前任务状态（实时）\n进度：${snapshot.length}/${snapshot.length}（全部完成）\n请直接输出最终结果，不要再调用任何任务工具。`
+    }
+
+    const completedCount = snapshot.filter(t => t.status === 'completed').length
     const lines: string[] = [
       '## 当前任务状态（实时）',
-      `进度：${completedCount}/${todos.length}`,
+      `进度：${completedCount}/${snapshot.length}`,
     ]
 
     for (const t of active) {
@@ -49,12 +61,17 @@ function buildLiveTodoContext(): string | null {
     const inProgress = active.find(t => t.status === 'in_progress')
     if (inProgress) {
       lines.push(`当前执行中：「${inProgress.content}」（id: ${inProgress.id}）`)
-      lines.push(`完成后调用：todo_update(id='${inProgress.id}', status='completed')`)
+      // 根据是否有验收标准，动态生成正确的完成调用指令
+      if (inProgress.acceptance && inProgress.acceptance.length > 0) {
+        const trueArr = inProgress.acceptance.map(() => 'true').join(', ')
+        lines.push(`完成后调用：todo_update(id='${inProgress.id}', status='completed', confirmations=[${trueArr}])`)
+      } else {
+        lines.push(`完成后调用：todo_update(id='${inProgress.id}', status='completed')`)
+      }
     }
 
     return lines.join('\n')
   } catch {
-    // 文件不存在或读取失败时静默跳过
     return null
   }
 }
@@ -177,6 +194,17 @@ export class QueryEngine {
   private currentTrigger: 'user' | 'cron' = 'user'
   // 当前 cron 任务的描述（仅 trigger=cron 时有值）
   private currentCronDescription: string | undefined = undefined
+  /**
+   * 会话级任务快照。
+   *
+   * - null：本会话尚未执行过任何 todo 工具，system prompt 不注入任务状态。
+   *         这是初始状态，确保"你好"等简单消息不会触发工具调用。
+   * - Todo[]：最近一次 todo 工具执行后从文件刷新的快照，用于构建 system prompt 注入内容。
+   *           所有任务完成后快照仍保留（数组全为 completed），buildLiveTodoContext 会返回 null。
+   *
+   * 刷新时机：executeOneTool 检测到 todo_* 工具调用成功后立即调用 loadTodos() 更新。
+   */
+  private activeTodoSnapshot: Todo[] | null = null
 
   constructor(config: QueryEngineConfig) {
     this.config = config
@@ -500,7 +528,7 @@ ${contentToSummarize}
     log.debug('调用 LLM stream', { model: this.config.provider.model, turn: turns })
 
     try {
-      const liveTodo = buildLiveTodoContext()
+      const liveTodo = buildLiveTodoContext(this.activeTodoSnapshot)
       const systemPromptForThisTurn = liveTodo
         ? [...this.config.systemPrompt, liveTodo]
         : this.config.systemPrompt
@@ -517,15 +545,14 @@ ${contentToSummarize}
 
         if (chunk.type === 'text_delta' && chunk.delta) {
           fullText += chunk.delta
-          // 检测到 DSML invoke 标记前正常流式发出，检测到后停止发出。
-          // 流结束后在 send() 中统一处理：有工具调用则补发清理后的正文，否则补发剩余文本。
-          // 这样既保留了正文部分的流式体验，又避免 DSML 标记出现在前端。
-          // hasDsmlMarker 检测 <|DSML|invoke，不依赖 provider 名称，兼容任何输出 DSML 的模型。
-          if (!hasDsmlMarker(fullText)) {
-            // 尚未出现 DSML invoke 标记：正常流式发出
+          // dsml 模式：检测到 DSML invoke 标记后停止流式发出，等流结束后统一解析。
+          // native 模式：直接流式发出，不做 DSML 检测（避免误判正常文本中的 DSML 字样）。
+          // TODO: DSML 解析暂时关闭，强制走 native 模式
+          const isDsmlMode = false // this.config.provider.toolMode === 'dsml'
+          if (!isDsmlMode || !hasDsmlMarker(fullText)) {
             yield { type: 'text_delta', delta: chunk.delta }
           }
-          // 已出现 DSML invoke 标记：停止发出后续 delta，等流结束后统一处理
+          // dsml 模式且已出现 DSML invoke 标记：停止发出后续 delta，等流结束后统一处理
         } else if (chunk.type === 'tool_call' && chunk.toolCall) {
           toolCalls.push(chunk.toolCall)
         } else if (chunk.type === 'usage' && chunk.usage) {
@@ -645,8 +672,32 @@ ${contentToSummarize}
     }
 
     // Zod 参数校验：在执行前验证 LLM 传入的参数格式，避免运行时崩溃
+    // effectiveInput 可能在自动修复后与 tc.input 不同，后续 execute 统一用 effectiveInput
+    let effectiveInput: unknown = tc.input
     if (tool.inputSchema) {
-      const parseResult = tool.inputSchema.safeParse(tc.input)
+      // 自动修复：LLM 传单个对象而非数组时（如 todos: {...} 而非 todos: [{...}]），
+      // 尝试将对象包装成数组后重新校验，避免因格式错误浪费一轮重试。
+      const inputObj = tc.input as Record<string, unknown>
+      if (inputObj && typeof inputObj === 'object' && !Array.isArray(inputObj)) {
+        const arrayFields = ['todos'] // 已知需要数组的字段名
+        for (const field of arrayFields) {
+          if (
+            field in inputObj &&
+            inputObj[field] !== null &&
+            typeof inputObj[field] === 'object' &&
+            !Array.isArray(inputObj[field])
+          ) {
+            const patched = { ...inputObj, [field]: [inputObj[field]] }
+            if (tool.inputSchema.safeParse(patched).success) {
+              log.info('自动修复工具参数：将单个对象包装为数组', { toolName: tc.name, field })
+              effectiveInput = patched
+              break
+            }
+          }
+        }
+      }
+
+      const parseResult = tool.inputSchema.safeParse(effectiveInput)
       if (!parseResult.success) {
         const issues = parseResult.error.issues
           .map(i => `  - ${i.path.join('.')}: ${i.message}`)
@@ -661,12 +712,12 @@ ${contentToSummarize}
 
     // 工具执行：用 Promise.race 统一处理超时、abort、正常完成三种情况
     // 优先使用工具输入中指定的 timeout（如 bash 工具的 timeout 参数），否则用默认值 10 分钟
-    const inputTimeout = (tc.input as Record<string, unknown>)?.timeout
+    const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
     const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
       ? inputTimeout + 5000  // 比工具自身超时多 5s，确保工具先超时并返回错误信息
       : 10 * 60 * 1000       // 默认 10 分钟
 
-    const toolPromise: Promise<ToolResult> = tool.execute(tc.input as never, { onLog })
+    const toolPromise: Promise<ToolResult> = tool.execute(effectiveInput as never, { onLog })
       .then(r => r)
       .catch((e: unknown) => ({
         type: 'error' as const,
@@ -718,6 +769,20 @@ ${contentToSummarize}
     yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult }
     log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type })
 
+    // todo 工具执行成功后刷新会话级任务快照。
+    // 只在成功时刷新（失败不改变任务状态，快照无需更新）。
+    // 覆盖所有会修改任务列表的工具：write / update / append / reset。
+    // todo_read 是只读工具，但也刷新快照，确保会话首次读取后快照不再为 null。
+    const TODO_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset', 'todo_read'])
+    if (TODO_TOOLS.has(tc.name) && finalResult.type === 'success') {
+      try {
+        this.activeTodoSnapshot = loadTodos()
+        log.debug('任务快照已刷新', { toolName: tc.name, count: this.activeTodoSnapshot.length })
+      } catch {
+        // 读取失败不影响主流程，快照保持上次值
+      }
+    }
+
     const resultContent = finalResult.type === 'success' ? finalResult.output : `错误: ${finalResult.message}`
     // 截断过长的工具输出，防止单条结果撑爆 history
     const truncatedContent = resultContent.length > MAX_TOOL_RESULT_CHARS
@@ -759,6 +824,23 @@ ${contentToSummarize}
     
     // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行（复用上方已提取的 msgText）
     const isQueryMode = this.isQueryIntent(msgText)
+
+    // 任务快照预热：每次 send 开始时，如果快照为 null（本会话尚未调用过 todo 工具），
+    // 主动读取一次磁盘，确保磁盘上已有任务时能立即注入到 system prompt。
+    // 这解决了"会话恢复后任务状态不注入"和"首轮消息无法感知已有任务"的问题。
+    // 只在快照为 null 时读取（避免每轮都 IO），todo 工具执行后会继续刷新快照。
+    if (this.activeTodoSnapshot === null) {
+      try {
+        const existing = loadTodos()
+        // 只有磁盘上确实有任务时才激活快照，空列表保持 null（避免误触发任务状态注入）
+        if (existing.length > 0) {
+          this.activeTodoSnapshot = existing
+          log.debug('任务快照预热：从磁盘读取到已有任务', { count: existing.length })
+        }
+      } catch {
+        // 读取失败不影响主流程，快照保持 null
+      }
+    }
 
     // craft 模式：不设轮次上限，完全依赖 autocompact 管理上下文
     // ask/plan 模式：保留轮次限制，超出后通知用户决定是否继续
@@ -862,9 +944,11 @@ ${contentToSummarize}
           })
         }
 
-        // 没有工具调用：尝试从文本中解析 DSML 格式工具调用
-        // parseDsml 内部通过 hasDsmlMarker 检测，不依赖 provider 名称
-        if (toolCalls.length === 0 && hasDsmlMarker(fullText)) {
+        // 没有工具调用：dsml 模式下尝试从文本中解析 DSML 格式工具调用
+        // native 模式下跳过，避免把正常文本中偶然出现的 DSML 字样误解析为工具调用
+        // TODO: DSML 解析暂时关闭，强制走 native 模式
+        const isDsmlMode = false // this.config.provider.toolMode === 'dsml'
+        if (isDsmlMode && toolCalls.length === 0 && hasDsmlMarker(fullText)) {
           const dsmlResult = parseDsml(fullText)
           if (dsmlResult.toolCalls.length > 0) {
             log.info('从文本中解析到 DSML 工具调用', {
@@ -926,10 +1010,24 @@ ${contentToSummarize}
               /没有(其他|更多|额外)(工作|任务|操作)需要(执行|完成|处理)/,
               /task (is )?(completed|finished|done)/i,
               /all (tasks?|work) (is |are )?(completed|finished|done)/i,
+              // todo_update 所有任务完成时的返回信号
+              /所有任务均已完成/,
+              /🎉/,
             ]
             const isCompleted = COMPLETION_PATTERNS.some(p => p.test(fullText))
             if (isCompleted) {
               log.debug('检测到完成信号，停止执行', { turn: turns })
+              break
+            }
+
+            // 快照非 null 且所有任务已完成：任务系统明确告知完成，直接结束
+            // 注意：快照为 null 表示本次未使用任务系统，不能用它判断是否完成，
+            //       此时仍依赖上方的 COMPLETION_PATTERNS 文本检测。
+            const allTasksDone = this.activeTodoSnapshot !== null &&
+              this.activeTodoSnapshot.length > 0 &&
+              this.activeTodoSnapshot.every(t => t.status === 'completed')
+            if (allTasksDone) {
+              log.debug('craft 模式：任务系统确认全部完成，停止执行', { turn: turns })
               break
             }
 
@@ -1023,7 +1121,11 @@ ${contentToSummarize}
     return this.running
   }
 
-  clearHistory() { this.history = [] }
+  clearHistory() {
+    this.history = []
+    // 清空历史时同步重置任务快照，确保新会话不会继承旧任务状态
+    this.activeTodoSnapshot = null
+  }
   getHistory(): readonly Message[] { return this.history }
   setHistory(messages: Message[]) { this.history = [...messages] }
   setSystemPrompt(prompt: string[]) { this.config.systemPrompt = prompt }
@@ -1035,6 +1137,14 @@ ${contentToSummarize}
       { role: 'user', content: `[上下文压缩] 早期对话轮次已被压缩以节省上下文空间。以下摘要描述了已完成的工作，当前会话状态可能仍反映该工作（例如文件可能已被修改）。请基于此摘要和当前状态继续，避免重复已完成的工作：\n\n${summary}` },
       { role: 'assistant', content: '已了解之前的对话内容，将基于摘要继续工作。' },
     ]
+    // 压缩后历史里没有 todo 工具调用记录，重新从文件读取快照确保状态同步。
+    // 无论任务列表是否为空都保留快照（空数组 [] 表示"曾经有任务但已全部完成或重置"，
+    // 与 null 的语义"从未调用过 todo 工具"不同）。
+    try {
+      this.activeTodoSnapshot = loadTodos()
+    } catch {
+      // 读取失败保持原快照，不重置为 null，避免压缩后丢失任务状态
+    }
   }
 
   getEstimatedTokens(): number {

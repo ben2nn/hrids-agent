@@ -18,6 +18,12 @@
         "models": ["deepseek-chat", "deepseek-reasoner"]
       },
       {
+        "_comment": "DeepSeek Anthropic 协议：原生 function calling，工具调用更稳定，推荐替代上方 openai 协议",
+        "provider": "deepseek-anthropic",
+        "apiKey": "sk-xxxxxxxx",
+        "models": ["deepseek-chat", "deepseek-reasoner"]
+      },
+      {
         "provider": "anthropic",
         "apiKey": "sk-ant-xxxxxxxx",
         "models": ["claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"]

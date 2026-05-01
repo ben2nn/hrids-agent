@@ -116,6 +116,11 @@ export function parseDsmlToolCalls(text: string): DsmlToolCall[] {
 /**
  * 从 invoke body 中解析所有参数。
  * 同样使用字符级扫描，正确处理 CDATA 内容中的特殊字符。
+ *
+ * 自动修复：LLM 有时把整个工具参数对象塞进单个 parameter，例如：
+ *   <parameter name="todos"><![CDATA[{"todos":[...]}]]></parameter>
+ * 解析后得到 { todos: { todos: [...] } }，需要 unwrap 成 { todos: [...] }。
+ * 检测条件：params 只有一个键，且该键的值是一个对象，且该对象也只有同名键。
  */
 function parseParameters(body: string): Record<string, unknown> {
   const params: Record<string, unknown> = {}
@@ -145,6 +150,26 @@ function parseParameters(body: string): Record<string, unknown> {
     params[paramName] = parseParamValue(rawValue)
 
     pos = valueEnd + '</|DSML|parameter>'.length
+  }
+
+  // 自动修复：检测 LLM 把整个参数对象包在单个 parameter 里的情况
+  // 例：{ todos: { todos: [...] } } → { todos: [...] }
+  const keys = Object.keys(params)
+  if (keys.length === 1) {
+    const key = keys[0]!
+    const val = params[key]
+    if (
+      val !== null &&
+      typeof val === 'object' &&
+      !Array.isArray(val)
+    ) {
+      const innerKeys = Object.keys(val as object)
+      // 内层对象的键是外层参数名的超集（LLM 把整个工具 input 对象塞进来了）
+      if (innerKeys.includes(key)) {
+        // unwrap：用内层对象替换外层 params
+        return val as Record<string, unknown>
+      }
+    }
   }
 
   return params
@@ -224,9 +249,16 @@ function findCdataEnd(text: string, contentStart: number): number {
 
 /**
  * 解析单个参数值：
- * 1. 如果是 CDATA 包装，提取内容
- * 2. 尝试 JSON.parse
- * 3. 失败则返回原始字符串（trim 后）
+ * 1. 如果是 CDATA 包装，提取内容后尝试 JSON.parse
+ * 2. 如果内容是嵌套的 <|DSML|parameter> 块（LLM 用 XML 方式表达数组/对象），
+ *    递归解析成数组或对象
+ * 3. 尝试 JSON.parse 原始字符串
+ * 4. 失败则返回 trim 后的字符串
+ *
+ * 特殊处理：LLM 有时会把整个工具参数对象作为单个参数值传入，
+ * 例如 parameter name="todos" 的值是 {"todos":[...]} 而非直接的 [...]。
+ * 此时解析后会得到 { todos: { todos: [...] } }，在 parseParameters 的
+ * 自动修复逻辑中统一处理（unwrap 外层同名包装）。
  */
 function parseParamValue(raw: string): unknown {
   let value = raw
@@ -244,11 +276,80 @@ function parseParamValue(raw: string): unknown {
     value = value.trim()
   }
 
+  // 检测嵌套 DSML parameter 格式（LLM 用 XML 方式表达数组）
+  // 例：<|DSML|parameter name="item">...</|DSML|parameter> × N
+  // 转换为数组：[{content:..., priority:...}, ...]
+  if (value.includes('<|DSML|parameter')) {
+    return parseNestedParameters(value)
+  }
+
   // 尝试 JSON 解析
   try {
     return JSON.parse(value)
   } catch {
     return value
+  }
+}
+
+/**
+ * 将嵌套的 DSML parameter 块解析为数组或对象。
+ *
+ * LLM 有时用嵌套 parameter 表达数组，例如：
+ *   <|DSML|parameter name="item">{fields}</|DSML|parameter>
+ *   <|DSML|parameter name="item">{fields}</|DSML|parameter>
+ * → [{...}, {...}]（同名 item 重复 → 数组）
+ *
+ * 或用嵌套 parameter 表达对象：
+ *   <|DSML|parameter name="content">...</|DSML|parameter>
+ *   <|DSML|parameter name="priority">...</|DSML|parameter>
+ * → { content: ..., priority: ... }（不同名 → 对象）
+ */
+function parseNestedParameters(body: string): unknown {
+  // 收集所有同级 parameter，记录 name 和解析后的值
+  const entries: Array<{ name: string; value: unknown }> = []
+  let pos = 0
+
+  while (pos < body.length) {
+    const paramStart = body.indexOf('<|DSML|parameter', pos)
+    if (paramStart === -1) break
+
+    const tagEnd = body.indexOf('>', paramStart)
+    if (tagEnd === -1) { pos = paramStart + 1; continue }
+
+    const openTag = body.slice(paramStart, tagEnd + 1)
+    const nameMatch = openTag.match(/name="([^"]*)"/)
+    if (!nameMatch) { pos = tagEnd + 1; continue }
+
+    const paramName = nameMatch[1]!
+    const valueStart = tagEnd + 1
+    const valueEnd = findParamValueEnd(body, valueStart)
+    if (valueEnd === -1) { pos = paramStart + 1; continue }
+
+    const rawValue = body.slice(valueStart, valueEnd)
+    entries.push({ name: paramName, value: parseParamValue(rawValue) })
+
+    pos = valueEnd + '</|DSML|parameter>'.length
+  }
+
+  if (entries.length === 0) return body.trim()
+
+  // 判断是数组还是对象：同名 key 出现多次 → 数组
+  const nameCount = new Map<string, number>()
+  for (const e of entries) {
+    nameCount.set(e.name, (nameCount.get(e.name) ?? 0) + 1)
+  }
+  const hasRepeatedNames = [...nameCount.values()].some(c => c > 1)
+
+  if (hasRepeatedNames) {
+    // 同名重复 → 每个 entry 的 value 作为数组元素
+    return entries.map(e => e.value)
+  } else {
+    // 不同名 → 合并为对象
+    const obj: Record<string, unknown> = {}
+    for (const e of entries) {
+      obj[e.name] = e.value
+    }
+    return obj
   }
 }
 

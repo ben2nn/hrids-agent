@@ -20,23 +20,40 @@ export interface Todo {
   context?: string        // 任务背景/来源，压缩后意图锚点
 }
 
-// ─── WebSocket 推送回调 ───────────────────────────────────────────────────────
+// ─── WebSocket 推送回调（会话级 Map，替代全局单例）────────────────────────────
+//
+// 修复：原实现使用全局单例 todosUpdatedCallback，SessionManager.createSession()
+// 每次都覆盖它，导致后创建的会话"接管"所有推送，多会话下串流。
+// 改为 Map<sessionId, callback>，triggerTodosUpdated 通过 AsyncLocalStorage
+// 的 getCurrentSessionId() 精确路由到当前会话，互不干扰。
 
-let todosUpdatedCallback: (() => void) | null = null
+// key: sessionId（Gateway 多会话）或 '__global__'（CLI/Server 单会话）
+const todosUpdatedCallbacks = new Map<string, () => void>()
 
 /**
  * 注册 todos_updated 推送回调（由 SessionManager 调用）
- * 与 SessionManager 解耦，TodoTool 不直接依赖 WebSocket 实现
+ * Gateway 模式传入 sessionId 实现会话级隔离；CLI/Server 模式不传，使用 '__global__'
  */
-export function setTodosUpdatedCallback(cb: (() => void) | null): void {
-  todosUpdatedCallback = cb
+export function setTodosUpdatedCallback(
+  cb: (() => void) | null,
+  sessionId?: string,
+): void {
+  const key = sessionId ?? '__global__'
+  if (cb) todosUpdatedCallbacks.set(key, cb)
+  else todosUpdatedCallbacks.delete(key)
 }
 
-/** 内部触发推送回调 */
+/** 内部触发推送回调 —— 按当前 AsyncLocalStorage 上下文的 sessionId 路由 */
 function triggerTodosUpdated(): void {
-  if (todosUpdatedCallback) {
-    todosUpdatedCallback()
+  const sid = getCurrentSessionId()
+  // Gateway 多会话：精确路由到当前会话
+  if (sid) {
+    const cb = todosUpdatedCallbacks.get(sid)
+    if (cb) { cb(); return }
   }
+  // CLI/Server 单会话：回退到 '__global__'
+  const globalCb = todosUpdatedCallbacks.get('__global__')
+  if (globalCb) globalCb()
 }
 
 // ─── 文件路径解析 ─────────────────────────────────────────────────────────────
@@ -334,12 +351,17 @@ export const TodoWriteTool: ToolDef<typeof todoWriteInputSchema> = {
     const firstTask = todos[0]!
     const todoList = formatTodoList(todos)
 
+    // 根据首任务是否有验收标准，动态生成正确的完成调用指令
+    const firstTaskCompleteCall = firstTask.acceptance && firstTask.acceptance.length > 0
+      ? `todo_update(id='${firstTask.id}', status='completed', confirmations=[${firstTask.acceptance.map(() => 'true').join(', ')}])`
+      : `todo_update(id='${firstTask.id}', status='completed')`
+
     const output = [
       `任务计划已建立（共 ${todos.length} 项）。`,
       '',
       todoList,
       '',
-      `现在执行：「${firstTask.content}」，完成后调用 todo_update(id='${firstTask.id}', status='completed')`,
+      `现在执行：「${firstTask.content}」，完成后调用 ${firstTaskCompleteCall}`,
     ].join('\n')
 
     return { type: 'success', output }

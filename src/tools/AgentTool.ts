@@ -84,9 +84,15 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
       })()
 
       const allTools = mgr.getBaseTools()
+
+      // 子智能体默认排除 todo 写工具，防止子任务修改共享任务计划文件后
+      // 父 QueryEngine 的 activeTodoSnapshot 不刷新，导致双真相问题。
+      // todo_read 保留：只读操作，子智能体可以查看任务状态。
+      // 显式传入 allowed_tools 时不受此限制（高级场景可按需开放）。
+      const SUB_AGENT_EXCLUDED_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset'])
       const tools = input.allowed_tools
         ? allTools.filter(t => input.allowed_tools!.includes(t.name))
-        : allTools
+        : allTools.filter(t => !SUB_AGENT_EXCLUDED_TOOLS.has(t.name))
 
       const permissions = new PermissionManager('craft', async () => true)
       const subEngine = new QueryEngine({

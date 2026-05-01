@@ -46,6 +46,18 @@ export class WebhookAdapter extends BasePlatformAdapter {
     this.webhookConfig = config
   }
 
+  /**
+   * Webhook 能力声明：
+   * - 不支持编辑消息（HTTP 无状态，无法回头编辑已发送的响应）
+   * - 不需要持续 typing（HTTP 场景无 typing 概念）
+   */
+  override get capabilities() {
+    return {
+      supportsMessageEdit: false,
+      supportsKeepTyping: false,
+    }
+  }
+
   async connect(): Promise<void> {
     const port = this.webhookConfig.port ?? 3283
     const host = this.webhookConfig.host ?? '127.0.0.1'

@@ -1,6 +1,7 @@
 // 提供商工厂 —— 根据注册表和 config.json 自动选择正确的提供商
 import { AnthropicProvider } from './AnthropicProvider.js'
 import { OpenAIProvider } from './OpenAIProvider.js'
+import { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 import { FallbackProvider } from './FallbackProvider.js'
 import type { LLMProvider, ModelType, ProviderConfig } from './types.js'
 import {
@@ -16,6 +17,7 @@ import type { ModelFallbackGroup, ModelTypeConfig } from '../Config.js'
 export type { LLMProvider, ModelType, ProviderConfig, StreamChunk, ChatMessage, EmbeddingProvider, SpeechProvider } from './types.js'
 export { AnthropicProvider } from './AnthropicProvider.js'
 export { OpenAIProvider } from './OpenAIProvider.js'
+export { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 export { FallbackProvider } from './FallbackProvider.js'
 export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel } from './registry.js'
 export type { ProviderDef, CustomProviderConfig } from './registry.js'
@@ -31,6 +33,12 @@ export interface ProviderOptions {
   provider?: string
   /** 用户自定义提供商列表（来自 config.json 的 customProviders） */
   customProviders?: CustomProviderConfig[]
+  /**
+   * 工具调用模式（默认 "native"）：
+   *   - "native"：原生 function calling
+   *   - "dsml"：强制走 DSML 文本解析（DS2API 等兼容层）
+   */
+  toolMode?: 'native' | 'dsml'
 }
 
 // ── 单一提供商创建 ────────────────────────────────────────────
@@ -78,7 +86,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
 // ── 内部：从 ProviderDef 构建 LLMProvider ─────────────────────
 
 function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
-  const { model, modelType } = opts
+  const { model, modelType, toolMode = 'native' } = opts
   const baseUrl = opts.baseUrl ?? def.defaultBaseUrl
   const apiKey = opts.apiKey
 
@@ -86,13 +94,19 @@ function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
 
   if (def.transport === 'anthropic_messages') {
     if (!apiKey) throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
+    // dsml 模式或 deepseekCompat：使用 DeepSeekAnthropicProvider
+    // 去掉 cache_control 等不兼容字段，工具调用走 DSML 文本解析
+    if (toolMode === 'dsml' || def.deepseekCompat) {
+      return new DeepSeekAnthropicProvider(config)
+    }
     return new AnthropicProvider(config)
   }
 
   if (def.id !== 'ollama' && !apiKey) {
     throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
   }
-  return new OpenAIProvider({ ...config, apiKey: apiKey ?? 'ollama' }, def.id)
+  // dsml 模式下禁用 OpenAI function calling，让模型输出 DSML 文本
+  return new OpenAIProvider({ ...config, apiKey: apiKey ?? 'ollama' }, def.id, toolMode === 'dsml')
 }
 
 /** 解析提供商定义（内置 → 自定义） */
@@ -100,7 +114,7 @@ function resolveProviderDef(name: string, customs: CustomProviderConfig[]): Prov
   return getBuiltinProvider(name) ?? getCustomProvider(name, customs)
 }
 
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'groq', 'aliyun', 'zhipu', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'deepseek-anthropic', 'groq', 'aliyun', 'zhipu', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
 
 // ── 多模型 Fallback 工厂 ──────────────────────────────────────
 
@@ -154,6 +168,7 @@ export function createTypedProvider(ctx: TypedProviderContext): LLMProvider | nu
         baseUrl: g.baseUrl,
         modelType,
         customProviders,
+        toolMode: g.toolMode,
       } satisfies ProviderOptions)),
     }))
 

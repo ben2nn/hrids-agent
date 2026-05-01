@@ -53,6 +53,8 @@ export interface SessionManagerConfig {
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>()
   private config: SessionManagerConfig
+  /** cron 触发时推送到 IM 的回调（由 PlatformManager 注入） */
+  private cronIMCallback: ((agentSessionId: string, text: string) => Promise<void>) | null = null
 
   constructor(config: SessionManagerConfig = {}) {
     this.config = {
@@ -60,6 +62,11 @@ export class SessionManager {
       maxSessions: config.maxSessions ?? 20,
       authToken: config.authToken,
     }
+  }
+
+  /** 注册 cron → IM 推送回调（由 PlatformManager 在启动后调用） */
+  setCronIMCallback(cb: (agentSessionId: string, text: string) => Promise<void>): void {
+    this.cronIMCallback = cb
   }
 
   async createSession(req: CreateSessionRequest): Promise<ManagedSession> {
@@ -201,15 +208,15 @@ export class SessionManager {
       archiveSession(sessionId, summary)
     }
 
-    // setTodoSessionId 已是 no-op（TodoWriteTool 通过 AsyncLocalStorage 自动获取 sessionId）
-    // 仅注册 todos_updated 推送回调，供前端实时更新任务列表
+    // 注册 todos_updated 推送回调（按 sessionId 隔离，避免多会话串流）
+    // 传入 sessionId 确保只有当前会话的 todo 操作才触发此回调
     setTodosUpdatedCallback(() => {
       const s = this.sessions.get(sessionId)
       if (s) {
         const todos = loadTodos()
         this.broadcast(s, { type: 'todos_updated', todos })
       }
-    })
+    }, sessionId)
 
     // Gateway 模式：注册 ask_user 回调，将问题广播给前端（按 sessionId 隔离）
     setGatewayAskCallback((question, options) => {
@@ -263,6 +270,7 @@ export class SessionManager {
     session.subscribers.clear()
 
     await disconnectAllMcp(id)
+    setTodosUpdatedCallback(null, id)
     setGatewayAskCallback(null, id)
     setGatewayDecisionCallback(null, id)
     setResetDecisionCallback(null, id)
@@ -404,17 +412,26 @@ export class SessionManager {
       })
 
       // 将提醒消息写入 history（作为 assistant 消息），并持久化
+      // content 中加 [定时任务触发] 前缀，让 LLM 能识别这条消息是 cron 自动触发的，
+      // 而非对话上下文的一部分，避免用户回复"知了"时 LLM 误判为需要重新执行任务。
       session.engine.setHistory([
         ...session.engine.getHistory(),
         {
           role: 'assistant',
-          content: [{ type: 'text', text: cronJob.task }],
+          content: [{ type: 'text', text: `[定时任务触发: ${cronJob.description}]\n${cronJob.task}` }],
           requestId,
           trigger: 'cron' as const,
           cronDescription: cronJob.description,
         },
       ])
       saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+
+      // 推送到 IM 平台（如果有绑定的 IM 会话）
+      if (this.cronIMCallback) {
+        void this.cronIMCallback(sessionId, cronJob.task).catch(err => {
+          log.warn('cron 推送到 IM 失败', { sessionId, error: String(err) })
+        })
+      }
 
     } catch (err) {
       log.error('定时任务提醒失败', { sessionId, error: String(err) })
@@ -472,7 +489,7 @@ export class SessionManager {
   }
 
   // 实际执行逻辑（已在正确的 cwd 上下文中）
-  private async _runMessageInContext(session: ManagedSession, sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>, cronJob?: { id: string; description: string }): Promise<void> {
+  private async _runMessageInContext(session: ManagedSession, sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>, cronJob?: { id: string; description: string }, systemContinuation = false): Promise<void> {
     // 生成本次请求的唯一 ID，用于前端消息分组
     const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     
@@ -492,12 +509,15 @@ export class SessionManager {
     log.info('开始执行消息', { sessionId, requestId, model: session.info.model, permissionMode: session.permissions.getMode(), contentPreview: content.slice(0, 100) })
 
     // 广播请求开始事件，携带 requestId 和触发类型
-    this.broadcast(session, {
-      type: 'request_start',
-      requestId,
-      trigger: cronJob ? 'cron' : 'user',
-      description: cronJob?.description,
-    })
+    // systemContinuation（轮次上限自动续跑）不广播，避免前端出现系统内部消息
+    if (!systemContinuation) {
+      this.broadcast(session, {
+        type: 'request_start',
+        requestId,
+        trigger: cronJob ? 'cron' : 'user',
+        description: cronJob?.description,
+      })
+    }
 
     // 定时任务触发时，额外发送独立的分隔标记事件
     if (cronJob) {
@@ -508,8 +528,8 @@ export class SessionManager {
       })
     }
 
-    // 记录最近一条用户消息（跳过系统内部注入的消息）
-    if (!content.startsWith('[系统') && !content.startsWith('[上下文压缩]')) {
+    // 记录最近一条用户消息（跳过系统内部注入的消息和自动续跑）
+    if (!systemContinuation && !content.startsWith('[系统') && !content.startsWith('[上下文压缩]')) {
       session.info.lastUserMessage = content.slice(0, 80)
     }
 
@@ -683,7 +703,13 @@ ${writeTools.join('、')}
     // 不是为了每 N 轮被打断。continuation_needed 只用于 LLM 主动停下的场景。
     if (hitTurnLimit) {
       log.info('轮次上限，自动续跑', { sessionId, permMode: session.permissions.getMode() })
-      void this.runMessage(sessionId, '请继续执行之前未完成的任务，从中断处接着做。').catch((err) => {
+      // 以系统身份续跑：不广播 request_start，不记录 lastUserMessage，不在前端显示为用户消息
+      // QueryEngine 在 turn_limit 时已往 history 注入了 [系统提示]，此处直接触发下一轮执行
+      void runWithCwd(session.info.cwd, () =>
+        runWithSession(sessionId, () =>
+          this._runMessageInContext(session, sessionId, '[系统提示] 请继续执行之前未完成的任务，从中断处接着做。', undefined, undefined, true)
+        )
+      ).catch((err) => {
         log.error('轮次上限续跑失败', { sessionId, error: String(err) })
         this.broadcast(session, { type: 'error', requestId, message: `自动续跑失败: ${String(err)}` })
       })

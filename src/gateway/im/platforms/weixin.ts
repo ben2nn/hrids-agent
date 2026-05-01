@@ -581,6 +581,26 @@ export class WeixinAdapter extends BasePlatformAdapter {
     this.syncBuf = ''
   }
 
+  /**
+   * 微信能力声明：
+   * - 不支持编辑消息 → 等待完整输出后一次性发送
+   * - 需要持续 typing → 微信 typing 约 5s 自动消失，需要每 4s 续发
+   */
+  override get capabilities() {
+    return {
+      supportsMessageEdit: false,
+      supportsKeepTyping: true,
+    }
+  }
+
+  /**
+   * 微信出站格式化：规范化 Markdown 块（合并多余空行、统一代码块格式）。
+   * 由 sendText 在内部调用，调用方传入原始 Markdown 即可。
+   */
+  protected override formatOutbound(text: string): string {
+    return normalizeMarkdownBlocks(text)
+  }
+
   async connect(): Promise<void> {
     if (!this.weixinConfig.token) throw new Error('微信适配器缺少 token')
     if (!this.weixinConfig.accountId) throw new Error('微信适配器缺少 accountId')
@@ -611,7 +631,7 @@ export class WeixinAdapter extends BasePlatformAdapter {
   }
 
   async sendText(chatId: string, text: string, _options?: SendOptions): Promise<SendResult> {
-    const formatted = normalizeMarkdownBlocks(text)
+    const formatted = this.formatOutbound(text)
     const chunks = splitTextForDelivery(formatted)
     let result: SendResult = { success: true }
 

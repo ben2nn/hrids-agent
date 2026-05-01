@@ -7,11 +7,23 @@
  * 3. 将 agent 的流式输出回传给对应平台
  * 4. 管理 IM 会话 key → agent session ID 的映射
  *
- * 参考 hermes-agent gateway/run.py GatewayRunner
+ * ## 统一处理骨架
+ *
+ * 所有平台共享同一套 processMessage 流程，平台差异通过适配器的能力声明驱动：
+ *
+ *   adapter.capabilities.supportsMessageEdit
+ *     true  → 流式推送（先发占位消息，持续编辑追加内容）
+ *     false → 等待完整输出后一次性发送
+ *
+ *   adapter.capabilities.supportsKeepTyping
+ *     true  → 在 agent 运行期间持续调用 adapter.keepTyping()
+ *     false → 只在开始时调用一次 adapter.sendTyping()
+ *
+ * 新增平台时，只需在适配器中声明能力，无需修改此文件。
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { homedir } from 'os'
 import { logger } from '../../core/logger.js'
 import type { SessionManager } from '../SessionManager.js'
@@ -49,25 +61,21 @@ interface StreamBuffer {
   lastEditAt: number
   /** 是否已完成 */
   done: boolean
-  /** 编辑定时器 */
-  editTimer?: ReturnType<typeof setTimeout>
 }
 
 // 流式编辑间隔（ms）：避免触发平台速率限制
 const STREAM_EDIT_INTERVAL_MS = 1500
-// 流式输出完成后的最终编辑延迟（ms）
-const STREAM_FINAL_DELAY_MS = 200
 
 export class PlatformManager {
   private adapters = new Map<IMPlatform, BasePlatformAdapter>()
   private sessionManager: SessionManager
   /** IM session key → agent session ID */
   private imSessionMap = new Map<string, string>()
-  /** IM session key → 流式缓冲器 */
+  /** IM session key → 流式缓冲器（仅 supportsMessageEdit 平台使用） */
   private streamBuffers = new Map<string, StreamBuffer>()
   /** IM session key → 正在处理中（防止并发） */
   private processingLocks = new Set<string>()
-  /** IM session key → 待处理的消息队列（处理中时排队） */
+  /** IM session key → 待处理的消息（处理中时排队，只保留最新一条） */
   private pendingMessages = new Map<string, InboundMessage>()
 
   /** 微信扫码登录状态（同时只允许一个进行中的登录流程） */
@@ -86,11 +94,8 @@ export class PlatformManager {
 
   // ── 配置管理 ──────────────────────────────────────────────────────────────
 
-  /** 加载 IM 平台配置 */
   static loadConfig(): IMGatewayConfig {
-    if (!existsSync(IM_CONFIG_FILE)) {
-      return { platforms: [] }
-    }
+    if (!existsSync(IM_CONFIG_FILE)) return { platforms: [] }
     try {
       return JSON.parse(readFileSync(IM_CONFIG_FILE, 'utf-8')) as IMGatewayConfig
     } catch (err) {
@@ -99,7 +104,6 @@ export class PlatformManager {
     }
   }
 
-  /** 保存 IM 平台配置 */
   static saveConfig(config: IMGatewayConfig): void {
     const dir = join(homedir(), '.hrids-agent')
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -110,7 +114,6 @@ export class PlatformManager {
 
   // ── 生命周期 ──────────────────────────────────────────────────────────────
 
-  /** 根据配置启动所有已启用的平台适配器 */
   async start(config?: IMGatewayConfig): Promise<void> {
     const cfg = config ?? PlatformManager.loadConfig()
     const enabledPlatforms = cfg.platforms.filter(p => p.enabled)
@@ -127,11 +130,9 @@ export class PlatformManager {
     log.info('IM 平台管理器已启动', { platforms: Array.from(this.adapters.keys()) })
   }
 
-  /** 启动单个平台适配器 */
   async startPlatform(platformCfg: PlatformConfig): Promise<void> {
     const platform = platformCfg.platform
 
-    // 如果已在运行，先停止
     if (this.adapters.has(platform)) {
       await this.stopPlatform(platform)
     }
@@ -157,14 +158,13 @@ export class PlatformManager {
       adapter.setMessageHandler((msg) => this.onMessage(msg))
       await adapter.connect()
       this.adapters.set(platform, adapter)
-      log.info('平台适配器已启动', { platform })
+      log.info('平台适配器已启动', { platform, capabilities: adapter.capabilities })
     } catch (err) {
       log.error('平台适配器启动失败', { platform, error: String(err) })
       throw err
     }
   }
 
-  /** 停止单个平台适配器 */
   async stopPlatform(platform: IMPlatform): Promise<void> {
     const adapter = this.adapters.get(platform)
     if (!adapter) return
@@ -176,7 +176,6 @@ export class PlatformManager {
     this.adapters.delete(platform)
   }
 
-  /** 停止所有平台适配器 */
   async stop(): Promise<void> {
     for (const platform of this.adapters.keys()) {
       await this.stopPlatform(platform)
@@ -184,7 +183,6 @@ export class PlatformManager {
     log.info('IM 平台管理器已停止')
   }
 
-  /** 获取所有平台的运行状态 */
   getStatus(): Array<{ platform: IMPlatform; running: boolean }> {
     const result: Array<{ platform: IMPlatform; running: boolean }> = []
     for (const [platform, adapter] of this.adapters) {
@@ -193,15 +191,43 @@ export class PlatformManager {
     return result
   }
 
+  /**
+   * 将定时任务提醒推送到 IM 平台。
+   * 由 SessionManager.sendCronReminder 在广播 WebSocket 事件后调用。
+   *
+   * 根据 agentSessionId 反查 imSessionMap，找到对应的 IM 会话 key，
+   * 再解析出 platform 和 chatId，通过对应适配器发送消息。
+   */
+  async sendCronToIM(agentSessionId: string, text: string): Promise<void> {
+    // 反查：找到所有映射到该 agentSessionId 的 IM 会话 key
+    for (const [sessionKey, mappedSessionId] of this.imSessionMap) {
+      if (mappedSessionId !== agentSessionId) continue
+
+      // sessionKey 格式：im:{platform}:{chatType}:{chatId}[:{userId}]
+      const parts = sessionKey.split(':')
+      // parts[0]='im', parts[1]=platform, parts[2]=chatType, parts[3]=chatId
+      const platform = parts[1] as IMPlatform
+      const chatId = parts[3]
+      if (!platform || !chatId) continue
+
+      const adapter = this.adapters.get(platform)
+      if (!adapter) {
+        log.warn('[cron] IM 适配器不存在，跳过推送', { platform, chatId, agentSessionId })
+        continue
+      }
+
+      try {
+        await adapter.sendText(chatId, text)
+        log.info('[cron] 定时任务提醒已推送到 IM', { platform, chatId, agentSessionId })
+      } catch (err) {
+        log.error('[cron] 推送定时任务提醒到 IM 失败', { platform, chatId, error: String(err) })
+      }
+    }
+  }
+
   // ── 微信扫码登录 ──────────────────────────────────────────────────────────
 
-  /**
-   * 发起微信扫码登录流程。
-   * 返回二维码信息，同时在后台启动轮询。
-   * 二维码有效期约 5 分钟，过期后需重新调用。
-   */
   async startWeixinLogin(): Promise<WeixinQrCodeResult> {
-    // 如果已有进行中的登录且未过期（5 分钟内），直接复用
     if (this.weixinLoginState && !this.weixinLoginState.result) {
       const elapsed = Date.now() - this.weixinLoginState.startedAt
       if (elapsed < 4.5 * 60 * 1000) {
@@ -212,7 +238,6 @@ export class PlatformManager {
       }
     }
 
-    // 获取新二维码
     const qr = await getWeixinQrCode()
     this.weixinLoginState = {
       qrcodeKey: qr.qrcodeKey,
@@ -221,17 +246,11 @@ export class PlatformManager {
       polling: true,
     }
 
-    // 后台轮询扫码状态
     void this.pollWeixinLoginLoop(qr.qrcodeKey)
-
     log.info('微信扫码登录已发起', { qrcodeKey: qr.qrcodeKey.slice(0, 8) + '...' })
     return qr
   }
 
-  /**
-   * 查询当前微信扫码登录状态。
-   * 前端应每隔 2s 轮询此接口，直到 status 为 confirmed / expired / error。
-   */
   getWeixinLoginStatus(): WeixinLoginResult & { qrcodeImgUrl?: string } {
     if (!this.weixinLoginState) {
       return { status: 'error', error: '尚未发起扫码登录，请先调用 POST /im/platforms/weixin/login' }
@@ -241,18 +260,13 @@ export class PlatformManager {
     return { ...base, qrcodeImgUrl: state.qrcodeImgUrl }
   }
 
-  /** 后台轮询扫码状态，确认后自动保存配置并启动适配器 */
   private async pollWeixinLoginLoop(qrcodeKey: string): Promise<void> {
-    const DEADLINE_MS = 5 * 60 * 1000 // 最多等 5 分钟
-    const POLL_INTERVAL_MS = 2_000     // 短轮询间隔 2s
+    const DEADLINE_MS = 5 * 60 * 1000
+    const POLL_INTERVAL_MS = 2_000
     const startedAt = Date.now()
 
     while (Date.now() - startedAt < DEADLINE_MS) {
-      // 检查是否仍是当前登录流程（防止重新发起后旧轮询干扰）
-      if (!this.weixinLoginState || this.weixinLoginState.qrcodeKey !== qrcodeKey) {
-        log.debug('微信扫码轮询：检测到新登录流程，停止旧轮询')
-        return
-      }
+      if (!this.weixinLoginState || this.weixinLoginState.qrcodeKey !== qrcodeKey) return
 
       const result = await pollWeixinQrCodeStatus(qrcodeKey)
 
@@ -278,18 +292,16 @@ export class PlatformManager {
         await new Promise(r => setTimeout(r, 3_000))
         continue
       }
-      // pending / scaned：等待后继续轮询
+
       await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
     }
 
-    // 超时
     if (this.weixinLoginState?.qrcodeKey === qrcodeKey) {
       this.weixinLoginState.result = { status: 'expired' }
       this.weixinLoginState.polling = false
     }
   }
 
-  /** 扫码确认后：保存配置 + 启动/重启微信适配器 */
   private async applyWeixinLoginResult(result: WeixinLoginResult): Promise<void> {
     if (!result.botToken || !result.accountId) {
       log.error('微信登录结果缺少 botToken 或 accountId', { result })
@@ -306,7 +318,6 @@ export class PlatformManager {
 
     const idx = cfg.platforms.findIndex(p => p.platform === 'weixin')
     if (idx >= 0) {
-      // 保留原有的 allowedUsers 等配置
       const existing = cfg.platforms[idx] as WeixinConfig
       weixinCfg.allowedUsers = existing.allowedUsers
       cfg.platforms[idx] = weixinCfg
@@ -317,7 +328,6 @@ export class PlatformManager {
     PlatformManager.saveConfig(cfg)
     log.info('微信配置已保存', { accountId: result.accountId })
 
-    // 启动/重启适配器
     try {
       await this.startPlatform(weixinCfg)
       log.info('微信适配器已自动启动')
@@ -328,19 +338,15 @@ export class PlatformManager {
 
   // ── 消息路由 ──────────────────────────────────────────────────────────────
 
-  /** 收到 IM 消息时的处理入口 */
   private async onMessage(msg: InboundMessage): Promise<void> {
     const sessionKey = buildIMSessionKey(msg.source)
 
-    // 处理内置命令
     if (msg.messageType === 'command') {
       const handled = await this.handleBuiltinCommand(msg, sessionKey)
       if (handled) return
     }
 
-    // 防止并发：同一会话同时只处理一条消息
     if (this.processingLocks.has(sessionKey)) {
-      // 排队（只保留最新的一条）
       this.pendingMessages.set(sessionKey, msg)
       log.debug('消息排队等待', { sessionKey })
       return
@@ -349,11 +355,21 @@ export class PlatformManager {
     await this.processMessage(msg, sessionKey)
   }
 
+  /**
+   * 统一消息处理骨架。
+   *
+   * 所有平台走同一套流程，差异由适配器能力声明驱动：
+   *
+   *   supportsMessageEdit=true  → 流式推送（边生成边编辑消息）
+   *   supportsMessageEdit=false → 等待完整输出后一次性发送
+   *
+   *   supportsKeepTyping=true   → 持续续发 typing（keepTyping）
+   *   supportsKeepTyping=false  → 单次 typing（sendTyping）
+   */
   private async processMessage(msg: InboundMessage, sessionKey: string): Promise<void> {
     this.processingLocks.add(sessionKey)
 
     try {
-      // 获取或创建 agent session
       const agentSessionId = await this.getOrCreateAgentSession(msg, sessionKey)
       if (!agentSessionId) {
         log.error('无法获取 agent session', { sessionKey })
@@ -363,36 +379,44 @@ export class PlatformManager {
       const adapter = this.adapters.get(msg.source.platform)
       if (!adapter) return
 
-      // 微信不支持消息编辑，不使用流式缓冲器
-      const isWeixin = msg.source.platform === 'weixin'
+      // IM 场景：每条消息独立处理，清空上一条消息遗留的 todo，
+      // 避免 LLM 看到残留的 in_progress 任务后强制调工具继续执行。
+      this.clearSessionTodos(agentSessionId)
 
-      // 非微信平台：初始化流式缓冲器，支持实时编辑
-      if (!isWeixin) {
-        const buffer: StreamBuffer = {
-          text: '',
-          lastEditAt: 0,
-          done: false,
-        }
-        this.streamBuffers.set(sessionKey, buffer)
+      const { supportsMessageEdit, supportsKeepTyping } = adapter.capabilities
+
+      // 支持编辑的平台：初始化流式缓冲器
+      if (supportsMessageEdit) {
+        this.streamBuffers.set(sessionKey, { text: '', lastEditAt: 0, done: false })
       }
 
-      // 通过 SessionManager 运行消息，收集流式输出
-      // 微信平台：持续发送 typing 状态，等 LLM 完整输出后一次性发送
-      // 其他平台：流式推送中间状态（实时编辑消息）
-      let fullText: string
-      if (isWeixin) {
-        const weixinAdapter = adapter as import('./platforms/weixin.js').WeixinAdapter
-        const agentPromise = this.runAgentMessage(agentSessionId, msg.text, sessionKey, true)
-        void weixinAdapter.keepTyping(msg.source.chatId, agentPromise)
-        fullText = await agentPromise
+      // 启动 agent，同时并行处理 typing
+      const agentPromise = this.runAgentMessage(
+        agentSessionId,
+        msg.text,
+        sessionKey,
+        adapter,
+        msg.source.chatId,
+        !supportsMessageEdit,  // 不支持编辑 → 跳过流式推送，等完整输出
+      )
+
+      if (supportsKeepTyping) {
+        // 持续续发 typing，直到 agent 完成（不阻塞主流程）
+        void adapter.keepTyping(msg.source.chatId, agentPromise)
       } else {
-        await adapter.sendTyping(msg.source.chatId)
-        fullText = await this.runAgentMessage(agentSessionId, msg.text, sessionKey, false)
+        // 单次 typing，不等待
+        void adapter.sendTyping(msg.source.chatId)
       }
-      // 发送最终回复
-      if (fullText.trim()) {
+
+      const fullText = await agentPromise
+
+      // 清理 LLM 结束语（craft 模式注入的内部完成信号）
+      const cleanedText = this.cleanCompletionSuffix(fullText)
+
+      if (cleanedText.trim()) {
         const buffer = this.streamBuffers.get(sessionKey)
-        await this.sendReply(adapter, msg, fullText, isWeixin ? undefined : buffer?.sentMessageId)
+        // 支持编辑的平台：最终编辑去掉光标；不支持的平台：直接发送
+        await this.sendFinalReply(adapter, msg, cleanedText, buffer?.sentMessageId)
       }
     } catch (err) {
       log.error('消息处理失败', { sessionKey, error: String(err) })
@@ -406,7 +430,6 @@ export class PlatformManager {
       this.streamBuffers.delete(sessionKey)
       this.processingLocks.delete(sessionKey)
 
-      // 处理排队的消息
       const pending = this.pendingMessages.get(sessionKey)
       if (pending) {
         this.pendingMessages.delete(sessionKey)
@@ -417,13 +440,16 @@ export class PlatformManager {
 
   /**
    * 通过 SessionManager 运行消息，收集完整的文本输出。
-   * skipStreaming=true 时（微信等不支持编辑的平台）只累积文本，不触发流式推送。
+   *
+   * @param skipStreaming true → 只累积文本，不触发流式推送（不支持编辑的平台）
    */
   private async runAgentMessage(
     agentSessionId: string,
     text: string,
     sessionKey: string,
-    skipStreaming = false,
+    adapter: BasePlatformAdapter,
+    chatId: string,
+    skipStreaming: boolean,
   ): Promise<string> {
     let fullText = ''
 
@@ -438,9 +464,8 @@ export class PlatformManager {
       (ev) => {
         if (ev.type === 'text_delta' && ev.delta) {
           fullText += ev.delta
-          // 微信平台跳过流式推送，等完整输出后一次性发送
           if (!skipStreaming) {
-            void this.onStreamDelta(sessionKey, ev.delta)
+            void this.onStreamDelta(sessionKey, adapter, chatId, ev.delta)
           }
         }
       },
@@ -450,26 +475,25 @@ export class PlatformManager {
     return fullText
   }
 
-  /** 流式输出增量处理（可选：支持编辑的平台实时更新消息） */
-  private async onStreamDelta(sessionKey: string, delta: string): Promise<void> {
+  /**
+   * 流式输出增量处理（仅 supportsMessageEdit=true 的平台使用）。
+   * 首次输出时发送占位消息，后续定时编辑追加内容。
+   *
+   * adapter 和 chatId 由调用方直接传入，避免从 sessionKey 解析（脆弱且冗余）。
+   */
+  private async onStreamDelta(
+    sessionKey: string,
+    adapter: BasePlatformAdapter,
+    chatId: string,
+    delta: string,
+  ): Promise<void> {
     const buffer = this.streamBuffers.get(sessionKey)
     if (!buffer) return
 
     buffer.text += delta
-
-    // 找到对应的适配器和消息来源
-    // 从 sessionKey 解析平台和 chatId：im:{platform}:{chatType}:{chatId}[:{userId}]
-    const parts = sessionKey.split(':')
-    if (parts.length < 4 || parts[0] !== 'im') return
-
-    const platform = parts[1] as IMPlatform
-    const chatId = parts[3]
-    const adapter = this.adapters.get(platform)
-    if (!adapter) return
-
     const now = Date.now()
 
-    // 首次输出：发送初始消息
+    // 首次输出：发送初始占位消息
     if (!buffer.sentMessageId && buffer.text.length > 20) {
       const result = await adapter.sendText(chatId, buffer.text + ' ▌')
       if (result.success && result.messageId) {
@@ -486,8 +510,13 @@ export class PlatformManager {
     }
   }
 
-  /** 发送最终回复（清除流式光标） */
-  private async sendReply(
+  /**
+   * 发送最终回复。
+   * - 有流式占位消息 → 编辑它（去掉光标）
+   * - 无占位消息 → 直接发送
+   * - 编辑失败 → 降级为重新发送
+   */
+  private async sendFinalReply(
     adapter: BasePlatformAdapter,
     msg: InboundMessage,
     text: string,
@@ -499,14 +528,56 @@ export class PlatformManager {
       replyToMessageId: msg.messageId,
     }
 
-    // 如果已有流式消息，编辑它（去掉光标）
     if (existingMessageId) {
       const editResult = await adapter.editMessage(chatId, existingMessageId, text)
       if (editResult.success) return editResult
-      // 编辑失败则重新发送
+      log.warn('编辑消息失败，降级为重新发送', { platform: adapter.platformName, chatId })
     }
 
     return adapter.sendText(chatId, text, options)
+  }
+
+  /**
+   * 清理 LLM 输出结尾的"任务已完成"类结束语。
+   * craft 模式下 LLM 会在完成时输出这类信号文字，IM 场景不应展示给用户。
+   */
+  private cleanCompletionSuffix(text: string): string {
+    return text
+      .replace(/[\n\s]*(任务(已经?|全部|完全)?(已完成|完成了|结束了|执行完毕)|所有任务均已完成)[。！!.]*\s*$/g, '')
+      .trimEnd()
+  }
+
+  /**
+   * 清理指定 agent session 中残留的 in_progress todo。
+   *
+   * IM 场景下每条消息独立处理，不应保留上一条消息遗留的 in_progress 任务，
+   * 否则 LLM 会误以为有未完成的任务而强制继续执行（如重复创建定时任务）。
+   *
+   * 只清除 in_progress 状态的条目，保留 completed/pending 条目，
+   * 让 LLM 能通过 history 判断上一条消息已完成了什么，避免重复操作。
+   */
+  private clearSessionTodos(agentSessionId: string): void {
+    const session = this.sessionManager.getSession(agentSessionId)
+    if (!session) return
+    const todoFile = resolve(session.info.cwd, '.hrids', 'tasks', 'todos.json')
+    if (!existsSync(todoFile)) return
+    try {
+      const raw = readFileSync(todoFile, 'utf-8').trim()
+      if (raw === '' || raw === '[]') return  // 已经是空的，跳过
+      const todos = JSON.parse(raw) as Array<Record<string, unknown>>
+      const hasInProgress = todos.some(t => t['status'] === 'in_progress')
+      if (!hasInProgress) return  // 没有 in_progress，无需修改
+      // 将 in_progress 改为 completed，而不是整体清空
+      const updated = todos.map(t =>
+        t['status'] === 'in_progress' ? { ...t, status: 'completed' } : t
+      )
+      const tmp = todoFile + '.tmp'
+      writeFileSync(tmp, JSON.stringify(updated, null, 2), 'utf-8')
+      renameSync(tmp, todoFile)
+      log.debug('已将 IM 会话残留 in_progress todo 标记为 completed', { agentSessionId, count: updated.filter(t => t['status'] === 'completed').length })
+    } catch (err) {
+      log.warn('清理 IM 会话 in_progress todo 失败', { agentSessionId, error: String(err) })
+    }
   }
 
   // ── 内置命令处理 ──────────────────────────────────────────────────────────
@@ -519,7 +590,6 @@ export class PlatformManager {
     switch (cmd) {
       case '/new':
       case '/reset': {
-        // 清除 IM 会话映射，下次消息时创建新的 agent session
         const oldSessionId = this.imSessionMap.get(sessionKey)
         if (oldSessionId) {
           this.imSessionMap.delete(sessionKey)
@@ -581,21 +651,60 @@ export class PlatformManager {
 
   // ── Agent Session 管理 ────────────────────────────────────────────────────
 
+  /**
+   * 读取知了专属会话 ID（从磁盘持久化文件）。
+   * 与 server.ts 的 GET /config/zhile-session 端点读取同一文件。
+   */
+  private getZhileSessionId(): string | null {
+    const file = join(homedir(), '.hrids-agent', 'zhile-session.json')
+    if (!existsSync(file)) return null
+    try {
+      const data = JSON.parse(readFileSync(file, 'utf-8')) as { sessionId?: string }
+      return data.sessionId ?? null
+    } catch {
+      return null
+    }
+  }
+
   private async getOrCreateAgentSession(
     msg: InboundMessage,
     sessionKey: string,
   ): Promise<string | null> {
-    // 检查是否有已存在的 agent session
+    // 1. 优先复用已映射的 session（内存中仍存活）
     const existingId = this.imSessionMap.get(sessionKey)
     if (existingId && this.sessionManager.getSession(existingId)) {
       return existingId
     }
 
-    // 创建新的 agent session
+    // 2. 微信平台：优先绑定到知了专属会话，让 web 端能看到微信聊天记录
+    if (msg.source.platform === 'weixin') {
+      const zhileId = this.getZhileSessionId()
+      if (zhileId) {
+        // 知了会话在内存中存活：直接复用
+        if (this.sessionManager.getSession(zhileId)) {
+          this.imSessionMap.set(sessionKey, zhileId)
+          this.saveIMSessions()
+          log.info('微信消息绑定到知了专属会话（内存）', { sessionKey, zhileId })
+          return zhileId
+        }
+        // 知了会话已从内存卸载（空闲超时）：resume 恢复
+        try {
+          const session = await this.sessionManager.createSession({ resume: zhileId })
+          this.imSessionMap.set(sessionKey, session.info.id)
+          this.saveIMSessions()
+          log.info('微信消息绑定到知了专属会话（resume）', { sessionKey, agentSessionId: session.info.id })
+          return session.info.id
+        } catch (err) {
+          log.warn('resume 知了会话失败，将创建新会话', { zhileId, error: String(err) })
+        }
+      }
+    }
+
+    // 3. 其他平台或知了会话不存在：创建新 session
     try {
       const session = await this.sessionManager.createSession({
         title: `IM: ${msg.source.platform} / ${msg.source.chatName ?? msg.source.chatId}`,
-        permissionMode: 'craft',  // IM 场景默认自动执行
+        permissionMode: 'craft',
       })
 
       const sessionId = session.info.id
@@ -621,7 +730,14 @@ export class PlatformManager {
     if (!existsSync(IM_SESSIONS_FILE)) return
     try {
       const data = JSON.parse(readFileSync(IM_SESSIONS_FILE, 'utf-8')) as Record<string, string>
+      const zhileId = this.getZhileSessionId()
       for (const [key, value] of Object.entries(data)) {
+        // 微信平台：若旧映射指向的不是知了会话，清除旧映射，
+        // 让下次消息时重新走知了绑定逻辑
+        if (key.startsWith('im:weixin:') && zhileId && value !== zhileId) {
+          log.debug('清除微信旧会话映射，将重新绑定到知了', { key, oldSessionId: value })
+          continue
+        }
         this.imSessionMap.set(key, value)
       }
       log.debug('已加载 IM 会话映射', { count: this.imSessionMap.size })
