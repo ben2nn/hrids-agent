@@ -386,7 +386,7 @@ export function createGateway(config: GatewayConfig = {}) {
       if (req.path.startsWith('/api/') || req.path.startsWith('/sessions') ||
           req.path.startsWith('/todos') || req.path.startsWith('/crons') ||
           req.path.startsWith('/skills') || req.path.startsWith('/mcp') ||
-          req.path.startsWith('/config')) {
+          req.path.startsWith('/config') || req.path.startsWith('/im')) {
         return next()
       }
       res.sendFile(join(webDistPath, 'index.html'))
@@ -401,7 +401,7 @@ export function createGateway(config: GatewayConfig = {}) {
     const isApiPath = req.path.startsWith('/api/') || req.path.startsWith('/sessions') ||
       req.path.startsWith('/todos') || req.path.startsWith('/crons') ||
       req.path.startsWith('/skills') || req.path.startsWith('/mcp') ||
-      req.path.startsWith('/config')
+      req.path.startsWith('/config') || req.path.startsWith('/im')
     if (!isApiPath) return next()
     // 优先从 Authorization header 取 token，其次从 query 参数取（供 <img src> 等无法设置 header 的场景使用）
     const auth = req.headers.authorization ?? ''

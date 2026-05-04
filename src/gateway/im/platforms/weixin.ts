@@ -246,8 +246,8 @@ function apiPost(
 
 // ── 扫码登录：GET 请求封装 ────────────────────────────────────────────────────
 // 注意：登录接口只需要 iLink-App-ClientVersion: 1，不需要其他头
-function apiGet(path: string, timeoutMs = API_TIMEOUT_MS): Promise<Record<string, unknown>> {
-  const url = new URL(`${ILINK_BASE_URL}/${path}`)
+function apiGet(path: string, timeoutMs = API_TIMEOUT_MS, baseUrl = ILINK_BASE_URL): Promise<Record<string, unknown>> {
+  const url = new URL(`${baseUrl}/${path}`)
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
@@ -293,13 +293,15 @@ export interface WeixinQrCodeResult {
 }
 
 export interface WeixinLoginResult {
-  status: 'pending' | 'scaned' | 'confirmed' | 'expired' | 'error'
+  status: 'pending' | 'scaned' | 'scaned_but_redirect' | 'confirmed' | 'expired' | 'error'
   /** 登录成功后的 bot token */
   botToken?: string
   /** 登录成功后的 account ID */
   accountId?: string
   /** 登录成功后的 user ID */
   userId?: string
+  /** scaned_but_redirect 时的新 host */
+  redirectHost?: string
   /** 错误信息 */
   error?: string
 }
@@ -333,16 +335,17 @@ export async function getWeixinQrCode(): Promise<WeixinQrCodeResult> {
  * 对应接口：GET /ilink/bot/get_qrcode_status?qrcode=xxx
  * status: pending（等待扫码）| scaned（已扫码待确认）| confirmed（已确认）| expired（已过期）
  */
-export async function pollWeixinQrCodeStatus(qrcodeKey: string): Promise<WeixinLoginResult> {
+export async function pollWeixinQrCodeStatus(qrcodeKey: string, baseUrl = ILINK_BASE_URL): Promise<WeixinLoginResult> {
   try {
     const data = await apiGet(
       `${EP_GET_QRCODE_STATUS}?qrcode=${encodeURIComponent(qrcodeKey)}`,
       40_000, // 长轮询，服务端最多挂 35s
+      baseUrl,
     )
 
     log.debug('get_qrcode_status 响应', { data })
 
-    const status = String(data.status ?? 'pending')
+    const status = String(data.status ?? 'wait')
 
     if (status === 'confirmed') {
       const botToken = String(data.bot_token ?? '')
@@ -350,6 +353,11 @@ export async function pollWeixinQrCodeStatus(qrcodeKey: string): Promise<WeixinL
       const userId = String(data.ilink_user_id ?? '')
       log.info('扫码确认成功', { accountId, hasToken: !!botToken })
       return { status: 'confirmed', botToken, accountId, userId }
+    }
+    if (status === 'scaned_but_redirect') {
+      const redirectHost = String(data.redirect_host ?? '')
+      log.info('扫码后需要重定向', { redirectHost })
+      return { status: 'scaned_but_redirect', redirectHost }
     }
     if (status === 'scaned') return { status: 'scaned' }
     if (status === 'expired') return { status: 'expired' }

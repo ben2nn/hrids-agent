@@ -286,11 +286,12 @@ export class PlatformManager {
     const DEADLINE_MS = 5 * 60 * 1000
     const POLL_INTERVAL_MS = 2_000
     const startedAt = Date.now()
+    let currentBaseUrl = 'https://ilinkai.weixin.qq.com'
 
     while (Date.now() - startedAt < DEADLINE_MS) {
       if (!this.weixinLoginState || this.weixinLoginState.qrcodeKey !== qrcodeKey) return
 
-      const result = await pollWeixinQrCodeStatus(qrcodeKey)
+      const result = await pollWeixinQrCodeStatus(qrcodeKey, currentBaseUrl)
 
       if (result.status === 'confirmed') {
         log.info('微信扫码登录成功', { accountId: result.accountId })
@@ -307,7 +308,14 @@ export class PlatformManager {
         return
       }
 
-      if (result.status === 'scaned') {
+      if (result.status === 'scaned_but_redirect') {
+        // 切换到新 host 继续轮询，不更新 result（前端仍显示 pending）
+        if (result.redirectHost) {
+          currentBaseUrl = `https://${result.redirectHost}`
+          log.info('微信扫码重定向', { newBaseUrl: currentBaseUrl })
+        }
+        // 不设置 result，继续轮询
+      } else if (result.status === 'scaned') {
         this.weixinLoginState.result = { status: 'scaned' }
       } else if (result.status === 'error') {
         log.warn('微信扫码轮询出错，3s 后重试', { error: result.error })

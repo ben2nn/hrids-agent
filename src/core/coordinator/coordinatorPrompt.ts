@@ -270,7 +270,33 @@ ${SHELL_TOOL_NAME} 超时（必须显式传入 timeout 参数）：
 
 脚本文件管理：一个任务只维护一个主脚本，不要创建 v2/v3/final 等版本。修改脚本用 file_edit 做最小改动。调试用临时脚本确认问题后立即删除。
 
-长时间任务：先用小数据量（10-20条）验证逻辑，再扩大规模。脚本内置进度保存，支持断点续传。超时后先检查输出文件是否有数据，再判断是否失败。同一命令超时两次后，先读取脚本分析原因，再决定是否修改。`,
+长时间任务：先用小数据量（10-20条）验证逻辑，再扩大规模。脚本内置进度保存，支持断点续传。超时后先检查输出文件是否有数据，再判断是否失败。同一命令超时两次后，先读取脚本分析原因，再决定是否修改。
+
+## Python 虚拟环境规范（强制）
+
+**禁止使用全局 Python 环境**，所有 Python 脚本执行和依赖安装必须使用当前工作目录下的虚拟环境：
+
+**创建虚拟环境**（首次或 .venv 不存在时）：
+\`\`\`
+python -m venv .venv
+\`\`\`
+
+**激活并使用**（Linux/macOS）：
+\`\`\`
+source .venv/bin/activate && pip install xxx && python script.py
+\`\`\`
+
+**激活并使用**（Windows PowerShell）：
+\`\`\`
+.venv\\Scripts\\Activate.ps1; pip install xxx; python script.py
+\`\`\`
+
+**规则**：
+ - 执行任何 python / pip 命令前，先检查当前目录是否存在 .venv/
+ - 若不存在，先创建再激活，再执行后续命令
+ - 安装依赖后同步更新 requirements.txt（pip freeze > requirements.txt）
+ - 不要使用 pip install --user 或修改系统 Python 环境
+ - 若环境信息中已显示"Python 虚拟环境：已激活"，可直接使用 python/pip，无需重复激活`,
 }
 
 const EXT_CRAWL: PromptExtension = {

@@ -217,8 +217,12 @@ export function WeixinConnectModal({ onClose, onDisconnected }: WeixinConnectMod
       }
       // 解绑成功，通知父组件刷新状态
       onDisconnected?.()
-      // 关闭弹窗
-      onClose()
+      // 重置状态并重新发起扫码，让用户可以重新绑定
+      setSaving(false)
+      setAccountId('')
+      setError('')
+      setStep('qrcode')
+      void handleStartQrCode()
     } catch (err) {
       setError(String(err).replace(/^Error:\s*/, ''))
       setSaving(false)

@@ -9,15 +9,17 @@ import { ZhilePage } from './components/pages/ZhilePage.js'
 import { SettingsPage } from './components/pages/SettingsPage.js'
 import { NavBar } from './components/layout/NavBar.js'
 import type { NavView } from './components/layout/NavBar.js'
+import { useT } from './i18n/useT.js'
 
 // ─── 加载中界面 ────────────────────────────────────────────────────────────
 
 function LoadingScreen() {
+  const t = useT()
   return (
     <div className="flex items-center justify-center h-screen bg-[var(--bg-primary)]">
       <div className="flex flex-col items-center gap-3">
         <img src="/avatar.png" alt="loading" className="w-10 h-10 rounded-full animate-pulse" />
-        <p className="text-sm text-[var(--text-secondary)]">连接中...</p>
+        <p className="text-sm text-[var(--text-secondary)]">{t.common.connecting}</p>
       </div>
     </div>
   )

@@ -213,6 +213,26 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
     envInfo.push('注意: Linux 环境，使用 bash 命令')
   }
 
+  // 检测当前工作目录下的 Python 虚拟环境状态
+  const currentCwd = getGlobalCwd()
+  const venvPaths = [
+    join(currentCwd, '.venv'),
+    join(currentCwd, 'venv'),
+  ]
+  const venvDir = venvPaths.find(p => existsSync(p))
+  const venvActivated = !!(process.env.VIRTUAL_ENV)
+
+  if (venvActivated) {
+    envInfo.push(`Python 虚拟环境：已激活（${process.env.VIRTUAL_ENV}）`)
+  } else if (venvDir) {
+    const activateHint = isWindows
+      ? `${venvDir}\\Scripts\\Activate.ps1`
+      : `source ${venvDir}/bin/activate`
+    envInfo.push(`Python 虚拟环境：未激活（已存在 ${venvDir}，执行 \`${activateHint}\` 激活）`)
+  } else {
+    envInfo.push(`Python 虚拟环境：不存在（执行 python -m venv .venv 在当前目录创建）`)
+  }
+
   // 安全边界说明：告知 LLM 工作目录约束和禁止操作
   envInfo.push(
     '\n## 安全边界\n' +
