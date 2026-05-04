@@ -730,11 +730,11 @@ ${contentToSummarize}
     }
 
     // 工具执行：用 Promise.race 统一处理超时、abort、正常完成三种情况
-    // 优先使用工具输入中指定的 timeout（如 bash 工具的 timeout 参数），否则用默认值 10 分钟
+    // 优先使用工具输入中指定的 timeout（如 bash 工具的 timeout 参数），否则用默认值 60 分钟
     const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
     const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
       ? inputTimeout + 5000  // 比工具自身超时多 5s，确保工具先超时并返回错误信息
-      : 10 * 60 * 1000       // 默认 10 分钟
+      : 60 * 60 * 1000       // 默认 60 分钟（兜底，工具自身 timeout 是主要控制手段）
 
     const toolPromise: Promise<ToolResult> = tool.execute(effectiveInput as never, { onLog })
       .then(r => r)
@@ -970,8 +970,8 @@ ${contentToSummarize}
     }
 
     const maxBudgetUsd = this.config.maxBudgetUsd
-    // 自动压缩阈值：默认 20000 tokens
-    const autoCompactThreshold = this.config.autoCompactThreshold ?? 20000
+    // 自动压缩阈值：默认 100000 tokens（约 40-80 轮对话后才触发，参考 Kiro/Claude Code 的策略）
+    const autoCompactThreshold = this.config.autoCompactThreshold ?? 100000
     let turns = 0
     // 用 API 返回的真实 inputTokens 校准估算，避免中文场景低估
     let lastKnownInputTokens = 0

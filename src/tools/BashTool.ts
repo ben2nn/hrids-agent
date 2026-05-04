@@ -15,7 +15,14 @@ const log = logger.child({ component: 'bash-tool' })
 
 const inputSchema = z.object({
   command: z.string().describe('要执行的 shell 命令（bash/sh 语法）'),
-  timeout: z.number().optional().describe('超时时间（毫秒），默认 60000。长时间任务（如爬虫、编译）可设置更大的值，例如 1800000（30分钟）'),
+  timeout: z.number().optional().describe(
+    '超时时间（毫秒），默认 120000（2分钟）。' +
+    '长时间任务请主动设置更大的值：\n' +
+    '  - npm install / pip install 等依赖安装：600000（10分钟）\n' +
+    '  - cargo build / tsc / webpack 等编译：1800000（30分钟）\n' +
+    '  - 大文件下载 / 爬虫任务：3600000（60分钟）\n' +
+    '  - 不确定时宁可设大，超时会强制终止进程'
+  ),
 })
 
 // 危险命令黑名单（Linux/macOS）
@@ -32,6 +39,17 @@ const BLOCKED_PATTERNS = [
   /passwd\s+root/,                  // 修改 root 密码
   /curl.*\|\s*(ba)?sh/,            // 管道执行远程脚本
   /wget.*\|\s*(ba)?sh/,            // 管道执行远程脚本
+  // 追加：更多高危操作
+  /\bsudo\s+rm\s+-rf/,             // sudo rm -rf
+  /\bsudo\s+dd\b/,                 // sudo dd
+  /\bsudo\s+mkfs\b/,               // sudo mkfs
+  /\bsudo\s+chmod\s+-R\s+777/,    // sudo chmod -R 777
+  /\bnohup\b.*&\s*$|&\s*disown/,  // 后台脱离进程（可能逃逸超时控制）
+  /\bscreen\b|\btmux\b/,           // 会话复用（可能逃逸超时控制）
+  /\bkillall\b|\bpkill\b/,         // 批量杀进程（可能误杀 agent 自身）
+  /\bcrontab\s+-[re]\b/,           // 修改 crontab（应通过 schedule_cron 工具）
+  /\biptables\b|\bnftables\b/,     // 修改防火墙规则
+  /\bsystemctl\s+(stop|disable|mask)\b/, // 停止系统服务
 ]
 
 // 提取 rm/rmdir 命令的目标路径，用于危险路径检测
@@ -109,7 +127,7 @@ export const BashTool: ToolDef<typeof inputSchema> = {
       }
     }
 
-    const timeout = input.timeout ?? 60000
+    const timeout = input.timeout ?? 120000  // 默认 2 分钟（原 60s 太短，下载/编译场景常超时）
     const startTime = Date.now()
     logLine(`[bash] 开始执行: ${input.command}`)
     logLine(`[bash] 工作目录: ${cwd}`)

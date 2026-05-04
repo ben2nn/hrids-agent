@@ -1,4 +1,6 @@
 // 会话管理器 —— 管理 agent 进程的生命周期
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 import { createProvider, createProviderFromConfig, createVisionProviderFromConfig } from '../core/providers/index.js'
 import { QueryEngine } from '../core/QueryEngine.js'
 import type { Message, ContentBlock, ImageSource } from '../core/QueryEngine.js'
@@ -14,7 +16,7 @@ import { loadConfig } from '../core/Config.js'
 import { setGlobalCwd, getGlobalCwd, runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
-import { setTodosUpdatedCallback, setResetDecisionCallback, resolveResetDecision, loadTodos } from '../tools/TodoTool.js'
+import { setTodosUpdatedCallback, setResetDecisionCallback, resolveResetDecision } from '../tools/TodoTool.js'
 import { resolveDecision, setGatewayDecisionCallback } from '../tools/DecisionTool.js'
 import { logger } from '../core/logger.js'
 import { auditLog } from '../core/audit.js'
@@ -218,10 +220,19 @@ export class SessionManager {
 
     // 注册 todos_updated 推送回调（按 sessionId 隔离，避免多会话串流）
     // 传入 sessionId 确保只有当前会话的 todo 操作才触发此回调
+    // 注意：直接从 session.info.cwd 读取，而非 loadTodos()（后者依赖 getGlobalCwd()，
+    // 在异步回调中 getGlobalCwd() 可能已切换到其他会话的 cwd，导致读到旧数据）
     setTodosUpdatedCallback(() => {
       const s = this.sessions.get(sessionId)
       if (s) {
-        const todos = loadTodos()
+        const todoFile = join(s.info.cwd, '.hrids', 'tasks', 'todos.json')
+        let todos: unknown[] = []
+        try {
+          if (existsSync(todoFile)) {
+            const raw = JSON.parse(readFileSync(todoFile, 'utf-8'))
+            todos = Array.isArray(raw) ? raw : []
+          }
+        } catch { /* 读取失败时推送空数组，不阻断广播 */ }
         this.broadcast(s, { type: 'todos_updated', todos })
       }
     }, sessionId)

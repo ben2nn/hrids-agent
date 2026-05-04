@@ -1,9 +1,10 @@
 // 系统上下文构建器 —— 注入 Git 状态、AGENT.md 记忆文件等
 import { exec, execSync } from 'child_process'
-import { existsSync, readFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { promisify } from 'util'
 import { homedir } from 'os'
 import { join } from 'path'
+import { getGlobalCwd } from './cwd.js'
 
 const execAsync = promisify(exec)
 
@@ -200,6 +201,8 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
     `当前时间: ${new Date().toLocaleString('zh-CN')}`,
     `用户主目录: ${homedir()}`,
     `用户名: ${process.env.USERNAME ?? process.env.USER ?? process.env.LOGNAME ?? '未知'}`,
+    // 注入实时工作目录（getGlobalCwd() 反映最新的 cd 状态，比 resolvedCwd 更准确）
+    `当前工作目录 (cwd): ${getGlobalCwd()}`,
   ]
 
   if (isWindows) {
@@ -210,9 +213,41 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
     envInfo.push('注意: Linux 环境，使用 bash 命令')
   }
 
+  // 安全边界说明：告知 LLM 工作目录约束和禁止操作
+  envInfo.push(
+    '\n## 安全边界\n' +
+    `- 所有文件操作应在当前工作目录（${getGlobalCwd()}）内进行\n` +
+    '- 禁止操作系统关键目录（/etc、/usr、/bin、/sbin、/boot、/dev 等）\n' +
+    '- 禁止修改用户主目录根层级文件\n' +
+    '- 禁止执行 shutdown/reboot/halt 等系统命令\n' +
+    '- 长时间任务（编译/下载）请在 bash 工具的 timeout 参数中设置合适的超时时间（毫秒）\n' +
+    '- 如需安装依赖，优先在项目目录内安装（npm install、pip install -r requirements.txt 等）'
+  )
+
   if (gitCtx) envInfo.push(`\nGit 状态:\n${gitCtx}`)
 
   dynamicSections.push('## 环境信息\n' + envInfo.join('\n'))
+
+  // 注入 .cache/ 目录中的上传文件列表，让 LLM 知道可以用 @.cache/filename 引用
+  const cacheDir = join(resolvedCwd, '.cache')
+  if (existsSync(cacheDir)) {
+    try {
+      const cacheFiles = readdirSync(cacheDir)
+        .filter(f => {
+          try { return statSync(join(cacheDir, f)).isFile() } catch { return false }
+        })
+      if (cacheFiles.length > 0) {
+        const fileList = cacheFiles.map(f => `  - @.cache/${f}`).join('\n')
+        dynamicSections.push(
+          `## 已上传的附件文件（位于 cwd/.cache/）\n` +
+          `以下文件已上传到当前会话工作目录，可直接用 @.cache/<文件名> 语法引用：\n${fileList}\n` +
+          `例如：分析 @.cache/${cacheFiles[0]}`
+        )
+      }
+    } catch {
+      // 读取失败时静默忽略
+    }
+  }
 
   return [...basePrompt, ...dynamicSections]
 }
