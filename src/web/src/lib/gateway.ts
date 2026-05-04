@@ -405,9 +405,14 @@ export async function deleteMcpServer(name: string): Promise<void> {
 /**
  * 获取会话工作目录中图片文件的访问 URL。
  * 直接返回后端图片端点 URL，供 <img src="..."> 使用。
+ * 若存在 authToken，自动附加到 query 参数（<img> 标签无法设置 Authorization header）。
  */
 export function getImageUrl(sessionId: string, filename: string): string {
-  return `${_gatewayUrl}/sessions/${encodeURIComponent(sessionId)}/image?path=${encodeURIComponent(filename)}`
+  const base = `${_gatewayUrl}/sessions/${encodeURIComponent(sessionId)}/image?path=${encodeURIComponent(filename)}`
+  if (_authToken) {
+    return `${base}&token=${encodeURIComponent(_authToken)}`
+  }
+  return base
 }
 
 /** 判断文件名是否为图片 */

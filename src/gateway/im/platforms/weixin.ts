@@ -19,6 +19,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import QRCode from 'qrcode'
 import { logger } from '../../../core/logger.js'
+import { loadMediaFromBuffer } from '../../../core/MediaProcessor.js'
 import { BasePlatformAdapter, type SendOptions } from '../BasePlatformAdapter.js'
 import type { InboundMessage, MessageSource, MessageType, SendResult, WeixinConfig } from '../types.js'
 
@@ -540,6 +541,92 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/**
+ * 下载微信媒体文件（旧格式：通过 media_id + token）
+ */
+async function downloadWeixinMedia(
+  token: string,
+  mediaId: string,
+): Promise<{ buffer: Buffer; mimeType: string; ext: string }> {
+  const url = `https://ilinkai.weixin.qq.com/cgi-bin/media/get?access_token=${token}&media_id=${mediaId}`
+  return downloadWeixinMediaByUrl(url)
+}
+
+/**
+ * 下载微信媒体文件（新格式：直接 fetch CDN full_url，无需 token）
+ * CDN 链接均为 HTTPS，直接用 https 模块。
+ */
+function downloadWeixinMediaByUrl(
+  url: string,
+): Promise<{ buffer: Buffer; mimeType: string; ext: string }> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => {
+        const buffer = Buffer.concat(chunks)
+        const contentType = res.headers['content-type'] || ''
+        let mimeType: string
+        let ext: string
+
+        if (contentType.startsWith('image/')) {
+          // Content-Type 可靠，直接用
+          mimeType = contentType.split(';')[0].trim()
+          ext = mimeType.split('/')[1] || 'jpg'
+        } else {
+          // Content-Type 不可靠（octet-stream 等）：从 URL 路径推断，默认 JPEG
+          const urlPath = new URL(url).pathname
+          const urlExt = urlPath.split('.').pop()?.toLowerCase() ?? ''
+          ext = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(urlExt) ? urlExt : 'jpg'
+          mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
+            : ext === 'png' ? 'image/png'
+            : ext === 'gif' ? 'image/gif'
+            : ext === 'webp' ? 'image/webp'
+            : 'image/jpeg'
+        }
+
+        resolve({ buffer, mimeType, ext })
+      })
+    })
+    req.on('error', reject)
+    req.setTimeout(15000, () => {
+      req.destroy()
+      reject(new Error('下载媒体超时'))
+    })
+  })
+}
+
+/**
+ * 解密微信 CDN 加密图片。
+ *
+ * 微信 iLink CDN 图片使用 AES-128-ECB + PKCS7 padding 加密：
+ *   - Key：aeskey 十六进制字符串转 16 字节（hex decode）
+ *   - 算法：AES-128-ECB（无 IV）
+ *   - Padding：PKCS7（Node.js crypto 默认）
+ *
+ * 参考：https://github.com/epiral/weixin-bot/blob/main/docs/protocol-spec.md
+ *
+ * @param encrypted  从 CDN 下载的加密数据
+ * @param aeskeyHex  image_item.aeskey 字段（32 位十六进制字符串）
+ */
+function decryptWeixinImage(encrypted: Buffer, aeskeyHex: string): Buffer {
+  try {
+    // aeskey 是 32 个十六进制字符 = 16 字节 AES-128 密钥
+    const key = Buffer.from(aeskeyHex, 'hex')
+    if (key.length !== 16) {
+      log.warn('aeskey 长度异常，跳过解密', { aeskeyLen: key.length, aeskeyHex: aeskeyHex.slice(0, 8) })
+      return encrypted
+    }
+    // AES-128-ECB，无 IV，PKCS7 padding（Node.js 默认）
+    const decipher = crypto.createDecipheriv('aes-128-ecb', key, null)
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()])
+    return decrypted
+  } catch (err) {
+    log.warn('AES 解密失败，使用原始数据', { error: String(err) })
+    return encrypted
+  }
+}
+
 function safeId(val: unknown, keep = 8): string {
   const s = String(val ?? '').trim()
   return s.length <= keep ? s : s.slice(0, keep)
@@ -780,10 +867,105 @@ export class WeixinAdapter extends BasePlatformAdapter {
       void this.maybeFetchTypingTicket(senderId, contextToken)
     }
 
-    // 提取文本
+    // 提取文本和媒体项
     const itemList = (msg.item_list ?? []) as unknown[]
-    const text = extractText(itemList)
-    if (!text.trim()) return  // 暂不处理非文本消息
+    let text = ''
+    const mediaItems: Array<{ type: string; mediaId: string; fullUrl?: string; aeskey?: string }> = []
+
+    log.debug('[图片诊断] 微信原始消息', {
+      from: safeId(senderId),
+      itemListLen: itemList.length,
+      itemTypes: (itemList as Record<string, unknown>[]).map(i => i.type),
+      rawMsg: JSON.stringify(msg),
+    })
+
+    for (const item of itemList as Record<string, unknown>[]) {
+      const type = item.type as number
+      if (type === 1) { // 文本
+        text = String((item.text_item as Record<string, unknown> | undefined)?.text ?? '')
+      } else if (type === 2) { // 图片
+        const imageItem = item.image_item as Record<string, unknown> | undefined
+        // iLink API 新格式：图片通过 media.full_url 直接下载，无 media_id
+        const fullUrl = (imageItem?.media as Record<string, unknown> | undefined)?.full_url as string | undefined
+        // aeskey：十六进制字符串，用于 AES-128-CBC 解密 CDN 加密图片
+        const aeskey = String(imageItem?.aeskey ?? '').trim()
+        // 兼容旧格式：media_id
+        const mediaId = String(imageItem?.media_id ?? '')
+        if (fullUrl) {
+          mediaItems.push({ type: 'image', mediaId: '', fullUrl, aeskey: aeskey || undefined })
+        } else if (mediaId) {
+          mediaItems.push({ type: 'image', mediaId })
+        } else {
+          log.warn('图片 item 无法提取下载地址', { rawItem: JSON.stringify(item).slice(0, 200) })
+        }
+      } else if (type === 3) { // 文件
+        const mediaId = String((item.file_item as Record<string, unknown> | undefined)?.media_id ?? '')
+        if (mediaId) mediaItems.push({ type: 'file', mediaId })
+      } else if (type === 4) { // 语音
+        const mediaId = String((item.voice_item as Record<string, unknown> | undefined)?.media_id ?? '')
+        if (mediaId) mediaItems.push({ type: 'voice', mediaId })
+      } else if (type === 5) { // 视频
+        const mediaId = String((item.video_item as Record<string, unknown> | undefined)?.media_id ?? '')
+        if (mediaId) mediaItems.push({ type: 'video', mediaId })
+      }
+    }
+
+    log.debug('[图片诊断] 提取结果', { text: text.slice(0, 50), mediaItemsCount: mediaItems.length, mediaItems })
+
+    // 如果没有文本也没有媒体，忽略
+    if (!text.trim() && mediaItems.length === 0) return
+
+    // 下载媒体文件：通过 MediaProcessor 压缩 + 缓存，无需落盘
+    // 只处理图片（LLM 多模态支持），其他类型（语音/视频/文件）暂不处理
+    const attachments: Array<{ name: string; data: string; mediaType: string }> = []
+    const mediaErrors: string[] = []
+
+    for (const media of mediaItems) {
+      if (media.type !== 'image') continue  // 暂只支持图片
+      try {
+        let buffer: Buffer
+        let mimeType: string
+        let ext: string
+
+        if (media.fullUrl) {
+          // 新格式：直接 fetch full_url（CDN 直链，无需 token）
+          const result = await downloadWeixinMediaByUrl(media.fullUrl)
+          buffer = result.buffer
+          mimeType = result.mimeType
+          ext = result.ext
+          // 微信 CDN 图片使用 AES-128-CBC 加密，需要用 aeskey 解密
+          if (media.aeskey) {
+            buffer = decryptWeixinImage(buffer, media.aeskey)
+            log.debug('[图片诊断] AES 解密完成', { aeskey: media.aeskey.slice(0, 8) + '...', decryptedSize: buffer.length })
+          }
+        } else {
+          // 旧格式：通过 media_id + token 下载
+          const result = await downloadWeixinMedia(this.weixinConfig.token, media.mediaId)
+          buffer = result.buffer
+          mimeType = result.mimeType
+          ext = result.ext
+        }
+
+        const name = `wx_${safeId(senderId, 12)}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`
+        const attachment = await loadMediaFromBuffer(buffer, mimeType, name)
+        attachments.push(attachment)
+        log.debug('[图片诊断] 微信图片处理完成', { name, rawMimeType: mimeType, finalMimeType: attachment.mediaType, originalSize: buffer.length, base64Len: attachment.data.length })
+      } catch (err) {
+        log.warn('微信媒体下载失败', { mediaId: media.mediaId, fullUrl: media.fullUrl?.slice(0, 80), error: String(err) })
+        mediaErrors.push(`图片下载失败: ${String(err)}`)
+      }
+    }
+
+    // 构造最终消息文本：原始文本 + 错误提示（不再需要 @filename 引用）
+    let finalText = text.trim()
+    if (mediaErrors.length > 0) {
+      finalText += `\n\n[微信媒体处理错误]\n${mediaErrors.join('\n')}`
+    }
+
+    // 纯图片消息（无文字）：给 LLM 一个简短提示，避免空文本
+    if (!finalText && attachments.length > 0) {
+      finalText = '[图片]'
+    }
 
     const source: MessageSource = {
       platform: 'weixin',
@@ -793,18 +975,19 @@ export class WeixinAdapter extends BasePlatformAdapter {
       userName: senderId,
     }
 
-    const messageType: MessageType = text.startsWith('/') ? 'command' : 'text'
+    const messageType: MessageType = (finalText.startsWith('/') && !attachments.length) ? 'command' : 'text'
 
     const inbound: InboundMessage = {
       messageId: messageId || `wx-${Date.now()}`,
       source,
       messageType,
-      text,
+      text: finalText,
+      attachments: attachments.length > 0 ? attachments : undefined,
       receivedAt: Date.now(),
       raw: msg,
     }
 
-    log.info('收到微信消息', { from: safeId(senderId), type: messageType })
+    log.info('收到微信消息', { from: safeId(senderId), type: messageType, attachmentCount: attachments.length })
     await this.handleInbound(inbound)
   }
 

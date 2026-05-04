@@ -182,6 +182,36 @@ export class OpenAIProvider implements LLMProvider {
     }
     if (oaiTools) body.tools = oaiTools
 
+    // ── 请求体诊断日志（脱敏：base64 图片只打长度）──────────────────────────
+    const debugMessages = oaiMessages.map(m => {
+      if (typeof m.content === 'string') {
+        return { role: m.role, contentLen: m.content.length, contentPreview: m.content.slice(0, 100) }
+      }
+      if (Array.isArray(m.content)) {
+        return {
+          role: m.role,
+          parts: (m.content as Array<Record<string, unknown>>).map(p => {
+            if (p.type === 'image_url') {
+              const url = (p.image_url as Record<string, unknown>)?.url as string ?? ''
+              return { type: 'image_url', urlLen: url.length, isDataUrl: url.startsWith('data:') }
+            }
+            if (p.type === 'text') return { type: 'text', len: (p.text as string)?.length, preview: (p.text as string)?.slice(0, 80) }
+            return { type: p.type }
+          }),
+        }
+      }
+      return { role: m.role, content: m.content }
+    })
+    const bodyBytes = JSON.stringify(body).length
+    log.debug('[请求诊断] 发送请求体', {
+      provider: this.name,
+      model: this.model,
+      bodyBytes,
+      messageCount: oaiMessages.length,
+      toolCount: oaiTools?.length ?? 0,
+      messages: debugMessages,
+    })
+
     const keyPreview = this.config.apiKey
       ? `${this.config.apiKey.slice(0, 8)}...（共${this.config.apiKey.length}位）`
       : '（空）'
@@ -220,6 +250,13 @@ export class OpenAIProvider implements LLMProvider {
     // 累积工具调用（流式工具调用是分片的）
     const pendingToolCalls: Record<number, { id: string; name: string; args: string }> = {}
 
+    // 响应统计
+    let totalTextLen = 0
+    let totalToolCalls = 0
+    let finalUsage: { inputTokens: number; outputTokens: number } | null = null
+    let finishReasonFinal = ''
+    const reqStartAt = Date.now()
+
     // 单次 read() 超时保护：防止服务端保持连接但不发数据导致永久阻塞
     // 使用请求级超时（600s）的一半作为单次读取超时，避免与工具层超时冲突
     const READ_IDLE_TIMEOUT_MS = 300_000 // 5 分钟无数据则超时
@@ -244,6 +281,7 @@ export class OpenAIProvider implements LLMProvider {
         if (data === '[DONE]') {
           // 输出所有累积的工具调用
           for (const tc of Object.values(pendingToolCalls)) {
+            totalToolCalls++
             try {
               yield {
                 type: 'tool_call',
@@ -251,6 +289,16 @@ export class OpenAIProvider implements LLMProvider {
               }
             } catch { /* JSON 解析失败忽略 */ }
           }
+          log.debug('[响应诊断] 流式响应完成', {
+            provider: this.name,
+            model: this.model,
+            elapsedMs: Date.now() - reqStartAt,
+            textLen: totalTextLen,
+            toolCalls: totalToolCalls,
+            finishReason: finishReasonFinal,
+            inputTokens: finalUsage?.inputTokens ?? null,
+            outputTokens: finalUsage?.outputTokens ?? null,
+          })
           yield { type: 'done' }
           return
         }
@@ -273,6 +321,7 @@ export class OpenAIProvider implements LLMProvider {
 
           const delta = chunk.choices?.[0]?.delta
           if (delta?.content) {
+            totalTextLen += delta.content.length
             yield { type: 'text_delta', delta: delta.content }
           }
 
@@ -290,6 +339,7 @@ export class OpenAIProvider implements LLMProvider {
 
           // 用量统计（通常在最后一个 chunk）
           if (chunk.usage) {
+            finalUsage = { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens }
             yield {
               type: 'usage',
               usage: {
@@ -302,6 +352,7 @@ export class OpenAIProvider implements LLMProvider {
           // 输出 stop_reason，供 QueryEngine 检测输出截断（length = max_tokens）
           const finishReason = chunk.choices?.[0]?.finish_reason
           if (finishReason) {
+            finishReasonFinal = finishReason
             // OpenAI 用 'length' 表示 max_tokens，统一映射为 'max_tokens'
             yield { type: 'stop_reason', stopReason: finishReason === 'length' ? 'max_tokens' : finishReason }
           }
@@ -309,6 +360,15 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
+    log.debug('[响应诊断] 流式响应完成（非DONE结束）', {
+      provider: this.name,
+      model: this.model,
+      elapsedMs: Date.now() - reqStartAt,
+      textLen: totalTextLen,
+      toolCalls: totalToolCalls,
+      inputTokens: finalUsage?.inputTokens ?? null,
+      outputTokens: finalUsage?.outputTokens ?? null,
+    })
     yield { type: 'done' }
   }
 }

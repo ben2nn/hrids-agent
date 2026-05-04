@@ -87,15 +87,23 @@ export const BashTool: ToolDef<typeof inputSchema> = {
       ctx?.onLog?.(line.trimEnd())
     }
 
-    // 拦截纯 cd 命令，直接更新持久目录
-    const cdMatch = input.command.trim().match(/^cd\s+(.+)$/)
+    // 拦截 cd 命令（纯 cd 或 "cd dir; rest" / "cd dir && rest" 复合形式）
+    // 匹配：cd <dir>  |  cd <dir>; rest  |  cd <dir> && rest
+    const cdMatch = input.command.trim().match(/^cd\s+((?:"[^"]*"|'[^']*'|[^;&|])+?)(?:\s*(?:;|&&)\s*(.+))?$/)
     if (cdMatch) {
       const target = cdMatch[1].trim().replace(/^["']|["']$/g, '').trim()
+      const rest = cdMatch[2]?.trim()
       const newDir = path.resolve(cwd, target)
       if (fs.existsSync(newDir) && fs.statSync(newDir).isDirectory()) {
         setGlobalCwd(newDir)
         logLine(`[bash] 切换目录: ${newDir}`)
-        return { type: 'success', output: newDir }
+        if (!rest) {
+          // 纯 cd，直接返回
+          return { type: 'success', output: newDir }
+        }
+        // 有后续命令，在新目录下继续执行（递归调用，cwd 已更新）
+        logLine(`[bash] 在新目录下执行: ${rest}`)
+        return BashTool.execute({ command: rest, timeout: input.timeout }, ctx)
       } else {
         return { type: 'error', message: `目录不存在: ${newDir}` }
       }

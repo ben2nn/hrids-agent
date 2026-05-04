@@ -66,6 +66,17 @@ interface StreamBuffer {
 // 流式编辑间隔（ms）：避免触发平台速率限制
 const STREAM_EDIT_INTERVAL_MS = 1500
 
+// ── 消息合并窗口 ──────────────────────────────────────────────────────────────
+// 图片消息到达后等待此时间（ms），若窗口内来了文字则合并后一起处理
+const MSG_MERGE_WINDOW_MS = 4000
+
+interface MergeBuffer {
+  /** 已缓冲的消息（第一条通常是图片） */
+  msg: InboundMessage
+  /** 定时器句柄 */
+  timer: ReturnType<typeof setTimeout>
+}
+
 export class PlatformManager {
   private adapters = new Map<IMPlatform, BasePlatformAdapter>()
   private sessionManager: SessionManager
@@ -77,6 +88,11 @@ export class PlatformManager {
   private processingLocks = new Set<string>()
   /** IM session key → 待处理的消息（处理中时排队，只保留最新一条） */
   private pendingMessages = new Map<string, InboundMessage>()
+  /**
+   * IM session key → 合并窗口缓冲区。
+   * 图片消息到达后暂存于此，等待 MSG_MERGE_WINDOW_MS 内的文字消息合并。
+   */
+  private mergeBuffers = new Map<string, MergeBuffer>()
 
   /** 微信扫码登录状态（同时只允许一个进行中的登录流程） */
   private weixinLoginState: {
@@ -177,6 +193,12 @@ export class PlatformManager {
   }
 
   async stop(): Promise<void> {
+    // 清理所有待合并的定时器，避免进程退出后悬空
+    for (const { timer } of this.mergeBuffers.values()) {
+      clearTimeout(timer)
+    }
+    this.mergeBuffers.clear()
+
     for (const platform of this.adapters.keys()) {
       await this.stopPlatform(platform)
     }
@@ -346,9 +368,85 @@ export class PlatformManager {
       if (handled) return
     }
 
-    if (this.processingLocks.has(sessionKey)) {
-      this.pendingMessages.set(sessionKey, msg)
-      log.debug('消息排队等待', { sessionKey })
+    // ── 消息合并窗口逻辑 ──────────────────────────────────────────────────
+    // 场景：微信等平台图片和文字是两条独立消息，需要合并后一起发给 LLM。
+    //
+    // 规则：
+    //   1. 收到带附件的消息（图片）→ 暂存，启动 MSG_MERGE_WINDOW_MS 定时器
+    //   2. 窗口内收到纯文字消息 → 合并到暂存消息（文字追加到 text，附件保留）
+    //   3. 窗口超时 → 直接处理暂存消息（无文字则用 [图片] 占位）
+    //   4. 纯文字消息且无暂存 → 正常处理（B 策略兜底：视觉意图检测）
+
+    const hasAttachments = (msg.attachments?.length ?? 0) > 0
+    const existing = this.mergeBuffers.get(sessionKey)
+
+    if (existing) {
+      // 窗口内来了新消息
+      clearTimeout(existing.timer)
+      this.mergeBuffers.delete(sessionKey)
+
+      if (!hasAttachments && msg.text.trim()) {
+        // 纯文字：合并到已缓冲的图片消息
+        const merged: InboundMessage = {
+          ...existing.msg,
+          text: msg.text.trim(),  // 用用户的文字替换 [图片] 占位
+          messageId: msg.messageId,  // 用最新消息 ID 避免去重误判
+        }
+        log.info('消息合并：图片 + 文字', { sessionKey, text: msg.text.slice(0, 50) })
+        await this.dispatchMessage(merged, sessionKey)
+      } else if (hasAttachments) {
+        // 又来了一张图片：先处理旧的，再开新窗口
+        await this.dispatchMessage(existing.msg, sessionKey)
+        this.startMergeWindow(msg, sessionKey)
+      } else {
+        // 空消息或其他情况：直接处理旧的，再处理新的
+        await this.dispatchMessage(existing.msg, sessionKey)
+        await this.dispatchMessage(msg, sessionKey)
+      }
+      return
+    }
+
+    if (hasAttachments) {
+      // 图片消息：开启合并窗口
+      this.startMergeWindow(msg, sessionKey)
+      return
+    }
+
+    // 纯文字消息，无待合并缓冲：正常处理
+    await this.dispatchMessage(msg, sessionKey)
+  }
+
+  /** 启动合并窗口，超时后自动处理缓冲消息 */
+  private startMergeWindow(msg: InboundMessage, sessionKey: string): void {
+    const timer = setTimeout(() => {
+      this.mergeBuffers.delete(sessionKey)
+      log.debug('合并窗口超时，直接处理图片消息', { sessionKey })
+      void this.dispatchMessage(msg, sessionKey)
+    }, MSG_MERGE_WINDOW_MS)
+
+    this.mergeBuffers.set(sessionKey, { msg, timer })
+    log.debug('合并窗口已开启', { sessionKey, attachments: msg.attachments?.length ?? 0 })
+  }
+
+  /** 实际派发消息（原 onMessage 的后半段逻辑） */
+  private async dispatchMessage(msg: InboundMessage, sessionKey: string): Promise<void> {
+    // 双重检查：processingLocks（本层并发锁）和 session busy（LLM 执行中）
+    const agentSessionId = this.imSessionMap.get(sessionKey)
+    const sessionBusy = agentSessionId
+      ? this.sessionManager.getSession(agentSessionId)?.info.status === 'busy'
+      : false
+
+    if (this.processingLocks.has(sessionKey) || sessionBusy) {
+      // 如果队列里已有带附件的消息，且新消息是纯文字，则合并而不是覆盖
+      const queued = this.pendingMessages.get(sessionKey)
+      if (queued && (queued.attachments?.length ?? 0) > 0 && !(msg.attachments?.length) && msg.text.trim()) {
+        const merged: InboundMessage = { ...queued, text: msg.text.trim(), messageId: msg.messageId }
+        this.pendingMessages.set(sessionKey, merged)
+        log.debug('排队消息合并：图片 + 文字', { sessionKey, text: msg.text.slice(0, 50) })
+      } else {
+        this.pendingMessages.set(sessionKey, msg)
+        log.debug('消息排队等待', { sessionKey, sessionBusy })
+      }
       return
     }
 
@@ -379,6 +477,85 @@ export class PlatformManager {
       const adapter = this.adapters.get(msg.source.platform)
       if (!adapter) return
 
+      // ── IM 图片落盘 ────────────────────────────────────────────────────
+      // 将 attachments 中的图片写入 session.cwd，转换为 @filename 引用。
+      // 落盘后两条路径（Web 上传 / IM 渠道）完全统一：
+      //   - 历史存 @filename 文本
+      //   - Web 界面通过 getImageUrl 加载
+      //   - LLM 通过 extractMediaFromText 读取本地文件
+      let effectiveText = msg.text
+      let effectiveAttachments = msg.attachments
+
+      if (msg.attachments && msg.attachments.length > 0) {
+        const session = this.sessionManager.getSession(agentSessionId)
+        const cwd = session?.info.cwd
+
+        if (cwd) {
+          const { writeFileSync, mkdirSync, existsSync } = await import('fs')
+          const { join } = await import('path')
+
+          const savedNames: string[] = []
+
+          for (const att of msg.attachments) {
+            try {
+              // 图片保存到 cwd/.cache/ 子目录，与 Web 上传路径统一
+              const imagesDir = join(cwd, '.cache')
+              if (!existsSync(imagesDir)) mkdirSync(imagesDir, { recursive: true })
+
+              const relPath = `.cache/${att.name}`
+              const absPath = join(cwd, relPath)
+              writeFileSync(absPath, Buffer.from(att.data, 'base64'))
+              savedNames.push(relPath)
+              log.debug('IM 图片已落盘', { name: att.name, path: absPath })
+            } catch (err) {
+              log.warn('IM 图片落盘失败，保留 base64 附件', { name: att.name, error: String(err) })
+              // 落盘失败时保留原始 attachments，走 base64 路径
+            }
+          }
+
+          if (savedNames.length > 0) {
+            // 构建 @filename 引用，追加到消息文本
+            const fileRefs = savedNames.map(n => `@${n}`).join(' ')
+            const baseText = effectiveText.replace(/\[图片\]/g, '').trim()
+            effectiveText = baseText ? `${baseText} ${fileRefs}` : fileRefs
+            // 清空 attachments，走 @filename 路径（extractMediaFromText 会读取本地文件）
+            effectiveAttachments = undefined
+
+            // 广播 im_user_message 给 Web 界面实时显示（用文件名，前端用 getImageUrl 加载）
+            this.sessionManager.broadcastToSession(agentSessionId, {
+              type: 'im_user_message',
+              text: baseText,
+              images: savedNames,   // 文件名，前端用 getImageUrl(sessionId, filename) 加载
+              platform: msg.source.platform,
+              timestamp: Date.now(),
+            })
+          }
+        } else {
+          // 没有 cwd（session 未初始化）：保留 base64 附件，广播 data: URL
+          const visionTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
+          const dataUrls = msg.attachments
+            .filter(a => visionTypes.includes(a.mediaType))
+            .map(a => `data:${a.mediaType};base64,${a.data}`)
+          if (dataUrls.length > 0) {
+            this.sessionManager.broadcastToSession(agentSessionId, {
+              type: 'im_user_message',
+              text: effectiveText.replace(/\[图片\]/g, '').trim(),
+              images: dataUrls,
+              platform: msg.source.platform,
+              timestamp: Date.now(),
+            })
+          }
+        }
+      } else if (effectiveText.trim()) {
+        // 纯文字消息：也广播给 Web 界面
+        this.sessionManager.broadcastToSession(agentSessionId, {
+          type: 'im_user_message',
+          text: effectiveText,
+          platform: msg.source.platform,
+          timestamp: Date.now(),
+        })
+      }
+
       // IM 场景：每条消息独立处理，清空上一条消息遗留的 todo，
       // 避免 LLM 看到残留的 in_progress 任务后强制调工具继续执行。
       this.clearSessionTodos(agentSessionId)
@@ -393,11 +570,12 @@ export class PlatformManager {
       // 启动 agent，同时并行处理 typing
       const agentPromise = this.runAgentMessage(
         agentSessionId,
-        msg.text,
+        effectiveText,
         sessionKey,
         adapter,
         msg.source.chatId,
         !supportsMessageEdit,  // 不支持编辑 → 跳过流式推送，等完整输出
+        effectiveAttachments,
       )
 
       if (supportsKeepTyping) {
@@ -450,6 +628,7 @@ export class PlatformManager {
     adapter: BasePlatformAdapter,
     chatId: string,
     skipStreaming: boolean,
+    attachments?: Array<{ name: string; data: string; mediaType: string }>,
   ): Promise<string> {
     let fullText = ''
 
@@ -469,6 +648,7 @@ export class PlatformManager {
           }
         }
       },
+      attachments,
     )
 
     await Promise.race([runPromise, timeoutPromise])

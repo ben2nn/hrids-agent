@@ -361,7 +361,7 @@ const deleteSchema = z.object({
   action: z.literal('delete'),
   id: z.string().optional().describe('要删除的 cron 任务 ID（精确匹配，优先使用）'),
   description: z.string().optional().describe('任务描述关键词（模糊匹配，id 未知时使用）'),
-}).refine(d => d.id || d.description, { message: '必须提供 id 或 description 之一' })
+})
 
 const listSchema = z.object({
   action: z.literal('list'),
@@ -494,6 +494,10 @@ cron 表达式格式（5位）：分 时 日 月 周
     }
 
     if (input.action === 'delete') {
+      if (!input.id && !input.description) {
+        return { type: 'error', message: '必须提供 id 或 description 之一' }
+      }
+
       const crons = loadCrons()
 
       // 优先按 id 精确匹配，否则按 description 模糊匹配

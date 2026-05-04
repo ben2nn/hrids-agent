@@ -45,7 +45,7 @@ export interface DisplayMessage {
   timestamp: number
 }
 
-const IMAGE_PATTERN = /@([^\s]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
+const IMAGE_PATTERN = /@([^\s@]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
 
 /**
  * 将原始 Message[] 转换为前端 DisplayMessage[]。
@@ -84,7 +84,60 @@ function formatMessagesForDisplay(
     idx++
 
     if (msg.role === 'user') {
-      if (typeof msg.content !== 'string') continue
+      if (typeof msg.content !== 'string' && !Array.isArray(msg.content)) continue
+
+      // ContentBlock 数组（多模态消息：含图片/PDF 的消息）
+      if (Array.isArray(msg.content)) {
+        const blocks = msg.content as Array<{ type: string; text?: string; source?: { type: string; mediaType?: string; data?: string; url?: string } }>
+
+        // 纯 tool_result 消息（工具调用结果回传给 LLM 的内部消息）：不显示为用户气泡
+        const hasOnlyToolResults = blocks.length > 0 && blocks.every(b => b.type === 'tool_result')
+        if (hasOnlyToolResults) continue
+
+        // 系统内部消息过滤
+        const rawTextContent = blocks.filter(b => b.type === 'text').map(b => b.text ?? '').join('')
+        if (rawTextContent.startsWith('[系统') || rawTextContent.startsWith('[上下文压缩]')) continue
+
+        // 提取内嵌图片的 data URL，供前端 <img> 直接显示
+        const inlineImages: string[] = []
+        for (const b of blocks) {
+          if (b.type === 'image' && b.source) {
+            if (b.source.type === 'base64' && b.source.data && b.source.mediaType) {
+              inlineImages.push(`data:${b.source.mediaType};base64,${b.source.data}`)
+            } else if (b.source.type === 'url' && b.source.url) {
+              inlineImages.push(b.source.url)
+            }
+          }
+        }
+
+        // 从文本内容中提取 @文件名 引用（新格式：图片 block 被还原为 @文件名 文本）
+        IMAGE_PATTERN.lastIndex = 0
+        let imgMatch: RegExpExecArray | null
+        while ((imgMatch = IMAGE_PATTERN.exec(rawTextContent)) !== null) {
+          inlineImages.push(imgMatch[1])
+        }
+
+        // 清理 textContent：
+        // 1. 去掉 @文件名.ext 引用（已提取到 images，不需要显示在气泡文本里）
+        // 2. 去掉旧格式的 [图片] 占位符（无法还原文件名，但不应显示在气泡里）
+        IMAGE_PATTERN.lastIndex = 0
+        const textContent = rawTextContent
+          .replace(IMAGE_PATTERN, '')
+          .replace(/\[图片\]/g, '')
+          .replace(/\s{2,}/g, ' ')
+          .trim()
+
+        displayMessages.push({
+          id: `${idPrefix}u-${idx}`,
+          type: 'user',
+          content: textContent,
+          timestamp,
+          ...(inlineImages.length > 0 ? { images: inlineImages } : {}),
+        })
+        continue
+      }
+
+      // 纯文本消息（原有逻辑）
       if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
 
       const images: string[] = []
@@ -94,10 +147,14 @@ function formatMessagesForDisplay(
         images.push(match[1])
       }
 
+      // 去掉 @文件名 引用，不在气泡文本里显示
+      IMAGE_PATTERN.lastIndex = 0
+      const cleanContent = msg.content.replace(IMAGE_PATTERN, '').replace(/\s{2,}/g, ' ').trim()
+
       displayMessages.push({
         id: `${idPrefix}u-${idx}`,
         type: 'user',
-        content: msg.content,
+        content: cleanContent,
         timestamp,
         ...(images.length > 0 ? { images } : {}),
       })
@@ -346,8 +403,10 @@ export function createGateway(config: GatewayConfig = {}) {
       req.path.startsWith('/skills') || req.path.startsWith('/mcp') ||
       req.path.startsWith('/config')
     if (!isApiPath) return next()
+    // 优先从 Authorization header 取 token，其次从 query 参数取（供 <img src> 等无法设置 header 的场景使用）
     const auth = req.headers.authorization ?? ''
-    if (verifyToken(auth)) return next()
+    const queryToken = typeof req.query.token === 'string' ? req.query.token : ''
+    if (verifyToken(auth) || (queryToken && verifyRawToken(queryToken))) return next()
     log.warn('未授权请求', { path: req.path, ip: req.ip })
     res.status(401).json({ error: '未授权' })
   })
@@ -865,7 +924,9 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        const destPath = resolve(cwd, safeName)
+        // 图片统一存放到 cwd/.cache/ 子目录
+        const imagesDir = resolve(cwd, '.cache')
+        const destPath = resolve(imagesDir, safeName)
 
         // 安全检查：确保目标路径在 cwd 内
         if (!destPath.startsWith(resolve(cwd))) {
@@ -882,11 +943,12 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        mkdirSync(cwd, { recursive: true })
+        mkdirSync(imagesDir, { recursive: true })
         writeFileSync(destPath, buffer)
 
         log.info('文件已上传', { sessionId: req.params.id, file: safeName, size: buffer.length })
-        uploaded.push({ name: safeName, path: destPath, size: buffer.length })
+        // name 返回相对路径，前端用 getImageUrl(sessionId, '.cache/xxx.jpg') 加载
+        uploaded.push({ name: `.cache/${safeName}`, path: destPath, size: buffer.length })
       }
 
       res.json({ files: uploaded })

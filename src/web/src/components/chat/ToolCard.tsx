@@ -14,7 +14,10 @@ const TOOL_NAME_MAP: Record<string, { label: string; icon: string }> = {
   web_fetch:          { label: '获取网页',     icon: 'globe' },
   bash:               { label: '执行命令',     icon: 'terminal' },
   powershell:         { label: '执行命令',     icon: 'terminal' },
-  todo_write:         { label: '更新任务',     icon: 'check-square' },
+  todo_write:         { label: '创建任务',     icon: 'check-square' },
+  todo_update:        { label: '更新任务',     icon: 'check-square' },
+  todo_append:        { label: '追加任务',     icon: 'check-square' },
+  todo_reset:         { label: '重置任务',     icon: 'check-square' },
   todo_read:          { label: '查看任务',     icon: 'check-square' },
   ask_user:           { label: '询问用户',     icon: 'message-circle' },
   request_decision:   { label: '请求决策',     icon: 'message-circle' },
@@ -99,10 +102,20 @@ function summarizeInput(toolName: string, input: unknown): string {
     case 'todo_write': {
       const todos = Array.isArray(inp.todos) ? inp.todos as Array<Record<string, unknown>> : []
       if (todos.length === 0) return ''
-      const done = todos.filter(t => t.status === 'completed').length
-      const active = todos.filter(t => t.status === 'in_progress').length
-      return `${todos.length} 项 · ${done} 已完成${active ? ` · ${active} 进行中` : ''}`
+      return `共 ${todos.length} 项`
     }
+    case 'todo_update': {
+      const id = inp.id ? `#${inp.id}` : ''
+      const statusMap: Record<string, string> = { pending: '待处理', in_progress: '进行中', completed: '已完成' }
+      const status = inp.status ? (statusMap[String(inp.status)] ?? String(inp.status)) : ''
+      return [id, status].filter(Boolean).join(' → ')
+    }
+    case 'todo_append': {
+      const todos = Array.isArray(inp.todos) ? inp.todos as Array<Record<string, unknown>> : []
+      if (todos.length === 0) return ''
+      return `追加 ${todos.length} 项`
+    }
+    case 'todo_reset':  return '重置任务计划'
     case 'todo_read':   return ''
     case 'memory_add': {
       const content = String(inp.content ?? '')

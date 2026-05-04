@@ -32,6 +32,22 @@ export type ServerMessage =
       impact?: string
       timestamp: number
     }
+  | {
+      /** IM 渠道（微信等）收到的用户消息，广播给 Web 界面显示 */
+      type: 'im_user_message'
+      requestId?: string
+      /** 消息文本（已去掉 [图片] 占位符） */
+      text: string
+      /**
+       * 图片列表：
+       *   - data: URL（IM 渠道 base64 图片，直接显示）
+       *   - 文件名（Web 上传图片，通过 getImageUrl 加载）
+       */
+      images?: string[]
+      /** 来源平台标识，如 'weixin' */
+      platform: string
+      timestamp: number
+    }
 
 // ─── 客户端发送消息（WebSocket Client → Server） ───────────────────────────
 

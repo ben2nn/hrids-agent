@@ -72,19 +72,25 @@ export function MessageItem({ message, toolCard, onToggleToolCard, onToggleCompa
           <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">我</span>
         </div>
         {/* 图片预览（若有） */}
-        {message.images && message.images.length > 0 && sessionId && (
+        {message.images && message.images.length > 0 && (
           <div className="mr-10 mb-2 flex flex-wrap gap-2 justify-end">
-            {message.images.map((imgName) => (
-              <div key={imgName} className="relative group">
-                <img
-                  src={getImageUrl(sessionId, imgName)}
-                  alt={imgName}
-                  className="max-w-[200px] max-h-[200px] rounded-xl object-cover border border-[var(--border-subtle)] cursor-pointer hover:opacity-90 transition-opacity"
-                  title={imgName}
-                  onClick={() => window.open(getImageUrl(sessionId, imgName), '_blank')}
-                />
-              </div>
-            ))}
+            {message.images.map((img) => {
+              // img 可能是 data URL（多模态消息内嵌图片）或文件名（上传到 cwd 的图片）
+              const isDataUrl = img.startsWith('data:')
+              const src = isDataUrl ? img : (sessionId ? getImageUrl(sessionId, img) : img)
+              const label = isDataUrl ? '图片' : img
+              return (
+                <div key={img} className="relative group">
+                  <img
+                    src={src}
+                    alt={label}
+                    className="max-w-[200px] max-h-[200px] rounded-xl object-cover border border-[var(--border-subtle)] cursor-pointer hover:opacity-90 transition-opacity"
+                    title={label}
+                    onClick={() => window.open(src, '_blank')}
+                  />
+                </div>
+              )
+            })}
           </div>
         )}
         {/* 内容气泡，右对齐，右边缘与头像对齐 */}

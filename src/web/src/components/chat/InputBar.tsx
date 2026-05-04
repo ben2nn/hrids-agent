@@ -572,7 +572,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
       // 收集图片文件名，用于消息气泡中显示预览
       const imageNames = uploadedFiles.filter(f => isImageFile(f.name)).map(f => f.name)
 
-      appendUserMessage(sessionId, content, imageNames.length > 0 ? imageNames : undefined)
+      // 气泡显示用的文本：去掉 @图片文件名（图片通过 images 字段单独渲染，避免重复）
+      const imageNameSet = new Set(imageNames)
+      const displayContent = uploadedFiles.length > 0
+        ? (trimmed || uploadedFiles.filter(f => !imageNameSet.has(f.name)).map(f => `@${f.name}`).join(' ')).trim()
+        : trimmed
+
+      appendUserMessage(sessionId, displayContent || content, imageNames.length > 0 ? imageNames : undefined)
       sendMessage(sessionId, content)
       setText('')
       setHasSent(true)
@@ -682,7 +688,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
       const imageNames = uploadedFiles.filter(f => isImageFile(f.name)).map(f => f.name)
 
-      appendUserMessage(sessionId, content, imageNames.length > 0 ? imageNames : undefined)
+      // 气泡显示用的文本：去掉 @图片文件名
+      const imageNameSet2 = new Set(imageNames)
+      const displayContent2 = uploadedFiles.length > 0
+        ? (trimmed || uploadedFiles.filter(f => !imageNameSet2.has(f.name)).map(f => `@${f.name}`).join(' ')).trim()
+        : trimmed
+
+      appendUserMessage(sessionId, displayContent2 || content, imageNames.length > 0 ? imageNames : undefined)
       sendMessage(sessionId, content)
       setText('')
       setUploadedFiles([])

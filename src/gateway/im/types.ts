@@ -49,10 +49,16 @@ export interface InboundMessage {
   messageType: MessageType
   /** 文本内容（命令消息去掉 / 前缀后的完整文本） */
   text: string
-  /** 本地缓存的媒体文件路径（图片/音频/视频/文档） */
+  /** 本地缓存的媒体文件路径（图片/音频/视频/文档），需要落盘时使用 */
   mediaFiles?: string[]
   /** 媒体 MIME 类型（与 mediaFiles 一一对应） */
   mediaTypes?: string[]
+  /**
+   * 直接携带的媒体附件（base64 编码），供 LLM 多模态调用。
+   * 适配器在内存中完成 base64 转换后填入此字段，无需落盘再读回。
+   * 格式与 SessionManager.runMessage 的 attachments 参数一致。
+   */
+  attachments?: Array<{ name: string; data: string; mediaType: string }>
   /** 接收时间戳（ms） */
   receivedAt: number
   /** 平台原始数据（调试用） */

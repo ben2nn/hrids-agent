@@ -534,6 +534,22 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         get().clearSession(sessionId)
         break
       }
+
+      // ── im_user_message：IM 渠道（微信等）收到的用户消息，实时显示在 Web 界面 ──
+      case 'im_user_message': {
+        const imUserMsg: DisplayMessage = {
+          id: genId(),
+          type: 'user',
+          content: msg.text,
+          timestamp: msg.timestamp,
+          ...(msg.images && msg.images.length > 0 ? { images: msg.images } : {}),
+        }
+        const newMessages = new Map(state.messages)
+        newMessages.set(sessionId, [...getMessages(state.messages, sessionId), imUserMsg])
+        set({ messages: newMessages })
+        break
+      }
+
       default: {
         // 未知消息类型，忽略
         break

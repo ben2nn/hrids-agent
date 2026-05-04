@@ -82,17 +82,25 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
       ctx?.onLog?.(line.trimEnd())
     }
 
-    // 拦截纯 cd / Set-Location 命令，直接更新持久目录
-    const cdMatch = input.command.trim().match(/^(?:cd|Set-Location)\s+(.+)$/i)
+    // 拦截 cd / Set-Location 命令（纯形式 或 "cd dir; rest" / "cd dir && rest" 复合形式）
+    // 匹配：cd <dir>  |  cd <dir>; rest  |  cd <dir> && rest  （Set-Location 同理）
+    const cdMatch = input.command.trim().match(/^(?:cd|Set-Location)\s+((?:"[^"]*"|'[^']*'|[^;&|])+?)(?:\s*(?:;|&&)\s*(.+))?$/i)
     if (cdMatch) {
       // 将正斜杠转为反斜杠，兼容 Windows 路径
       let target = cdMatch[1].trim().replace(/^["']|["']$/g, '').trim()
       target = target.replace(/\//g, '\\')
+      const rest = cdMatch[2]?.trim()
       const newDir = path.resolve(persistentCwd, target)
       if (fs.existsSync(newDir) && fs.statSync(newDir).isDirectory()) {
         setGlobalCwd(newDir)
         logLine(`[powershell] 切换目录: ${newDir}`)
-        return { type: 'success', output: newDir }
+        if (!rest) {
+          // 纯 cd，直接返回
+          return { type: 'success', output: newDir }
+        }
+        // 有后续命令，在新目录下继续执行（递归调用，cwd 已更新）
+        logLine(`[powershell] 在新目录下执行: ${rest}`)
+        return PowerShellTool.execute({ command: rest, timeout: input.timeout }, ctx)
       } else {
         return { type: 'error', message: `目录不存在: ${newDir}` }
       }

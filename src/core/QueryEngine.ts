@@ -6,6 +6,7 @@ import { logger } from './logger.js'
 import { auditLog } from './audit.js'
 import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
+import { extractMediaFromText } from './MediaProcessor.js'
 
 const log = logger.child({ component: 'query-engine' })
 
@@ -108,6 +109,7 @@ export interface QueryEngineConfig {
   maxBudgetUsd?: number          // 成本预算上限（USD），超出后停止执行
   autoCompactThreshold?: number  // 历史消息数超过此值时自动触发压缩（默认 80）
   initialMessages?: Message[]
+  sessionCwd?: string            // 会话工作目录，用于图片预处理
 }
 export type InterruptReason = 'turn_limit' | 'budget_exceeded' | 'aborted' | 'error' | 'permission_denied'
 
@@ -251,8 +253,25 @@ export class QueryEngine {
     return pruned
   }
 
-  // ── 优先级 0（最廉价）：tool_result 总量预算截断 ──────────────────────────────
-  // 参考 claude-code applyToolResultBudget：当所有 tool_result 总字符超出预算时，
+  // ── 图片 block 裁剪：历史中旧的 image block 替换为占位符 ─────────────────────
+  // LLM 已经看过的图片不需要每轮都传，替换为文字占位符节省 token 和带宽。
+  // 保护最近 protectTailCount 条消息中的图片（当前轮次可能还需要引用）。
+  private pruneOldImageBlocks(protectTailCount = 4): void {
+    const boundary = Math.max(0, this.history.length - protectTailCount)
+    for (let i = 0; i < boundary; i++) {
+      const msg = this.history[i]
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
+      let changed = false
+      const newContent = (msg.content as ContentBlock[]).map(b => {
+        if (b.type !== 'image') return b
+        changed = true
+        return { type: 'text' as const, text: '[图片已从上下文中移除以节省空间]' }
+      })
+      if (changed) this.history[i] = { ...msg, content: newContent }
+    }
+  }
+
+  // ── 优先级 0（最廉价）：tool_result 总量预算截断 ──────────────────────────────  // 参考 claude-code applyToolResultBudget：当所有 tool_result 总字符超出预算时，
   // 从最旧的开始截断，保护最近 protectTailCount 条消息不被截断。
   // 不调用 LLM，纯字符串操作，每轮都可以运行。
   private applyToolResultBudget(protectTailCount = 20): void {
@@ -794,6 +813,61 @@ ${contentToSummarize}
     yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: truncatedContent, is_error: finalResult.type === 'error' } }
   }
 
+  // 图片扩展名 → MIME 类型映射
+  private static readonly IMAGE_MIME_MAP: Record<string, ImageSource['mediaType']> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+  }
+
+  /**
+   * 预处理用户消息：将 @引用（本地文件 / URL）替换为 image/document ContentBlock。
+   *
+   * 委托给 MediaProcessor.extractMediaFromText，支持：
+   *   - @filename.jpg / @/abs/path/img.png  → 本地文件（压缩 + 缓存）
+   *   - @https://example.com/img.jpg        → URL 图片（fetch + 压缩 + 缓存）
+   *   - @doc.pdf                            → PDF 直接传输
+   *
+   * 若消息中没有任何媒体引用，直接返回原始字符串（不做转换）。
+   */
+  private async preprocessUserMessage(text: string): Promise<string | ContentBlock[]> {
+    const cwd = this.config.sessionCwd!
+    const { attachments, cleanText, errors } = await extractMediaFromText(text, cwd)
+
+    if (attachments.length === 0) {
+      // 没有成功加载的媒体，返回原始文本（保留失败引用，让 LLM 知道）
+      return text
+    }
+
+    // 构建 ContentBlock 数组
+    const blocks: ContentBlock[] = []
+
+    // 文本部分（去掉 @引用后的干净文本 + 错误提示）
+    let textContent = cleanText
+    if (errors.length > 0) {
+      textContent += `\n\n[媒体加载失败]\n${errors.join('\n')}`
+    }
+    if (textContent.trim()) {
+      blocks.push({ type: 'text', text: textContent })
+    }
+
+    // 媒体 block
+    for (const att of attachments) {
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          mediaType: att.mediaType as ImageSource['mediaType'],
+          data: att.data,
+        },
+      })
+    }
+
+    return blocks
+  }
+
   async *send(userMessage: string | Message): AsyncGenerator<StreamEvent> {
     // 并发保护：如果已有任务在运行，拒绝新任务
     if (this.running) {
@@ -817,10 +891,47 @@ ${contentToSummarize}
       try { await this.onBeforeSend(msgText) } catch { /* 钩子失败不阻断执行 */ }
     }
 
+    // 预处理用户消息：将 @filename 转换为 image block（仅用于发给 LLM）
+    // 历史里保留原始文本（含 @filename），避免 base64 数据膨胀历史
+    let processedContent: string | ContentBlock[] = typeof userMessage === 'string' ? userMessage : (userMessage as Message).content
+    if (typeof processedContent === 'string' && this.config.sessionCwd) {
+      try {
+        processedContent = await this.preprocessUserMessage(processedContent)
+      } catch (err) {
+        log.warn('图片预处理失败', { error: String(err) })
+      }
+    }
+
     // 规范化用户消息为 Message 对象，并添加 requestId、trigger、timestamp
-    const userMsg: Message = typeof userMessage === 'string'
-      ? { role: 'user', content: userMessage, requestId: this.currentRequestId ?? undefined, timestamp: Date.now() }
-      : { ...userMessage, requestId: this.currentRequestId ?? userMessage.requestId, timestamp: userMessage.timestamp ?? Date.now() }
+    // historyContent：存入历史的内容（原始文本，不含 base64）
+    // sendContent：发给 LLM 的内容（含 image block）
+    // 无论来自 Web 还是 IM 渠道，图片都已落盘，历史统一存 @filename 文本
+    const originalText = typeof userMessage === 'string' ? userMessage : msgText
+    const historyContent: string | ContentBlock[] = Array.isArray(processedContent)
+      ? (() => {
+          // ContentBlock 数组：把 image block 替换为 @filename 文本，保留文字部分
+          const textBlocks = (processedContent as ContentBlock[]).filter(b => b.type === 'text')
+          // 如果只有图片没有文字，用原始文本（含 @filename）
+          return textBlocks.length > 0
+            ? textBlocks.map(b => (b as { type: 'text'; text: string }).text).join('')
+            : originalText
+        })()
+      : processedContent
+
+    const userMsg: Message = {
+      role: 'user',
+      content: historyContent,   // 历史存原始文本
+      requestId: this.currentRequestId ?? undefined,
+      timestamp: Date.now(),
+      trigger: this.currentTrigger,
+      ...(this.currentCronDescription ? { cronDescription: this.currentCronDescription } : {})
+    }
+
+    // 发给 LLM 的消息（含 image block）
+    const userMsgForLLM: Message = {
+      ...userMsg,
+      content: processedContent,
+    }
     
     // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行（复用上方已提取的 msgText）
     const isQueryMode = this.isQueryIntent(msgText)
@@ -848,7 +959,15 @@ ${contentToSummarize}
     const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? 50)
 
     log.debug('send 开始', { historyLength: this.history.length, isQueryMode, estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
+    // 历史存原始文本版本（不含 base64），避免历史膨胀
     this.history.push(userMsg)
+    // 第一轮 LLM 调用前，把历史最后一条替换为含 image block 的版本
+    // 调用完成后（assistant 回复写入后）不需要恢复，因为后续轮次不再需要图片
+    const hasImageBlocks = Array.isArray(processedContent) &&
+      (processedContent as ContentBlock[]).some(b => b.type === 'image')
+    if (hasImageBlocks) {
+      this.history[this.history.length - 1] = userMsgForLLM
+    }
 
     const maxBudgetUsd = this.config.maxBudgetUsd
     // 自动压缩阈值：默认 20000 tokens
@@ -878,8 +997,9 @@ ${contentToSummarize}
           break
         }
 
-        // 每轮先做廉价的 tool_result 预算截断（不调用 LLM）
+        // 每轮先做廉价的预算截断（不调用 LLM）
         this.applyToolResultBudget()
+        this.pruneOldImageBlocks()
 
         // autocompact 触发判断：优先用 API 返回的真实 inputTokens，其次用估算值
         const tokenCount = lastKnownInputTokens > 0
@@ -942,6 +1062,16 @@ ${contentToSummarize}
             trigger: this.currentTrigger,
             ...(this.currentCronDescription ? { cronDescription: this.currentCronDescription } : {}),
           })
+        }
+
+        // 第一轮 LLM 调用完成后，把历史里的 image block 替换回原始文本版本
+        // 避免 base64 数据在后续每轮请求中重复传输
+        if (hasImageBlocks && turns === 1) {
+          // 找到用户消息（倒数第二条，assistant 回复是最后一条）
+          const userMsgIdx = this.history.length - 1 - (assistantBlocks.length > 0 ? 1 : 0)
+          if (userMsgIdx >= 0 && this.history[userMsgIdx].role === 'user') {
+            this.history[userMsgIdx] = userMsg  // 恢复为原始文本版本
+          }
         }
 
         // 没有工具调用：dsml 模式下尝试从文本中解析 DSML 格式工具调用

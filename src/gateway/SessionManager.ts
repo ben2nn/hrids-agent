@@ -23,9 +23,8 @@ import { getMemoryStackForSession, destroyMemoryStackForSession, destroyMemorySt
 import type { LLMProvider } from '../core/providers/types.js'
 import type { CreateSessionRequest, SessionInfo } from './types.js'
 import type WebSocket from 'ws'
-import { readFileSync, existsSync } from 'fs'
-import { resolve, extname } from 'path'
-
+import { resolve } from 'path'
+import { loadMediaFromFile, extractMediaFromText } from '../core/MediaProcessor.js'
 const log = logger.child({ component: 'gateway' })
 
 // 事件回放缓冲区容量（每个 session 最多缓存多少条事件）
@@ -67,6 +66,14 @@ export class SessionManager {
   /** 注册 cron → IM 推送回调（由 PlatformManager 在启动后调用） */
   setCronIMCallback(cb: (agentSessionId: string, text: string) => Promise<void>): void {
     this.cronIMCallback = cb
+  }
+
+  /**
+   * 获取会话的工作目录
+   */
+  getSessionCwd(sessionId: string): string | null {
+    const session = this.sessions.get(sessionId)
+    return session?.info.cwd ?? null
   }
 
   async createSession(req: CreateSessionRequest): Promise<ManagedSession> {
@@ -199,6 +206,7 @@ export class SessionManager {
       maxBudgetUsd: agentConfig.maxBudgetUsd,
       autoCompactThreshold: agentConfig.autoCompactThreshold,
       initialMessages,
+      sessionCwd,
     })
     session.permissions = permissions
 
@@ -240,6 +248,12 @@ export class SessionManager {
 
   getSession(id: string): ManagedSession | undefined {
     return this.sessions.get(id)
+  }
+
+  /** 向指定 session 的所有 WebSocket 订阅者广播消息 */
+  broadcastToSession(sessionId: string, msg: object): void {
+    const session = this.sessions.get(sessionId)
+    if (session) this.broadcast(session, msg)
   }
 
   listSessions(): SessionInfo[] {
@@ -455,6 +469,7 @@ export class SessionManager {
     sessionId: string,
     content: string,
     onEvent: (ev: { type: string; delta?: string; message?: string }) => void,
+    attachments?: Array<{ name: string; data: string; mediaType: string }>,
   ): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
@@ -465,7 +480,7 @@ export class SessionManager {
     try {
       await runWithCwd(session.info.cwd, () =>
         runWithSession(sessionId, () =>
-          this._runMessageInContext(session, sessionId, content, undefined, undefined)
+          this._runMessageInContext(session, sessionId, content, attachments, undefined)
         )
       )
     } finally {
@@ -537,30 +552,28 @@ export class SessionManager {
     const visionMediaTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
     const hasVisionAttachment = attachments?.some(a => visionMediaTypes.includes(a.mediaType)) ?? false
 
-    // 如果没有显式附件，尝试从消息文本中提取 @filename 引用的图片/PDF
+    log.info('[图片诊断] 入口', {
+      sessionId,
+      attachmentsCount: attachments?.length ?? 0,
+      attachmentMimeTypes: attachments?.map(a => a.mediaType) ?? [],
+      hasVisionAttachment,
+      contentPreview: content.slice(0, 80),
+    })
+
+    // 如果没有显式附件，尝试从消息文本中提取 @引用的媒体（本地文件 / URL）
+    // 委托给 MediaProcessor：支持压缩、缓存、URL fetch、PDF
     const inlineAttachments: Array<{ name: string; data: string; mediaType: string }> = []
+    let processedContent = content  // 去掉 @引用后的干净文本
     if (!hasVisionAttachment) {
       const cwd = session.info.cwd
-      const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|pdf))/gi
-      let match: RegExpExecArray | null
-      while ((match = imagePattern.exec(content)) !== null) {
-        const filename = match[1]
-        const absPath = resolve(cwd, filename)
-        if (existsSync(absPath)) {
-          try {
-            const data = readFileSync(absPath).toString('base64')
-            const ext = extname(filename).toLowerCase()
-            const mediaTypeMap: Record<string, string> = {
-              '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-              '.png': 'image/png', '.gif': 'image/gif',
-              '.webp': 'image/webp', '.pdf': 'application/pdf',
-            }
-            const mediaType = mediaTypeMap[ext] ?? 'image/jpeg'
-            inlineAttachments.push({ name: filename, data, mediaType })
-          } catch (err) {
-            log.warn('读取内联图片失败', { filename, error: String(err) })
-          }
+      const { attachments: extracted, cleanText, errors } = await extractMediaFromText(content, cwd)
+      if (extracted.length > 0) {
+        inlineAttachments.push(...extracted)
+        processedContent = cleanText
+        if (errors.length > 0) {
+          processedContent += `\n\n[媒体加载失败]\n${errors.join('\n')}`
         }
+        log.info('从消息文本提取媒体附件', { sessionId, count: extracted.length, errors: errors.length })
       }
     }
 
@@ -568,7 +581,7 @@ export class SessionManager {
     if (!hasVisionAttachment && inlineAttachments.length === 0) {
       const hasVisionIntent = isVisionIntent(content)
       if (hasVisionIntent) {
-        const recentImages = extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd)
+        const recentImages = await extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd)
         inlineAttachments.push(...recentImages)
         if (recentImages.length > 0) {
           log.info('检测到视觉意图，从历史中提取最近图片', { sessionId, count: recentImages.length, files: recentImages.map(a => a.name) })
@@ -579,10 +592,27 @@ export class SessionManager {
     const effectiveAttachments = attachments ?? inlineAttachments
     const hasEffectiveVision = effectiveAttachments.some(a => visionMediaTypes.includes(a.mediaType))
 
+    log.info('[图片诊断] effectiveAttachments', {
+      sessionId,
+      effectiveCount: effectiveAttachments.length,
+      hasEffectiveVision,
+      mimeTypes: effectiveAttachments.map(a => a.mediaType),
+      inlineCount: inlineAttachments.length,
+    })
+
     // 如果有视觉内容，尝试切换到视觉模型
     let originalProvider: LLMProvider | null = null
+    let visionProvider: LLMProvider | null = null
     if (hasEffectiveVision) {
-      const visionProvider = createVisionProviderFromConfig(loadConfig())
+      const agentConfig = loadConfig()
+      visionProvider = createVisionProviderFromConfig(agentConfig)
+      log.info('[图片诊断] 视觉模型创建', {
+        sessionId,
+        hasVisionConfig: !!agentConfig.vision,
+        visionFallbacks: (agentConfig.vision as { fallbacks?: unknown[] } | undefined)?.fallbacks?.length ?? 0,
+        providerCreated: !!visionProvider,
+        providerModel: visionProvider?.model ?? null,
+      })
       if (visionProvider) {
         log.info('检测到图片/PDF，切换到视觉模型', { sessionId, model: visionProvider.model })
         originalProvider = session.provider
@@ -594,12 +624,14 @@ export class SessionManager {
     }
 
     // 构建用户消息（支持多模态内容块）
+    // processedContent：去掉 @引用后的干净文本（inlineAttachments 场景），或原始 content
+    const textForMsg = inlineAttachments.length > 0 ? processedContent : content
     let userMsg: Message | string
     if (effectiveAttachments.length > 0) {
       const contentBlocks: ContentBlock[] = []
       // 先添加文本内容
-      if (content.trim()) {
-        contentBlocks.push({ type: 'text', text: content })
+      if (textForMsg.trim()) {
+        contentBlocks.push({ type: 'text', text: textForMsg })
       }
       // 添加附件内容块
       for (const att of effectiveAttachments) {
@@ -614,11 +646,82 @@ export class SessionManager {
           })
         }
       }
+      log.info('[图片诊断] 构建 ContentBlock', { sessionId, blockTypes: contentBlocks.map(b => b.type) })
       userMsg = { role: 'user', content: contentBlocks }
     } else {
+      log.info('[图片诊断] 无附件，纯文本消息', { sessionId })
       userMsg = content
     }
 
+    // ── 视觉模型：精简调用（不走 QueryEngine，避免携带工具和无关历史）──────────
+    if (hasEffectiveVision && visionProvider) {
+      // system prompt 精简为一句话，不注入工具规范、记忆等无关内容
+      const visionSystemPrompt = ['你是一个图像分析助手，请根据用户提供的图片和问题给出准确、详细的回答。']
+
+      // 只传图片消息，不传历史（视觉模型无需上下文）
+      const visionMessages = [userMsg as Message]
+
+      log.info('视觉模型精简调用', { sessionId, model: visionProvider.model })
+
+      let visionText = ''
+      const VISION_TIMEOUT_MS = 60_000  // 视觉调用超时 60 秒
+      const visionAbort = new AbortController()
+      const visionTimer = setTimeout(() => visionAbort.abort(), VISION_TIMEOUT_MS)
+
+      try {
+        for await (const chunk of visionProvider.stream(
+          visionMessages as never,
+          [],           // 不传工具
+          visionSystemPrompt,
+          4096,
+          visionAbort.signal,
+        )) {
+          if (visionAbort.signal.aborted) break
+          if (chunk.type === 'text_delta' && chunk.delta) {
+            visionText += chunk.delta
+            const clientMsg = toClientMessage({ type: 'text_delta', delta: chunk.delta }, requestId, visionProvider.model)
+            if (clientMsg) this.broadcast(session, clientMsg)
+          } else if (chunk.type === 'usage' && chunk.usage) {
+            const clientMsg = toClientMessage({ type: 'usage', inputTokens: chunk.usage.inputTokens, outputTokens: chunk.usage.outputTokens, costUsd: 0 }, requestId, visionProvider.model)
+            if (clientMsg) this.broadcast(session, clientMsg)
+          }
+        }
+      } catch (err) {
+        const isTimeout = visionAbort.signal.aborted
+        log.error('视觉模型调用失败', { sessionId, error: String(err), isTimeout })
+        this.broadcast(session, { type: 'error', requestId, message: isTimeout ? '视觉模型响应超时（60s）' : `视觉模型调用失败: ${String(err)}` })
+      } finally {
+        clearTimeout(visionTimer)
+      }
+
+      // 将视觉模型的回答写入主会话历史，供后续对话引用
+      if (visionText.trim()) {
+        const history = [...session.engine.getHistory()]
+        // 历史存储策略：统一存 @filename 文本（图片已落盘，无论 Web 还是 IM 路径）
+        // inlineAttachments 路径（@filename 提取）：processedContent 文本已含 @filename
+        // 显式 attachments 路径（IM 落盘后）：content 已被 PlatformManager 改为含 @filename 的文本
+        // 两种情况下 content 都已包含 @filename，直接存字符串即可
+        const userMsgForHistory: Message = {
+          role: 'user',
+          content: inlineAttachments.length > 0 ? processedContent : content,
+          requestId,
+          timestamp: Date.now(),
+          trigger: 'user' as const,
+        }
+        history.push(userMsgForHistory)
+        history.push({ role: 'assistant', content: visionText, requestId, timestamp: Date.now(), trigger: 'user' as const })
+        session.engine.setHistory(history)
+        saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+      }
+
+      this.broadcast(session, toClientMessage({ type: 'done' }, requestId, visionProvider.model) ?? { type: 'done', requestId })
+      // 视觉调用完成，恢复原始 provider 和 session 状态
+      if (originalProvider) session.engine.setProvider(originalProvider)
+      session.info.status = 'ready'
+      session.info.lastActiveAt = Date.now()
+      this.resetIdleTimer(session)
+      return
+    }
     // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
     const allTools = session.engine.getTools()
     const coordinatorPrompt = getCoordinatorSystemPrompt(content, allTools)
@@ -947,20 +1050,16 @@ function isVisionIntent(message: string): boolean {
 }
 
 // ── 从历史消息中提取最近上传的图片文件 ──────────────────────────────────────
-// 扫描历史中最近的用户消息，找到 @filename 引用的图片，读取文件内容
-function extractRecentImagesFromHistory(
+// 扫描历史中最近的用户消息：
+//   1. 优先从 ContentBlock 数组中直接取 image block（IM 图片走这条路）
+//   2. 其次扫描文本中的 @filename 引用（Web 上传走这条路）
+async function extractRecentImagesFromHistory(
   history: readonly import('../core/QueryEngine.js').Message[],
   cwd: string,
-): Array<{ name: string; data: string; mediaType: string }> {
-  const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf']
-  const MEDIA_TYPE_MAP: Record<string, string> = {
-    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.png': 'image/png', '.gif': 'image/gif',
-    '.webp': 'image/webp', '.pdf': 'application/pdf',
-  }
-  const imagePattern = /@([^\s]+\.(jpg|jpeg|png|gif|webp|pdf))/gi
+): Promise<Array<{ name: string; data: string; mediaType: string }>> {
+  const imagePattern = /@([^\s@]+\.(?:jpg|jpeg|png|gif|webp|bmp|tiff?|avif|pdf))/gi
 
-  // 从最新消息往前扫描，找到第一批图片引用（最近一次上传的图片）
+  // 从最新消息往前扫描，找到第一批图片（最近一次上传的那批）
   const result: Array<{ name: string; data: string; mediaType: string }> = []
   const seen = new Set<string>()
 
@@ -970,6 +1069,21 @@ function extractRecentImagesFromHistory(
     const msg = recentHistory[i]
     if (msg.role !== 'user') continue
 
+    // 路径 1：ContentBlock 数组中的 image block（IM 图片直接携带 base64）
+    if (Array.isArray(msg.content)) {
+      const blocks = msg.content as Array<{ type: string; source?: { type: string; mediaType?: string; data?: string } }>
+      for (const b of blocks) {
+        if (b.type === 'image' && b.source?.type === 'base64' && b.source.data && b.source.mediaType) {
+          const key = b.source.data.slice(0, 32)  // 用 base64 前缀去重
+          if (seen.has(key)) continue
+          seen.add(key)
+          result.push({ name: 'image', data: b.source.data, mediaType: b.source.mediaType })
+        }
+      }
+      if (result.length > 0) break
+    }
+
+    // 路径 2：文本中的 @filename 引用（Web 上传）
     const text = typeof msg.content === 'string'
       ? msg.content
       : (msg.content as Array<{ type: string; text?: string }>)
@@ -984,18 +1098,9 @@ function extractRecentImagesFromHistory(
       if (seen.has(filename)) continue
       seen.add(filename)
 
-      const ext = extname(filename).toLowerCase()
-      if (!IMAGE_EXTS.includes(ext)) continue
-
       const absPath = resolve(cwd, filename)
-      if (!existsSync(absPath)) continue
-
-      try {
-        const data = readFileSync(absPath).toString('base64')
-        result.push({ name: filename, data, mediaType: MEDIA_TYPE_MAP[ext] ?? 'image/jpeg' })
-      } catch {
-        // 文件读取失败，跳过
-      }
+      const attachment = await loadMediaFromFile(absPath, filename)
+      if (attachment) result.push(attachment)
     }
 
     // 找到图片就停止（只取最近一次上传的那批）
