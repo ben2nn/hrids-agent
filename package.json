@@ -18,13 +18,15 @@
   "scripts": {
     "dev": "tsx src/main.ts --auto",
     "gateway": "npm run build:web && tsx src/main.ts --gateway",
-    "build": "npm run build --prefix src/web && tsc",
-    "build:web": "npm run build --prefix src/web",
+    "build": "npm run build --prefix web && tsc",
+    "build:web": "npm run build --prefix web",
     "build:core": "tsc",
     "start": "node dist/main.js",
     "prepublishOnly": "npm run build",
     "test": "vitest --run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:coverage": "vitest --run --coverage",
+    "test:ci": "vitest --run --coverage --reporter=default --reporter=junit --outputFile=test-results.xml"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -55,6 +57,7 @@
     "@types/react": "^18.3.1",
     "@types/sharp": "^0.31.1",
     "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^2.1.9",
     "fast-check": "^4.6.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",

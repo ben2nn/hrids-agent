@@ -40,7 +40,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: resolve(__dirname, '../../dist/web'),
+    outDir: resolve(__dirname, '../dist/web'),
     emptyOutDir: true,
     sourcemap: false,
     // 生产构建时移除所有 console.* 调用，开发环境保留 debug 日志
