@@ -8,7 +8,7 @@ import {
   parseDsmlToolCalls,
   stripDsmlBlocks,
   hasDsmlMarker,
-} from './DsmlParser.js'
+} from '../../src/core/DsmlParser.js'
 
 describe('DsmlParser', () => {
   describe('hasDsmlMarker', () => {

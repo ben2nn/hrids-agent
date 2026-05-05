@@ -61,9 +61,9 @@ function makeToolProvider(toolName: string, toolInput: unknown, replyText: strin
 function makeConfig(provider: LLMProvider, tools: ToolDef<never>[] = []): QueryEngineConfig {
   return {
     provider,
-    systemPrompt: '你是一个测试助手',
+    systemPrompt: ['你是一个测试助手'],
     tools,
-    permissions: new PermissionManager('auto', async () => true),
+    permissions: new PermissionManager('craft', async () => true),
     maxTokens: 1024,
     maxTurns: 5,
   }
@@ -128,23 +128,33 @@ describe('QueryEngine', () => {
 
   describe('并发保护', () => {
     it('运行中再次 send 返回错误', async () => {
-      // 创建一个永不结束的 provider
+      // 创建一个可控的 provider：用 deferred promise 控制何时结束
+      let finishStream!: () => void
+      const streamFinished = new Promise<void>(resolve => { finishStream = resolve })
+
       const provider = {
         model: 'mock',
         async *stream() {
-          await new Promise(() => {}) // 永远挂起
+          yield { type: 'text_delta', delta: 'start' }
+          await streamFinished
+          yield { type: 'text_delta', delta: 'end' }
         },
       } as unknown as LLMProvider
 
       const engine = new QueryEngine(makeConfig(provider))
-      // 启动第一个任务（不 await）
       const gen1 = engine.send('task1')
-      gen1.next() // 触发执行
 
-      // 立即发第二个
+      // 触发第一个 send 进入 running 状态（yield 'start' 后暂停在 await streamFinished）
+      await gen1.next()
+      expect(engine.isRunning()).toBe(true)
+
+      // 立即发第二个，应返回错误
       const events = await collectEvents(engine.send('task2'))
       const errorEvent = events.find(e => e.type === 'error')
       expect(errorEvent).toBeDefined()
+
+      // 清理：让第一个生成器正常结束
+      finishStream()
     })
   })
 
@@ -153,7 +163,7 @@ describe('QueryEngine', () => {
       // provider 在 abort 信号触发后立即结束
       const provider = {
         model: 'mock',
-        async *stream(_hist: unknown, _tools: unknown, _sys: unknown, _max: unknown) {
+        async *stream(_hist: unknown, _tools: unknown, _sys: unknown, _max: unknown, _signal: unknown) {
           // 每 10ms 检查一次，模拟可中断的流式请求
           for (let i = 0; i < 100; i++) {
             await new Promise(r => setTimeout(r, 10))
@@ -226,7 +236,7 @@ describe('QueryEngine', () => {
       }
 
       const provider = makeToolProvider('write_tool', {}, '完成')
-      const permissions = new PermissionManager('readonly', async () => false)
+      const permissions = new PermissionManager('plan', async () => false)
       const engine = new QueryEngine({
         ...makeConfig(provider, [writeTool as never]),
         permissions,

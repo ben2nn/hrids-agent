@@ -8,11 +8,11 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import * as fc from 'fast-check'
-import { mkdirSync, rmSync, existsSync, writeFileSync, renameSync } from 'fs'
+import { mkdirSync, rmSync, existsSync, writeFileSync, renameSync, readFileSync } from 'fs'
 import { resolve } from 'path'
 import { tmpdir } from 'os'
-import { assignIds, loadTodos } from './TodoTool.js'
-import type { Todo } from './TodoTool.js'
+import { assignIds, loadTodos } from '../../src/tools/TodoTool.js'
+import type { Todo } from '../../src/tools/TodoTool.js'
 
 // ─── 测试辅助：临时目录管理 ───────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ describe('loadTodos() / saveTodos() 文件读写', () => {
     writeFileSync(todosFile, JSON.stringify(todos, null, 2), 'utf-8')
 
     // 验证文件内容可被正确解析
-    const parsed = JSON.parse(require('fs').readFileSync(todosFile, 'utf-8')) as Todo[]
+    const parsed = JSON.parse(readFileSync(todosFile, 'utf-8')) as Todo[]
     expect(parsed).toHaveLength(1)
     expect(parsed[0]!.id).toBe('1')
     expect(parsed[0]!.content).toBe('测试任务')
@@ -226,7 +226,6 @@ describe('loadTodos() / saveTodos() 文件读写', () => {
 
   it('saveTodos() 写入后文件内容正确（通过 readFileSync 验证）', () => {
     // 直接测试原子写入逻辑（不依赖 getGlobalCwd）
-    const { writeFileSync: wfs, renameSync: rs, mkdirSync: mds } = require('fs')
     const todos: Todo[] = [
       { id: '1', content: '任务 1', status: 'pending', priority: 'high', createdAt: 123 },
       { id: '2', content: '任务 2', status: 'in_progress', priority: 'medium', createdAt: 456 },
@@ -234,15 +233,15 @@ describe('loadTodos() / saveTodos() 文件读写', () => {
 
     // 模拟 saveTodos 的原子写入逻辑
     const tmpPath = todosFile + '.tmp'
-    mds(testDir, { recursive: true })
-    wfs(tmpPath, JSON.stringify(todos, null, 2), 'utf-8')
-    rs(tmpPath, todosFile)
+    mkdirSync(testDir, { recursive: true })
+    writeFileSync(tmpPath, JSON.stringify(todos, null, 2), 'utf-8')
+    renameSync(tmpPath, todosFile)
 
     // 验证目标文件存在且内容正确
     expect(existsSync(todosFile)).toBe(true)
     expect(existsSync(tmpPath)).toBe(false)  // 临时文件已被替换
 
-    const parsed = JSON.parse(require('fs').readFileSync(todosFile, 'utf-8')) as Todo[]
+    const parsed = JSON.parse(readFileSync(todosFile, 'utf-8')) as Todo[]
     expect(parsed).toHaveLength(2)
     expect(parsed[0]!.id).toBe('1')
     expect(parsed[1]!.id).toBe('2')
@@ -272,7 +271,7 @@ describe('loadTodos() / saveTodos() 文件读写', () => {
     // 验证容错逻辑：JSON.parse 失败时返回空数组
     let result: Todo[] = []
     try {
-      result = JSON.parse(require('fs').readFileSync(todosFile, 'utf-8')) as Todo[]
+      result = JSON.parse(readFileSync(todosFile, 'utf-8')) as Todo[]
     } catch {
       result = []
     }
@@ -282,8 +281,8 @@ describe('loadTodos() / saveTodos() 文件读写', () => {
 
 // ─── 任务 8.1：todo_read 单元测试 ─────────────────────────────────────────────
 
-import { TodoReadTool } from './TodoTool.js'
-import { setGlobalCwd } from '../core/cwd.js'
+import { TodoReadTool } from '../../src/tools/TodoTool.js'
+import { setGlobalCwd } from '../../src/core/cwd.js'
 
 describe('TodoReadTool (todo_read)', () => {
   // 辅助：构建 Todo 对象
