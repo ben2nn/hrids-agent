@@ -11,8 +11,8 @@ import * as fc from 'fast-check'
 import { mkdirSync, rmSync, existsSync, writeFileSync, renameSync } from 'fs'
 import { resolve } from 'path'
 import { tmpdir } from 'os'
-import { assignIds, loadTodos } from './TodoTool.js'
-import type { Todo } from './TodoTool.js'
+import { assignIds, loadTodos } from '../../src/tools/TodoTool.js'
+import type { Todo } from '../../src/tools/TodoTool.js'
 
 // ─── 测试辅助：临时目录管理 ───────────────────────────────────────────────────
 
