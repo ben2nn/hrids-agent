@@ -82,7 +82,7 @@ export class CommandRegistry {
 }
 
 // 创建内置命令集
-export function createBuiltinCommands(apiKey: string, model: string): SlashCommand[] {
+export function createBuiltinCommands(_apiKey: string, _model: string): SlashCommand[] {
   return [
     {
       name: 'clear',

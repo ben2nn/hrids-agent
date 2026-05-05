@@ -28,7 +28,7 @@ export async function runServerMode(
 ): Promise<void> {
   process.env.AGENT_SERVER_MODE = '1'
 
-  let { sessionId } = opts
+  const { sessionId } = opts
   const { initialCwd, model, permMode, memoryCondense, skillDistill, buildPromptForMessage } = opts
 
   // 注册压缩前归档回调

@@ -1,9 +1,7 @@
 // 交互模式 —— Ink React UI
 import React from 'react'
 import { render } from 'ink'
-import { saveSession, generateSessionId, loadSession, listSessions, listArchives, archiveSession } from '../core/SessionStore.js'
-import { getSessionWorkDir } from '../core/ContextBuilder.js'
-import { setGlobalCwd } from '../core/cwd.js'
+import { saveSession, archiveSession } from '../core/SessionStore.js'
 import { CommandRegistry, createBuiltinCommands } from '../core/CommandRegistry.js'
 import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'

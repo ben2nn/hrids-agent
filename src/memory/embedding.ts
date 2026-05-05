@@ -354,17 +354,6 @@ function resolveBaseUrl(platform: string): string | undefined {
   }
 }
 
-function parseKV(str: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  for (const token of str.split(',')) {
-    const t = token.trim()
-    if (!t || !t.includes(':')) continue
-    const idx = t.indexOf(':')
-    result[t.slice(0, idx).trim()] = t.slice(idx + 1).trim()
-  }
-  return result
-}
-
 export function getEmbeddingProvider(): AnyEmbeddingProvider {
   if (!_provider) {
     _provider = createEmbeddingProviderFromEnv()

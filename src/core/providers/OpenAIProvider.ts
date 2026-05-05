@@ -1,6 +1,5 @@
 // OpenAI 兼容提供商 —— 支持 OpenAI、DeepSeek、Groq、Ollama、本地模型等
 // 任何实现了 OpenAI Chat Completions API 的服务都可以使用
-import { z } from 'zod'
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
 import { withRetry } from '../retry.js'
@@ -212,9 +211,6 @@ export class OpenAIProvider implements LLMProvider {
       messages: debugMessages,
     })
 
-    const keyPreview = this.config.apiKey
-      ? `${this.config.apiKey.slice(0, 8)}...（共${this.config.apiKey.length}位）`
-      : '（空）'
     // 仅在非 server 模式下输出调试信息，避免污染 JSON 通信通道
     if (!process.env.AGENT_SERVER_MODE) {
       //process.stderr.write(`[DEBUG] provider=${this.name} model=${this.model}\n`)

@@ -54,7 +54,7 @@ export async function runMemoryPipeline(
   const store = getMemoryStore()
 
   // ② LLM 批量提炼：一次调用压缩所有需要提炼的条目
-  let condensedContents: (string | null)[] = extracted.map(() => null)
+  const condensedContents: (string | null)[] = extracted.map(() => null)
   if (condense && provider) {
     const needCondense = extracted
       .map((mem, i) => ({ i, content: mem.content }))

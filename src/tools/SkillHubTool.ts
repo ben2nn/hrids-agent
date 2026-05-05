@@ -1205,7 +1205,7 @@ export const SkillHubUpgradeTool: ToolDef<typeof upgradeSchema> = {
           continue
         }
         const manifest = await manifestRes.json() as Record<string, unknown>
-        const { version: latestVersion, packageUrl, sha256: _sha256 } = extractUpdateManifestInfo(manifest)
+        const { version: latestVersion, packageUrl } = extractUpdateManifestInfo(manifest)
 
         if (!latestVersion) {
           details.push(`[${slug}] 失败：manifest 缺少 version — ${updateUrl}`)

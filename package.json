@@ -26,7 +26,8 @@
     "test": "vitest --run",
     "test:watch": "vitest",
     "test:coverage": "vitest --run --coverage",
-    "test:ci": "vitest --run --coverage --reporter=default --reporter=junit --outputFile=test-results.xml"
+    "test:ci": "vitest --run --coverage --reporter=default --reporter=junit --outputFile=test-results.xml",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -60,6 +61,10 @@
     "@vitest/coverage-v8": "^2.1.9",
     "fast-check": "^4.6.0",
     "tsx": "^4.19.0",
+    "eslint": "^9.0.0",
+    "@eslint/js": "^9.0.0",
+    "globals": "^16.0.0",
+    "typescript-eslint": "^8.0.0",
     "typescript": "^5.7.0",
     "vitest": "^2.0.0"
   }

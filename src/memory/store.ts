@@ -102,8 +102,8 @@ export class MemoryStore {
     const id = `mem_${randomUUID().replace(/-/g, '').slice(0, 16)}`
     const createdAt = new Date().toISOString()
 
-    // 写入 memories 表，获取自增 rowid
-    const result = this.db.prepare(`
+    // 写入 memories 表
+    this.db.prepare(`
       INSERT INTO memories (id, content, type, wing, room, tags, importance, created_at, source_session)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
@@ -115,9 +115,6 @@ export class MemoryStore {
       mem.sourceSession ?? null,
     )
 
-    const rowid = Number(result.lastInsertRowid)
-
-    // 异步生成 embedding 并写入向量后端
     void this._embedAndInsertVec(id, mem.content)
     return { ...mem, id, createdAt }
   }

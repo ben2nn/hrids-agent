@@ -1215,7 +1215,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const { registerAllBundledSkills } = await import('../skills/bundled/index.js')
       const { existsSync, readFileSync } = await import('fs')
       const { join } = await import('path')
-      const { homedir } = await import('os')
+      await import('os')
 
       // 确保内置 skills 已注册
       if (getBundledSkills().length === 0) {

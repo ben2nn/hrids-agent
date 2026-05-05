@@ -12,7 +12,7 @@ import {
   type CustomProviderConfig,
   type ProviderDef,
 } from './registry.js'
-import type { ModelFallbackGroup, ModelTypeConfig } from '../Config.js'
+import type { ModelTypeConfig } from '../Config.js'
 
 export type { LLMProvider, ModelType, ProviderConfig, StreamChunk, ChatMessage, EmbeddingProvider, SpeechProvider } from './types.js'
 export { AnthropicProvider } from './AnthropicProvider.js'

@@ -4,7 +4,7 @@ import { setupSystemProxy } from './core/proxySetup.js'
 setupSystemProxy()
 
 import { Command } from 'commander'
-import { loadConfig, saveConfig } from './core/Config.js'
+import { loadConfig } from './core/Config.js'
 import { QueryEngine } from './core/QueryEngine.js'
 import { PermissionManager } from './core/PermissionManager.js'
 import { listSessions, pruneOldSessions } from './core/SessionStore.js'
@@ -51,7 +51,6 @@ function validateStartupConfig(config: import('./core/Config.js').AgentConfig, c
 // 每次用户发消息时，根据消息内容动态注入对应扩展块
 // 注意：此处不含 MCP 工具（MCP 在 main() 内部加载），仅含内置工具
 // 实际运行时每条消息前会调用 buildPromptForMessage 重新生成含完整工具列表的 prompt
-const BASE_SYSTEM_PROMPT = getCoordinatorSystemPrompt(undefined, ALL_TOOLS)
 
 async function main() {
   const program = new Command()

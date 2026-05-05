@@ -128,7 +128,7 @@ function convertToTelegramMarkdown(text: string): string {
     let result = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
       const idx = codeBlocks.length
       codeBlocks.push(`\`\`\`${lang}\n${code}\`\`\``)
-      return `\x00CODE${idx}\x00`
+      return `CODE${idx}`
     })
 
     // 提取行内代码
@@ -136,7 +136,7 @@ function convertToTelegramMarkdown(text: string): string {
     result = result.replace(/`([^`\n]+)`/g, (_m, code) => {
       const idx = inlineCodes.length
       inlineCodes.push(`\`${code}\``)
-      return `\x00INLINE${idx}\x00`
+      return `INLINE${idx}`
     })
 
     // 转义剩余文本中的特殊字符
@@ -152,8 +152,8 @@ function convertToTelegramMarkdown(text: string): string {
     result = result.replace(/\\\[([^\]]+)\\\]\\\(([^)]+)\\\)/g, '[$1]($2)')
 
     // 还原代码块和行内代码
-    result = result.replace(/\x00CODE(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)])
-    result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCodes[parseInt(idx)])
+    result = result.replace(/CODE(\d+)/g, (_m, idx) => codeBlocks[parseInt(idx)])
+    result = result.replace(/INLINE(\d+)/g, (_m, idx) => inlineCodes[parseInt(idx)])
 
     return result
   } catch {
@@ -328,7 +328,7 @@ export class TelegramAdapter extends BasePlatformAdapter {
         disable_web_page_preview: true,
       })
       return { success: true, messageId }
-    } catch (err) {
+    } catch {
       // 降级为纯文本编辑（传入原始文本）
       try {
         await this.bot!.editMessageText(text, {

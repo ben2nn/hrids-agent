@@ -105,7 +105,7 @@ export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof
 
       let result = ''
       let hasError = false
-      let worktreeDir: string | null = input.isolated ? subCwd : null
+      const worktreeDir: string | null = input.isolated ? subCwd : null
 
       try {
         // runWithCwd 创建独立的 AsyncLocalStorage 上下文，不影响父调用链的 cwd

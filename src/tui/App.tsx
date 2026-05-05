@@ -1,7 +1,7 @@
 ﻿import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { Box, Text, useInput, useApp } from 'ink'
 import TextInput from 'ink-text-input'
-import type { QueryEngine, StreamEvent } from '../core/QueryEngine.js'
+import type { QueryEngine } from '../core/QueryEngine.js'
 import type { CommandRegistry } from '../core/CommandRegistry.js'
 import type { CommandContext } from '../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js'

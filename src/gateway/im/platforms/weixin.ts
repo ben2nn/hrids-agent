@@ -648,14 +648,6 @@ function guessIsGroup(msg: Record<string, unknown>, accountId: string): [boolean
   return [false, String(msg.from_user_id ?? '')]
 }
 
-function extractText(itemList: unknown[]): string {
-  for (const item of itemList as Record<string, unknown>[]) {
-    if (item.type === ITEM_TEXT) {
-      return String((item.text_item as Record<string, unknown> | undefined)?.text ?? '')
-    }
-  }
-  return ''
-}
 
 // ── 适配器主体 ────────────────────────────────────────────────────────────────
 export class WeixinAdapter extends BasePlatformAdapter {
