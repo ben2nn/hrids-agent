@@ -10,3 +10,6 @@ node_modules/
 .kiro/
 tsconfig.json
 vitest.config.ts
+bin/
+.hrids/
+.claude/
