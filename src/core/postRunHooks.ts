@@ -1,7 +1,7 @@
 // 会话结束后的后台钩子：记忆提炼 + Skill 自动沉淀
 // 供 CLI 模式（main.ts）和 Gateway 模式（SessionManager.ts）共用
 
-import { mkdirSync, writeFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, renameSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { runMemoryPipeline } from '../memory/index.js'
@@ -26,6 +26,7 @@ export async function autoExtractMemories(
   try {
     const history = engine.getHistory()
     if (condense) log.info('记忆总结：开始 LLM 提炼', { sessionId, caller: 'memory-pipeline' })
+    // Gateway 模式下 runWithSession 上下文已存在，pipeline 内部通过 getCurrentSessionId 获取会话级 store
     await runMemoryPipeline(history as never, {
       condense,
       provider: condense ? provider : undefined,
@@ -42,11 +43,14 @@ export async function autoExtractMemories(
 /**
  * 会话结束后自动提炼 skill（后台静默执行，不阻塞主流程）
  * 启发式判断：工具调用次数 >= 5 且会话有实质内容，才尝试提炼
+ * 需要显式传入 enabled=true 才会执行（避免隐性 LLM 费用）
  */
 export async function autoDistillSkill(
   engine: QueryEngine,
   provider: LLMProvider,
+  enabled = false,
 ): Promise<void> {
+  if (!enabled) return
   try {
     const history = engine.getHistory()
 
@@ -112,7 +116,7 @@ ${condensed}`
     for await (const chunk of provider.stream(
       [{ role: 'user', content: distillPrompt }],
       [],
-      '你是一个 skill 提炼助手，只输出 null 或 JSON，不输出任何其他内容。',
+      ['你是一个 skill 提炼助手，只输出 null 或 JSON，不输出任何其他内容。'],
       2000,
     )) {
       if (chunk.type === 'text_delta' && chunk.delta) raw += chunk.delta
@@ -148,7 +152,10 @@ ${condensed}`
     const content = frontmatter + '\n\n' + parsed.prompt.trim() + '\n'
 
     mkdirSync(skillDir, { recursive: true })
-    writeFileSync(skillMdPath, content, 'utf-8')
+    // 原子写入：先写 .tmp 再 rename，防止并发会话同时提炼同名 skill 时文件损坏
+    const tmpPath = skillMdPath + '.tmp'
+    writeFileSync(tmpPath, content, 'utf-8')
+    renameSync(tmpPath, skillMdPath)
 
     log.info(`自动沉淀 skill: ${parsed.name}（${isUpdate ? '更新' : '新建'}）`, { path: skillMdPath })
   } catch {

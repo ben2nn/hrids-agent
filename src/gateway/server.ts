@@ -1,29 +1,231 @@
-// Gateway HTTP + WebSocket 服务器
+﻿// Gateway HTTP + WebSocket 服务器
 import http from 'http'
 import express from 'express'
 import { WebSocketServer, WebSocket } from 'ws'
+import { execSync } from 'child_process'
+import { randomBytes } from 'crypto'
+import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta } from '../core/SessionStore.js'
+import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
 import type { CreateSessionRequest } from './types.js'
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, renameSync } from 'fs'
 import { resolve, join, basename, extname } from 'path'
 import { homedir } from 'os'
 import { loadConfig, saveConfig } from '../core/Config.js'
 import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
+import { PlatformManager } from './im/PlatformManager.js'
+import type { IMGatewayConfig, IMPlatform, PlatformConfig } from './im/types.js'
 
 const log = logger.child({ component: 'gateway-server' })
+
+/** 原子写入 JSON 文件：先写 .tmp 再 rename，防止并发写入时文件损坏 */
+function atomicWriteJson(filePath: string, data: unknown): void {
+  const tmp = filePath + '.tmp'
+  writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8')
+  renameSync(tmp, filePath)
+}
+
+// ── 消息格式转换 ──────────────────────────────────────────────────────────────
+
+export interface DisplayMessage {
+  id: string
+  type: string
+  content?: string
+  toolId?: string
+  toolName?: string
+  toolInput?: unknown
+  toolStatus?: 'success' | 'error'
+  toolResult?: unknown
+  images?: string[]
+  isCron?: boolean
+  cronDescription?: string
+  requestId?: string
+  timestamp: number
+}
+
+const IMAGE_PATTERN = /@([^\s@]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
+
+/**
+ * 将原始 Message[] 转换为前端 DisplayMessage[]。
+ * 两处端点（/messages 和 /history-segments/:filename/messages）共用此函数。
+ *
+ * @param rawMessages 原始消息列表
+ * @param idPrefix    消息 ID 前缀，用于区分来源（'' 或 'arc-'）
+ */
+function formatMessagesForDisplay(
+  rawMessages: readonly import('../core/QueryEngine.js').Message[],
+  idPrefix = '',
+): DisplayMessage[] {
+  // 第一遍：建立 toolId → result 映射
+  type ToolResultEntry = { content: unknown; isError: boolean }
+  const toolResults = new Map<string, ToolResultEntry>()
+  for (const msg of rawMessages) {
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
+    for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+      if (block.type === 'tool_result' && block.tool_use_id) {
+        toolResults.set(block.tool_use_id, {
+          content: block.content,
+          isError: block.is_error === true,
+        })
+      }
+    }
+  }
+
+  // 第二遍：构建 DisplayMessage 列表
+  const displayMessages: DisplayMessage[] = []
+  let idx = 0
+  const baseTs = Date.now()
+
+  for (const msg of rawMessages) {
+    // 优先使用消息自带的 timestamp，无则用序号估算（兼容旧历史数据）
+    const timestamp = msg.timestamp ?? (baseTs - (rawMessages.length - idx) * 1000)
+    idx++
+
+    if (msg.role === 'user') {
+      if (typeof msg.content !== 'string' && !Array.isArray(msg.content)) continue
+
+      // ContentBlock 数组（多模态消息：含图片/PDF 的消息）
+      if (Array.isArray(msg.content)) {
+        const blocks = msg.content as Array<{ type: string; text?: string; source?: { type: string; mediaType?: string; data?: string; url?: string } }>
+
+        // 纯 tool_result 消息（工具调用结果回传给 LLM 的内部消息）：不显示为用户气泡
+        const hasOnlyToolResults = blocks.length > 0 && blocks.every(b => b.type === 'tool_result')
+        if (hasOnlyToolResults) continue
+
+        // 系统内部消息过滤
+        const rawTextContent = blocks.filter(b => b.type === 'text').map(b => b.text ?? '').join('')
+        if (rawTextContent.startsWith('[系统') || rawTextContent.startsWith('[上下文压缩]')) continue
+
+        // 提取内嵌图片的 data URL，供前端 <img> 直接显示
+        const inlineImages: string[] = []
+        for (const b of blocks) {
+          if (b.type === 'image' && b.source) {
+            if (b.source.type === 'base64' && b.source.data && b.source.mediaType) {
+              inlineImages.push(`data:${b.source.mediaType};base64,${b.source.data}`)
+            } else if (b.source.type === 'url' && b.source.url) {
+              inlineImages.push(b.source.url)
+            }
+          }
+        }
+
+        // 从文本内容中提取 @文件名 引用（新格式：图片 block 被还原为 @文件名 文本）
+        IMAGE_PATTERN.lastIndex = 0
+        let imgMatch: RegExpExecArray | null
+        while ((imgMatch = IMAGE_PATTERN.exec(rawTextContent)) !== null) {
+          inlineImages.push(imgMatch[1])
+        }
+
+        // 清理 textContent：
+        // 1. 去掉 @文件名.ext 引用（已提取到 images，不需要显示在气泡文本里）
+        // 2. 去掉旧格式的 [图片] 占位符（无法还原文件名，但不应显示在气泡里）
+        IMAGE_PATTERN.lastIndex = 0
+        const textContent = rawTextContent
+          .replace(IMAGE_PATTERN, '')
+          .replace(/\[图片\]/g, '')
+          .replace(/\s{2,}/g, ' ')
+          .trim()
+
+        displayMessages.push({
+          id: `${idPrefix}u-${idx}`,
+          type: 'user',
+          content: textContent,
+          timestamp,
+          ...(inlineImages.length > 0 ? { images: inlineImages } : {}),
+        })
+        continue
+      }
+
+      // 纯文本消息（原有逻辑）
+      if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
+
+      const images: string[] = []
+      IMAGE_PATTERN.lastIndex = 0
+      let match: RegExpExecArray | null
+      while ((match = IMAGE_PATTERN.exec(msg.content)) !== null) {
+        images.push(match[1])
+      }
+
+      // 去掉 @文件名 引用，不在气泡文本里显示
+      IMAGE_PATTERN.lastIndex = 0
+      const cleanContent = msg.content.replace(IMAGE_PATTERN, '').replace(/\s{2,}/g, ' ').trim()
+
+      displayMessages.push({
+        id: `${idPrefix}u-${idx}`,
+        type: 'user',
+        content: cleanContent,
+        timestamp,
+        ...(images.length > 0 ? { images } : {}),
+      })
+    } else if (msg.role === 'assistant') {
+      const isCron = msg.trigger === 'cron'
+      const requestId = msg.requestId
+      const cronDescription = msg.cronDescription
+
+      if (typeof msg.content === 'string') {
+        if (msg.content.trim()) {
+          displayMessages.push({
+            id: `${idPrefix}a-${idx}`,
+            type: 'assistant',
+            content: msg.content,
+            timestamp,
+            ...(isCron ? { isCron: true } : {}),
+            ...(cronDescription ? { cronDescription } : {}),
+            ...(requestId ? { requestId } : {}),
+          })
+        }
+      } else if (Array.isArray(msg.content)) {
+        const textParts = (msg.content as Array<{ type: string; text?: string }>)
+          .filter(b => b.type === 'text')
+          .map(b => b.text ?? '')
+          .join('')
+        if (textParts.trim()) {
+          displayMessages.push({
+            id: `${idPrefix}a-${idx}`,
+            type: 'assistant',
+            content: textParts,
+            timestamp,
+            ...(isCron ? { isCron: true } : {}),
+            ...(cronDescription ? { cronDescription } : {}),
+            ...(requestId ? { requestId } : {}),
+          })
+        }
+        for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
+          if (block.type === 'tool_use' && block.id && block.name) {
+            const resultEntry = toolResults.get(block.id)
+            displayMessages.push({
+              id: `${idPrefix}t-${block.id}`,
+              type: 'tool',
+              toolId: block.id,
+              toolName: block.name,
+              toolInput: block.input,
+              toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
+              toolResult: resultEntry?.content,
+              timestamp: timestamp + 1,
+              ...(requestId ? { requestId } : {}),
+            })
+          }
+        }
+      }
+    }
+  }
+
+  return displayMessages
+}
 
 export interface GatewayConfig {
   port?: number
   host?: string
-  authToken?: string       // 若设置，所有请求需携带 Authorization: Bearer <token>
+  authToken?: string       // Token 模式：若设置，所有请求需携带 Authorization: Bearer <token>
   idleTimeoutMs?: number
   maxSessions?: number
-  // 每个 IP 每分钟最多创建的会话数（默认 10）
   rateLimitPerMinute?: number
-  corsOrigin?: string      // CORS 允许的来源（默认 *）
+  corsOrigin?: string
+  // 登录模式：配置用户列表后启用，登录成功颁发 JWT
+  users?: Array<{ username: string; password: string }>
+  // JWT 签名密钥（登录模式自动生成，也可手动指定）
+  jwtSecret?: string
 }
 
 // 简单的内存速率限制（令牌桶，按 IP 计数）
@@ -35,6 +237,12 @@ class RateLimiter {
     const now = Date.now()
     const entry = this.counts.get(ip)
     if (!entry || now > entry.resetAt) {
+      // 顺手清理已过期的条目，防止长期运行内存泄漏
+      if (this.counts.size > 10_000) {
+        for (const [k, v] of this.counts) {
+          if (now > v.resetAt) this.counts.delete(k)
+        }
+      }
       this.counts.set(ip, { count: 1, resetAt: now + this.windowMs })
       return true
     }
@@ -49,16 +257,53 @@ export function createGateway(config: GatewayConfig = {}) {
   const host = config.host ?? '127.0.0.1'
   const startTime = Date.now()
 
+  // ── 鉴权模式判断 ──────────────────────────────────────────────
+  // 登录模式：配置了 users 列表
+  // Token 模式：配置了 authToken（静态 token）
+  // 无鉴权：两者都未配置
+  const hasUsers = (config.users ?? []).length > 0
+  const hasStaticToken = !!config.authToken
+
+  // 登录模式下的 JWT 密钥（启动时生成随机密钥，或使用配置中的密钥）
+  const jwtSecret = config.jwtSecret
+    ?? (hasUsers ? randomBytes(32).toString('hex') : '')
+
+  /** 验证 Bearer token（自动去除 "Bearer " 前缀） */
+  function verifyToken(authHeader: string): boolean {
+    const bearer = authHeader.replace(/^Bearer\s+/i, '')
+    return verifyRawToken(bearer)
+  }
+
+  /** 验证裸 token（不含 "Bearer " 前缀） */
+  function verifyRawToken(token: string): boolean {
+    if (!token) return false
+    if (hasStaticToken) {
+      return token === config.authToken
+    }
+    if (hasUsers) {
+      try {
+        jwt.verify(token, jwtSecret)
+        return true
+      } catch {
+        return false
+      }
+    }
+    return true // 无鉴权模式
+  }
+
   const manager = new SessionManager({
     idleTimeoutMs: config.idleTimeoutMs,
     maxSessions: config.maxSessions,
     authToken: config.authToken,
   })
 
+  // IM 平台管理器（多 IM 平台接入）
+  const platformManager = new PlatformManager(manager)
+
   const rateLimiter = new RateLimiter(config.rateLimitPerMinute ?? 10)
 
   const app = express()
-  app.use(express.json())
+  app.use(express.json({ limit: '50mb' }))
 
   // ── CORS 中间件（在所有 API 路由之前）──────────────────────
   const corsOrigin = config.corsOrigin ?? '*'
@@ -73,11 +318,95 @@ export function createGateway(config: GatewayConfig = {}) {
     next()
   })
 
-  // ── 鉴权中间件 ──────────────────────────────────────────────
+  // ── 登录接口（在鉴权中间件之前，无需 token）──────────────────
+  app.post('/api/login', (req, res) => {
+    const { username, password } = req.body as { username?: string; password?: string }
+    const users = config.users ?? []
+
+    if (users.length === 0) {
+      // 无鉴权模式：直接返回静态 token（可能为空）
+      res.json({ token: config.authToken ?? '', mode: 'none' })
+      return
+    }
+
+    const matched = users.find(u => u.username === username && u.password === password)
+    if (!matched) {
+      log.warn('登录失败', { username, ip: req.ip })
+      res.status(401).json({ error: '用户名或密码错误' })
+      return
+    }
+
+    log.info('登录成功', { username, ip: req.ip })
+
+    if (hasStaticToken) {
+      // Token 模式：验证用户身份后返回静态 token
+      res.json({ token: config.authToken!, mode: 'token' })
+    } else {
+      // 登录模式：签发 JWT（7 天有效期）
+      const token = jwt.sign(
+        { username, iat: Math.floor(Date.now() / 1000) },
+        jwtSecret,
+        { expiresIn: '7d' }
+      )
+      res.json({ token, mode: 'jwt' })
+    }
+  })
+
+  // 健康检查（在鉴权中间件之前，无需 token）
+  app.get('/health', (_req, res) => {
+    const sessions = manager.listSessions()
+    const busySessions = sessions.filter(s => s.status === 'busy').length
+    const memUsage = process.memoryUsage()
+    // 鉴权模式：none | token | login
+    const authMode = hasUsers ? (hasStaticToken ? 'token' : 'login') : 'none'
+    res.json({
+      status: 'ok',
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      authMode,
+      sessions: {
+        total: sessions.length,
+        busy: busySessions,
+        idle: sessions.length - busySessions,
+      },
+      memory: {
+        heapUsedMb: Math.round(memUsage.heapUsed / 1024 / 1024),
+        heapTotalMb: Math.round(memUsage.heapTotal / 1024 / 1024),
+        rssMb: Math.round(memUsage.rss / 1024 / 1024),
+      },
+    })
+  })
+
+  // ── 静态文件托管（鉴权之前，前端资源无需 token）────────────────
+  const webDistPath = join(resolve('.'), 'dist', 'web')
+  if (existsSync(webDistPath)) {
+    log.info('托管前端静态文件', { path: webDistPath })
+    app.use(express.static(webDistPath))
+    // SPA fallback：非 API 的 GET 请求一律返回 index.html
+    app.get('/{*splat}', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/sessions') ||
+          req.path.startsWith('/todos') || req.path.startsWith('/crons') ||
+          req.path.startsWith('/skills') || req.path.startsWith('/mcp') ||
+          req.path.startsWith('/config') || req.path.startsWith('/im')) {
+        return next()
+      }
+      res.sendFile(join(webDistPath, 'index.html'))
+    })
+  }
+
+  // ── 鉴权中间件（仅保护 API，静态文件已在上方放行）────────────
   app.use((req, res, next) => {
-    if (!config.authToken) return next()
+    // 无鉴权模式：直接放行
+    if (!hasUsers && !hasStaticToken) return next()
+    // 非 API 路径（前端静态资源）：直接放行
+    const isApiPath = req.path.startsWith('/api/') || req.path.startsWith('/sessions') ||
+      req.path.startsWith('/todos') || req.path.startsWith('/crons') ||
+      req.path.startsWith('/skills') || req.path.startsWith('/mcp') ||
+      req.path.startsWith('/config') || req.path.startsWith('/im')
+    if (!isApiPath) return next()
+    // 优先从 Authorization header 取 token，其次从 query 参数取（供 <img src> 等无法设置 header 的场景使用）
     const auth = req.headers.authorization ?? ''
-    if (auth === `Bearer ${config.authToken}`) return next()
+    const queryToken = typeof req.query.token === 'string' ? req.query.token : ''
+    if (verifyToken(auth) || (queryToken && verifyRawToken(queryToken))) return next()
     log.warn('未授权请求', { path: req.path, ip: req.ip })
     res.status(401).json({ error: '未授权' })
   })
@@ -107,6 +436,7 @@ export function createGateway(config: GatewayConfig = {}) {
           model: s.model ?? '',
           cwd: s.workDir ?? '',
           title: s.title ?? '',
+          lastUserMessage: s.lastUserMessage,
         }))
 
       res.json([...activeSessions, ...history])
@@ -144,29 +474,13 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // 销毁会话
   app.delete('/sessions/:id', async (req, res) => {
-    await manager.destroySession(req.params.id)
+    const id = req.params.id
+    // 在 destroySession 之前先取内存中的 cwd（destroySession 会把 session 从 Map 删掉）
+    const inMemoryCwd = manager.getSession(id)?.info.cwd
+    await manager.destroySession(id)
+    // 同时删除磁盘上的会话数据和工作目录，避免刷新后重新出现
+    deleteSessionFromDisk(id, inMemoryCwd)
     res.json({ ok: true })
-  })
-
-  // 健康检查（增强版：包含运行时指标）
-  app.get('/health', (_req, res) => {
-    const sessions = manager.listSessions()
-    const busySessions = sessions.filter(s => s.status === 'busy').length
-    const memUsage = process.memoryUsage()
-    res.json({
-      status: 'ok',
-      uptime: Math.floor((Date.now() - startTime) / 1000),
-      sessions: {
-        total: sessions.length,
-        busy: busySessions,
-        idle: sessions.length - busySessions,
-      },
-      memory: {
-        heapUsedMb: Math.round(memUsage.heapUsed / 1024 / 1024),
-        heapTotalMb: Math.round(memUsage.heapTotal / 1024 / 1024),
-        rssMb: Math.round(memUsage.rss / 1024 / 1024),
-      },
-    })
   })
 
   // GET /config — 读取 agent 全局配置（模型、权限模式等）
@@ -190,10 +504,36 @@ export function createGateway(config: GatewayConfig = {}) {
       const body = req.body as { model?: string; permissionMode?: string }
       const patch: Record<string, unknown> = {}
       if (body.model) patch.model = body.model
-      if (body.permissionMode && ['ask', 'auto', 'plan'].includes(body.permissionMode)) {
+      if (body.permissionMode && ['ask', 'craft', 'plan'].includes(body.permissionMode)) {
         patch.permissionMode = body.permissionMode
       }
       saveConfig(patch)
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /config/zhile-session — 读取知了专属会话 ID
+  app.get('/config/zhile-session', (_req, res) => {
+    const file = join(homedir(), '.hrids-agent', 'zhile-session.json')
+    if (!existsSync(file)) { res.json({ sessionId: null }); return }
+    try {
+      const data = JSON.parse(readFileSync(file, 'utf-8')) as { sessionId?: string }
+      res.json({ sessionId: data.sessionId ?? null })
+    } catch {
+      res.json({ sessionId: null })
+    }
+  })
+
+  // PUT /config/zhile-session — 保存知了专属会话 ID
+  app.put('/config/zhile-session', (req, res) => {
+    const dir = join(homedir(), '.hrids-agent')
+    const file = join(dir, 'zhile-session.json')
+    try {
+      const body = req.body as { sessionId?: string | null }
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      writeFileSync(file, JSON.stringify({ sessionId: body.sessionId ?? null }, null, 2), 'utf-8')
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
@@ -204,37 +544,25 @@ export function createGateway(config: GatewayConfig = {}) {
   app.get('/config/models', (_req, res) => {
     try {
       const models: Array<{ provider: string; model: string; isDefault: boolean }> = []
-      const defaultModel = process.env.DEFAULT_MODEL ?? loadConfig().model
+      const cfg = loadConfig()
+      const defaultModel = cfg.model
 
-      // 解析 LLM_FALLBACK_N 环境变量
-      let n = 1
-      while (true) {
-        const val = process.env[`LLM_FALLBACK_${n}`]
-        if (!val) break
-        // 格式：provider:aliyun,models:m1,m2[,apiKey:xxx][,baseUrl:xxx]
-        const parts = val.split(',')
-        let provider = ''
-        const modelNames: string[] = []
-        for (const part of parts) {
-          if (part.startsWith('provider:')) provider = part.slice('provider:'.length)
-          else if (part.startsWith('models:')) modelNames.push(...part.slice('models:'.length).split(',').filter(Boolean))
-          else if (!part.includes(':')) modelNames.push(part) // 裸模型名兼容
+      // 从 config.json 的 llm.fallbacks 读取模型列表
+      for (const group of cfg.llm?.fallbacks ?? []) {
+        for (const m of group.models) {
+          models.push({ provider: group.provider, model: m, isDefault: m === defaultModel })
         }
-        for (const m of modelNames) {
-          if (m) models.push({ provider, model: m, isDefault: m === defaultModel })
-        }
-        n++
       }
 
-      // 若没有 FALLBACK 配置，至少返回 DEFAULT_MODEL
+      // 若没有 fallbacks，至少返回默认模型
       if (models.length === 0 && defaultModel) {
-        models.push({ provider: 'default', model: defaultModel, isDefault: true })
+        models.push({ provider: cfg.provider ?? 'default', model: defaultModel, isDefault: true })
       }
 
-      // 确保 defaultModel 标记正确（可能不在 FALLBACK 列表里）
+      // 确保 defaultModel 标记正确
       const hasDefault = models.some(m => m.isDefault)
       if (!hasDefault && defaultModel) {
-        models.unshift({ provider: 'default', model: defaultModel, isDefault: true })
+        models.unshift({ provider: cfg.provider ?? 'default', model: defaultModel, isDefault: true })
       }
 
       res.json({ models, defaultModel })
@@ -243,16 +571,25 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // GET /todos — 读取全局任务列表
+  // GET /todos — 读取所有活跃会话的任务列表（聚合）
+  // todos 按会话工作目录存储，路径为 <session.cwd>/.hrids/tasks/todos.json
   app.get('/todos', (_req, res) => {
-    const todoFile = join(homedir(), '.hrids-agent', 'todos.json')
-    if (!existsSync(todoFile)) {
-      res.json([])
-      return
-    }
     try {
-      const raw = JSON.parse(readFileSync(todoFile, 'utf-8'))
-      res.json(Array.isArray(raw) ? raw : [])
+      const allTodos: Array<Record<string, unknown>> = []
+      const activeSessions = manager.listSessions()
+      for (const session of activeSessions) {
+        if (!session.cwd) continue
+        const todoFile = join(session.cwd, '.hrids', 'tasks', 'todos.json')
+        if (!existsSync(todoFile)) continue
+        try {
+          const raw = JSON.parse(readFileSync(todoFile, 'utf-8'))
+          if (Array.isArray(raw)) {
+            // 附加 sessionId 字段，方便前端区分来源
+            allTodos.push(...raw.map((t: Record<string, unknown>) => ({ ...t, sessionId: session.id })))
+          }
+        } catch { /* 单个文件读取失败不影响整体 */ }
+      }
+      res.json(allTodos)
     } catch {
       res.json([])
     }
@@ -271,88 +608,44 @@ export function createGateway(config: GatewayConfig = {}) {
       return
     }
 
-    // ── 第一遍：从 user 消息的 tool_result 块建立结果映射 ──────────────
-    // toolId → { content, isError }
-    type ToolResultEntry = { content: unknown; isError: boolean }
-    const toolResults = new Map<string, ToolResultEntry>()
+    res.json(formatMessagesForDisplay(rawMessages))
+  })
 
-    for (const msg of rawMessages) {
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-      for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
-        if (block.type === 'tool_result' && block.tool_use_id) {
-          toolResults.set(block.tool_use_id, {
-            content: block.content,
-            isError: block.is_error === true,
-          })
-        }
-      }
+  // GET /sessions/:id/history-segments — 读取会话的压缩归档段列表
+  app.get('/sessions/:id/history-segments', (req, res) => {
+    try {
+      const archives = listSessionArchives(req.params.id)
+      res.json(archives)
+    } catch (err) {
+      log.warn('读取归档段失败', { error: String(err) })
+      res.json([])
     }
+  })
 
-    // ── 第二遍：构建 DisplayMessage 列表，tool 消息附带 input/status/result ─
-    const displayMessages: Array<{
-      id: string
-      type: string
-      content?: string
-      toolId?: string
-      toolName?: string
-      toolInput?: unknown
-      toolStatus?: 'success' | 'error'
-      toolResult?: unknown
-      timestamp: number
-    }> = []
-
-    let idx = 0
-    for (const msg of rawMessages) {
-      const timestamp = Date.now() - (rawMessages.length - idx) * 1000
-      idx++
-
-      if (msg.role === 'user') {
-        if (typeof msg.content === 'string') {
-          // 跳过系统内部注入的消息
-          if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
-          displayMessages.push({ id: `u-${idx}`, type: 'user', content: msg.content, timestamp })
-        }
-        // tool_result 不单独显示（结果附在 tool 消息上）
-      } else if (msg.role === 'assistant') {
-        if (typeof msg.content === 'string') {
-          if (msg.content.trim()) {
-            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: msg.content, timestamp })
-          }
-        } else if (Array.isArray(msg.content)) {
-          // 提取 text 块
-          const textParts = (msg.content as Array<{ type: string; text?: string }>)
-            .filter(b => b.type === 'text')
-            .map(b => b.text ?? '')
-            .join('')
-          if (textParts.trim()) {
-            displayMessages.push({ id: `a-${idx}`, type: 'assistant', content: textParts, timestamp })
-          }
-          // 提取 tool_use 块，附带 input 和对应的 tool_result
-          for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
-            if (block.type === 'tool_use' && block.id && block.name) {
-              const resultEntry = toolResults.get(block.id)
-              displayMessages.push({
-                id: `t-${block.id}`,
-                type: 'tool',
-                toolId: block.id,
-                toolName: block.name,
-                toolInput: block.input,
-                toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
-                toolResult: resultEntry?.content,
-                timestamp: timestamp + 1,
-              })
-            }
-          }
-        }
-      }
+  app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
+    try {
+      const rawMessages = loadSessionArchive(req.params.id, req.params.filename)
+      if (!rawMessages) { res.json([]); return }
+      res.json(formatMessagesForDisplay(rawMessages, 'arc-'))
+    } catch (err) {
+      log.warn('读取归档消息失败', { error: String(err) })
+      res.json([])
     }
-
-    res.json(displayMessages)
   })
 
   // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）
+  // todos 存储在会话工作目录下：<session.cwd>/.hrids/tasks/todos.json
   app.get('/sessions/:id/todos', (req, res) => {
-    const todoFile = join(homedir(), '.hrids-agent', 'sessions', req.params.id, 'todos.json')
+    // 优先从内存中取 cwd（活跃会话），历史会话则从磁盘 meta 读取
+    const activeSession = manager.getSession(req.params.id)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+
+    if (!cwd) {
+      res.json([])
+      return
+    }
+
+    const todoFile = join(cwd, '.hrids', 'tasks', 'todos.json')
     if (!existsSync(todoFile)) {
       res.json([])
       return
@@ -560,6 +853,37 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
+  // GET /sessions/:id/git-file?path= — 获取文件在 git HEAD 中的原始内容
+  app.get('/sessions/:id/git-file', (req, res) => {
+    const activeSession = manager.getSession(req.params.id)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+
+    if (!cwd) {
+      res.status(404).json({ error: '会话不存在或无工作目录' })
+      return
+    }
+
+    const relPath = req.query.path as string
+    if (!relPath) {
+      res.status(400).json({ error: '缺少 path 参数' })
+      return
+    }
+
+    const absPath = resolve(cwd, relPath)
+    if (!absPath.startsWith(resolve(cwd))) {
+      res.status(403).json({ error: '禁止访问 cwd 之外的路径' })
+      return
+    }
+
+    try {
+      const content = execSync(`git show HEAD:${relPath}`, { cwd, encoding: 'utf-8', timeout: 5000 })
+      res.json({ path: relPath, content })
+    } catch {
+      // 文件在 git 中不存在（新文件）或不在 git 仓库中
+      res.status(404).json({ error: '文件在 git HEAD 中不存在（可能是新文件或不在 git 仓库中）' })
+    }
+  })
+
   // POST /sessions/:id/upload — 上传文件到会话工作目录
   // 请求体：JSON { files: Array<{ name: string; data: string }> }
   // data 为 base64 编码的文件内容
@@ -600,7 +924,9 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        const destPath = resolve(cwd, safeName)
+        // 图片统一存放到 cwd/.cache/ 子目录
+        const imagesDir = resolve(cwd, '.cache')
+        const destPath = resolve(imagesDir, safeName)
 
         // 安全检查：确保目标路径在 cwd 内
         if (!destPath.startsWith(resolve(cwd))) {
@@ -617,11 +943,12 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        mkdirSync(cwd, { recursive: true })
+        mkdirSync(imagesDir, { recursive: true })
         writeFileSync(destPath, buffer)
 
         log.info('文件已上传', { sessionId: req.params.id, file: safeName, size: buffer.length })
-        uploaded.push({ name: safeName, path: destPath, size: buffer.length })
+        // name 返回相对路径，前端用 getImageUrl(sessionId, '.cache/xxx.jpg') 加载
+        uploaded.push({ name: `.cache/${safeName}`, path: destPath, size: buffer.length })
       }
 
       res.json({ files: uploaded })
@@ -646,8 +973,8 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // PUT /crons/:id/toggle — 启用/禁用定时任务
-  app.put('/crons/:id/toggle', (req, res) => {
+  // PUT /crons/:id/toggle — 启用/禁用定时任务（同步更新文件和内存调度器）
+  app.put('/crons/:id/toggle', async (req, res) => {
     const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
@@ -662,15 +989,22 @@ export function createGateway(config: GatewayConfig = {}) {
       }
       const { enabled } = req.body as { enabled: boolean }
       crons[idx].enabled = enabled
-      writeFileSync(cronFile, JSON.stringify(crons, null, 2), 'utf-8')
+      atomicWriteJson(cronFile, crons)
+
+      // 同步更新内存调度器，避免"显示改了但实际还在跑/没跑"的问题
+      try {
+        const { toggleJobInScheduler } = await import('../tools/ScheduleCronTool.js')
+        toggleJobInScheduler(req.params.id, enabled)
+      } catch { /* 调度器不可用时忽略 */ }
+
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
     }
   })
 
-  // DELETE /crons/:id — 删除定时任务
-  app.delete('/crons/:id', (req, res) => {
+  // DELETE /crons/:id — 删除定时任务（同步清除内存调度器中的 timer）
+  app.delete('/crons/:id', async (req, res) => {
     const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
@@ -683,11 +1017,195 @@ export function createGateway(config: GatewayConfig = {}) {
         res.status(404).json({ error: '定时任务不存在' })
         return
       }
-      writeFileSync(cronFile, JSON.stringify(filtered, null, 2), 'utf-8')
+      atomicWriteJson(cronFile, filtered)
+
+      // 同步清除内存中的 timer，避免已删除的任务仍然触发
+      try {
+        const { deleteJobFromScheduler } = await import('../tools/ScheduleCronTool.js')
+        deleteJobFromScheduler(req.params.id)
+      } catch { /* 调度器不可用时忽略 */ }
+
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })
     }
+  })
+
+  // POST /crons — 创建定时任务（前端直接创建，不经过 Agent）
+  app.post('/crons', async (req, res) => {
+    const cronDir = join(homedir(), '.hrids-agent')
+    const cronFile = join(cronDir, 'crons.json')
+    try {
+      const body = req.body as {
+        expression: string
+        description: string
+        task: string
+        once?: boolean
+        startDate?: string
+        endDate?: string
+        sessionId?: string
+      }
+      if (!body.expression || !body.description || !body.task) {
+        res.status(400).json({ error: '缺少必填字段：expression、description、task' })
+        return
+      }
+
+      // 读取现有任务
+      let crons: Array<Record<string, unknown>> = []
+      if (existsSync(cronFile)) {
+        try { crons = JSON.parse(readFileSync(cronFile, 'utf-8')) } catch { crons = [] }
+      } else {
+        if (!existsSync(cronDir)) mkdirSync(cronDir, { recursive: true })
+      }
+
+      // 去重检查：相同 expression + description + sessionId 的任务已存在时直接返回
+      const sessionId = body.sessionId ?? ''
+      const duplicate = crons.find(c =>
+        c['expression'] === body.expression &&
+        c['description'] === body.description &&
+        ((c['sessionId'] ?? '') === sessionId)
+      )
+      if (duplicate) {
+        res.json(duplicate)
+        return
+      }
+
+      // 计算下次执行时间（使用 ScheduleCronTool 的完整解析器）
+      let nextRunAt: number | undefined
+      try {
+        const { parseCronNextRun } = await import('../tools/ScheduleCronTool.js')
+        nextRunAt = parseCronNextRun(body.expression)
+      } catch {
+        nextRunAt = undefined
+      }
+
+      // 判断是否为周期性表达式
+      const parts = body.expression.trim().split(/\s+/)
+      const isRecurring = parts.length === 5 && parts.some(p => p.includes('*') || p.includes('/') || p.includes('-') || p.includes(','))
+      const once = isRecurring ? false : (body.once ?? false)
+
+      const id = `cron-${Date.now().toString(36)}`
+      const job = {
+        id,
+        expression: body.expression,
+        description: body.description,
+        task: body.task,
+        createdAt: Date.now(),
+        nextRunAt,
+        enabled: true,
+        once,
+        ...(body.startDate ? { startDate: body.startDate } : {}),
+        ...(body.endDate ? { endDate: body.endDate } : {}),
+        ...(body.sessionId ? { sessionId: body.sessionId } : {}),
+      }
+
+      crons.push(job)
+      atomicWriteJson(cronFile, crons)
+
+      // 通知调度器注册新任务
+      try {
+        const { scheduleNewJob } = await import('../tools/ScheduleCronTool.js')
+        scheduleNewJob(job as Parameters<typeof scheduleNewJob>[0])
+      } catch { /* 调度器不可用时忽略，重启后会自动恢复 */ }
+
+      res.json(job)
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // ── MCP 服务器配置 API ──────────────────────────────────────────────────
+
+  // GET /mcp — 读取 MCP 服务器配置列表
+  app.get('/mcp', (_req, res) => {
+    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    if (!existsSync(mcpFile)) {
+      res.json({ mcpServers: {} })
+      return
+    }
+    try {
+      const raw = JSON.parse(readFileSync(mcpFile, 'utf-8'))
+      res.json(raw)
+    } catch {
+      res.json({ mcpServers: {} })
+    }
+  })
+
+  // PUT /mcp — 保存完整 MCP 配置（覆盖写入）
+  app.put('/mcp', (req, res) => {
+    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpFile = join(mcpDir, 'mcp.json')
+    try {
+      const body = req.body as { mcpServers?: Record<string, unknown> }
+      if (!body || typeof body !== 'object') {
+        res.status(400).json({ error: '请求体格式错误' })
+        return
+      }
+      if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true })
+      atomicWriteJson(mcpFile, body)
+      log.info('MCP 配置已保存', { serverCount: Object.keys(body.mcpServers ?? {}).length })
+      res.json({ ok: true })
+    } catch (err) {
+      log.error('MCP 配置保存失败', { error: String(err) })
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // POST /mcp/:name — 添加或更新单个 MCP 服务器
+  app.post('/mcp/:name', (req, res) => {
+    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpFile = join(mcpDir, 'mcp.json')
+    try {
+      const serverName = req.params.name
+      const serverConfig = req.body as Record<string, unknown>
+      if (!serverConfig || typeof serverConfig !== 'object') {
+        res.status(400).json({ error: '请求体格式错误' })
+        return
+      }
+
+      let config: { mcpServers: Record<string, unknown> } = { mcpServers: {} }
+      if (existsSync(mcpFile)) {
+        try { config = JSON.parse(readFileSync(mcpFile, 'utf-8')) } catch { config = { mcpServers: {} } }
+      }
+      if (!config.mcpServers) config.mcpServers = {}
+      config.mcpServers[serverName] = serverConfig
+
+      if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true })
+      atomicWriteJson(mcpFile, config)
+      log.info('MCP 服务器已添加/更新', { name: serverName })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // DELETE /mcp/:name — 删除单个 MCP 服务器
+  app.delete('/mcp/:name', (req, res) => {
+    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    try {
+      const serverName = req.params.name
+      if (!existsSync(mcpFile)) {
+        res.status(404).json({ error: 'MCP 配置文件不存在' })
+        return
+      }
+      const config = JSON.parse(readFileSync(mcpFile, 'utf-8')) as { mcpServers?: Record<string, unknown> }
+      if (!config.mcpServers || !(serverName in config.mcpServers)) {
+        res.status(404).json({ error: `MCP 服务器 "${serverName}" 不存在` })
+        return
+      }
+      delete config.mcpServers[serverName]
+      atomicWriteJson(mcpFile, config)
+      log.info('MCP 服务器已删除', { name: serverName })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /mcp/config-path — 返回 MCP 配置文件路径（供前端展示）
+  app.get('/mcp/config-path', (_req, res) => {
+    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    res.json({ path: mcpFile })
   })
 
   // GET /skills — 读取已安装技能列表
@@ -780,7 +1298,10 @@ export function createGateway(config: GatewayConfig = {}) {
       }
 
       mkdirSync(agentDir, { recursive: true })
-      writeFileSync(disabledPath, JSON.stringify(disabled, null, 2), 'utf-8')
+      const { renameSync: rs } = await import('fs')
+      const tmpPath = disabledPath + '.tmp'
+      writeFileSync(tmpPath, JSON.stringify(disabled, null, 2), 'utf-8')
+      rs(tmpPath, disabledPath)
       res.json({ ok: true, enabled })
     } catch (err) {
       res.status(500).json({ error: String(err) })
@@ -841,7 +1362,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '20'), 10) || 20, 1), 500)
       const page = Math.max(parseInt(String(req.query.page ?? '1'), 10) || 1, 1)
 
-      const searchApiBase = (process.env.SKILLHUB_SEARCH_URL ?? 'https://lightmake.site/api/v1/search').replace(/\/$/, '')
+      const searchApiBase = (loadConfig().skillHub?.searchUrl ?? 'https://lightmake.site/api/v1/search').replace(/\/$/, '')
       const offset = (page - 1) * limit
       const url = `${searchApiBase}?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}&page=${page}`
 
@@ -892,21 +1413,357 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
+  // ── IM 平台管理 API ──────────────────────────────────────────────────────
+
+  // GET /im/platforms — 读取 IM 平台配置列表
+  app.get('/im/platforms', (_req, res) => {
+    try {
+      const cfg = PlatformManager.loadConfig()
+      // 脱敏：不返回 token/secret 等敏感字段
+      const sanitized = cfg.platforms.map(p => {
+        const rest = { ...(p as unknown as Record<string, unknown>) }
+        if (rest.token) rest.token = '***'
+        if (rest.secret) rest.secret = '***'
+        return rest
+      })
+      res.json({ platforms: sanitized, status: platformManager.getStatus() })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /im/platforms/config — 读取完整配置（含 token，需鉴权）
+  app.get('/im/platforms/config', (_req, res) => {
+    try {
+      const cfg = PlatformManager.loadConfig()
+      res.json(cfg)
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // PUT /im/platforms/config — 保存完整 IM 配置
+  app.put('/im/platforms/config', (req, res) => {
+    try {
+      const body = req.body as IMGatewayConfig
+      if (!body || !Array.isArray(body.platforms)) {
+        res.status(400).json({ error: '请求体格式错误，需要 { platforms: [...] }' })
+        return
+      }
+      PlatformManager.saveConfig(body)
+      log.info('IM 平台配置已保存', { platformCount: body.platforms.length })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // POST /im/platforms/:platform — 添加或更新单个平台配置
+  app.post('/im/platforms/:platform', async (req, res) => {
+    try {
+      const platform = req.params.platform as IMPlatform
+      const platformCfg = req.body as PlatformConfig
+
+      if (!platformCfg || platformCfg.platform !== platform) {
+        res.status(400).json({ error: 'platform 字段与路径不匹配' })
+        return
+      }
+
+      const cfg = PlatformManager.loadConfig()
+      const idx = cfg.platforms.findIndex(p => p.platform === platform)
+      if (idx >= 0) {
+        cfg.platforms[idx] = platformCfg
+      } else {
+        cfg.platforms.push(platformCfg)
+      }
+      PlatformManager.saveConfig(cfg)
+
+      // 如果平台已启用，立即重启适配器
+      if (platformCfg.enabled) {
+        try {
+          await platformManager.startPlatform(platformCfg)
+          log.info('IM 平台适配器已重启', { platform })
+        } catch (err) {
+          log.warn('IM 平台适配器重启失败', { platform, error: String(err) })
+          res.json({ ok: true, warning: `配置已保存，但适配器启动失败: ${String(err)}` })
+          return
+        }
+      } else {
+        // 禁用时停止适配器
+        await platformManager.stopPlatform(platform)
+      }
+
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // DELETE /im/platforms/:platform — 删除平台配置并停止适配器
+  app.delete('/im/platforms/:platform', async (req, res) => {
+    try {
+      const platform = req.params.platform as IMPlatform
+      const cfg = PlatformManager.loadConfig()
+      const filtered = cfg.platforms.filter(p => p.platform !== platform)
+      if (filtered.length === cfg.platforms.length) {
+        res.status(404).json({ error: `平台 "${platform}" 不存在` })
+        return
+      }
+      cfg.platforms = filtered
+      PlatformManager.saveConfig(cfg)
+      await platformManager.stopPlatform(platform)
+      log.info('IM 平台已删除', { platform })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // POST /im/platforms/:platform/restart — 重启单个平台适配器
+  app.post('/im/platforms/:platform/restart', async (req, res) => {
+    try {
+      const platform = req.params.platform as IMPlatform
+      const cfg = PlatformManager.loadConfig()
+      const platformCfg = cfg.platforms.find(p => p.platform === platform)
+      if (!platformCfg) {
+        res.status(404).json({ error: `平台 "${platform}" 未配置` })
+        return
+      }
+      if (!platformCfg.enabled) {
+        res.status(400).json({ error: `平台 "${platform}" 未启用` })
+        return
+      }
+      await platformManager.startPlatform(platformCfg)
+      log.info('IM 平台适配器已重启', { platform })
+      res.json({ ok: true, status: platformManager.getStatus() })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /im/status — 获取所有平台运行状态
+  app.get('/im/status', (_req, res) => {
+    res.json({ status: platformManager.getStatus() })
+  })
+
+  // POST /im/platforms/weixin/login — 发起微信扫码登录，返回二维码
+  app.post('/im/platforms/weixin/login', async (_req, res) => {
+    try {
+      const qr = await platformManager.startWeixinLogin()
+      res.json({
+        qrcodeKey: qr.qrcodeKey,
+        qrcodeImgUrl: qr.qrcodeImgUrl,
+      })
+    } catch (err) {
+      log.error('发起微信扫码登录失败', { error: String(err) })
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /im/platforms/weixin/login/status — 轮询微信扫码状态
+  // status: pending | scaned | confirmed | expired | error
+  app.get('/im/platforms/weixin/login/status', (_req, res) => {
+    const result = platformManager.getWeixinLoginStatus()
+    res.json(result)
+  })
+
+  // GET /sessions/:id/image?path= — 直接返回图片二进制（用于前端 <img> 标签显示）
+  app.get('/sessions/:id/image', (req, res) => {
+    const activeSession = manager.getSession(req.params.id)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+
+    if (!cwd) {
+      res.status(404).json({ error: '会话不存在或无工作目录' })
+      return
+    }
+
+    const relPath = req.query.path as string
+    if (!relPath) {
+      res.status(400).json({ error: '缺少 path 参数' })
+      return
+    }
+
+    const absPath = resolve(cwd, relPath)
+    if (!absPath.startsWith(resolve(cwd))) {
+      res.status(403).json({ error: '禁止访问 cwd 之外的路径' })
+      return
+    }
+
+    try {
+      const stat = statSync(absPath)
+      if (!stat.isFile()) {
+        res.status(400).json({ error: '路径不是文件' })
+        return
+      }
+
+      // 限制图片大小：20MB
+      if (stat.size > 20 * 1024 * 1024) {
+        res.status(413).json({ error: '图片超过 20MB' })
+        return
+      }
+
+      const ext = extname(absPath).toLowerCase()
+      const mimeMap: Record<string, string> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml',
+        '.bmp': 'image/bmp',
+        '.ico': 'image/x-icon',
+        '.tiff': 'image/tiff',
+        '.tif': 'image/tiff',
+      }
+      const mime = mimeMap[ext]
+      if (!mime) {
+        res.status(400).json({ error: '不支持的图片格式' })
+        return
+      }
+
+      res.setHeader('Content-Type', mime)
+      res.setHeader('Cache-Control', 'public, max-age=3600')
+      const buf = readFileSync(absPath)
+      res.send(buf)
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /api/logs — 读取最近的日志条目
+  app.get('/api/logs', (req, res) => {
+    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+    const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000)
+    const level = String(req.query.level ?? 'all')
+
+    if (!existsSync(logFile)) {
+      res.json({ logs: [], total: 0 })
+      return
+    }
+
+    try {
+      const content = readFileSync(logFile, 'utf-8')
+      const lines = content.split('\n').filter(l => l.trim())
+      const entries: Array<Record<string, unknown>> = []
+
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line) as Record<string, unknown>
+          if (level !== 'all' && entry.level !== level) continue
+          entries.push(entry)
+        } catch { /* 跳过非 JSON 行 */ }
+      }
+
+      // 返回最新的 limit 条
+      const sliced = entries.slice(-limit)
+      res.json({ logs: sliced, total: entries.length })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /api/usage — 读取模型用量统计（从日志中聚合）
+  app.get('/api/usage', (_req, res) => {
+    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+
+    if (!existsSync(logFile)) {
+      res.json({ sessions: [], totals: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 } })
+      return
+    }
+
+    try {
+      const content = readFileSync(logFile, 'utf-8')
+      const lines = content.split('\n').filter(l => l.trim())
+
+      // 按日期聚合用量
+      const byDate = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number; calls: number }>()
+      let totalInput = 0, totalOutput = 0, totalCost = 0, totalCalls = 0
+
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line) as Record<string, unknown>
+          // 从 usage 相关日志中提取 token 数据
+          if (
+            entry.inputTokens !== undefined &&
+            entry.outputTokens !== undefined
+          ) {
+            const date = String(entry.ts ?? '').slice(0, 10) || 'unknown'
+            const input = Number(entry.inputTokens) || 0
+            const output = Number(entry.outputTokens) || 0
+            const cost = Number(entry.costUsd ?? entry.cost ?? 0)
+
+            const prev = byDate.get(date) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 }
+            byDate.set(date, {
+              inputTokens: prev.inputTokens + input,
+              outputTokens: prev.outputTokens + output,
+              costUsd: prev.costUsd + cost,
+              calls: prev.calls + 1,
+            })
+            totalInput += input
+            totalOutput += output
+            totalCost += cost
+            totalCalls++
+          }
+        } catch { /* 跳过 */ }
+      }
+
+      const sessions = Array.from(byDate.entries())
+        .map(([date, stats]) => ({ date, ...stats }))
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .slice(0, 30)
+
+      res.json({
+        sessions,
+        totals: { inputTokens: totalInput, outputTokens: totalOutput, costUsd: totalCost, calls: totalCalls },
+      })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /api/config-file — 读取 config.json 原始内容
+  app.get('/api/config-file', (_req, res) => {
+    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    if (!existsSync(configFile)) {
+      res.json({ content: '{}', path: configFile })
+      return
+    }
+    try {
+      const content = readFileSync(configFile, 'utf-8')
+      res.json({ content, path: configFile })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // PUT /api/config-file — 保存 config.json 原始内容
+  app.put('/api/config-file', async (req, res) => {
+    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    try {
+      const { content } = req.body as { content?: string }
+      if (typeof content !== 'string') {
+        res.status(400).json({ error: '缺少 content 字段' })
+        return
+      }
+      // 验证 JSON 格式
+      JSON.parse(content)
+      const tmp = configFile + '.tmp'
+      writeFileSync(tmp, content, 'utf-8')
+      renameSync(tmp, configFile)
+      // 清除配置缓存，下次读取时重新加载
+      const { _resetConfigCache } = await import('../core/Config.js')
+      _resetConfigCache()
+      log.info('config.json 已通过 Web 界面更新')
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
   // ── WebSocket 服务器 ─────────────────────────────────────────
   const server = http.createServer(app)
   // 不设置 path，由 connection 回调自行匹配 /sessions/:id/stream
   const wss = new WebSocketServer({ server })
-
-  // ── 静态文件托管（SPA fallback）──────────────────────────────
-  const webDistPath = join(resolve('.'), 'web', 'dist')
-  if (existsSync(webDistPath)) {
-    log.info('托管前端静态文件', { path: webDistPath })
-    app.use(express.static(webDistPath))
-    // SPA fallback：所有未匹配的 GET 请求返回 index.html
-    app.get('/{*splat}', (_req, res) => {
-      res.sendFile(join(webDistPath, 'index.html'))
-    })
-  }
 
   wss.on('connection', (ws: WebSocket, req) => {
     // req.url 包含路径和查询参数，先解析出纯路径部分再匹配
@@ -920,10 +1777,10 @@ export function createGateway(config: GatewayConfig = {}) {
     const sessionId = match[1]
 
     // WebSocket 鉴权（通过 URL query 参数 token 或 Sec-WebSocket-Protocol）
-    if (config.authToken) {
+    if (hasUsers || hasStaticToken) {
       const token = parsedUrl.searchParams.get('token')
         ?? req.headers['sec-websocket-protocol']
-      if (token !== config.authToken) {
+      if (!token || !verifyRawToken(token)) {
         log.warn('WebSocket 未授权', { sessionId })
         ws.close(1008, '未授权')
         return
@@ -938,10 +1795,10 @@ export function createGateway(config: GatewayConfig = {}) {
     }
 
     log.debug('WebSocket 连接', { sessionId })
-    manager.subscribe(sessionId, ws)
-    // 使用 sessionId（驼峰）与前端类型定义保持一致
+    // 先发 ready，告知前端连接已建立
     ws.send(JSON.stringify({ type: 'ready', sessionId }))
-
+    // 再订阅（会触发回放缓冲区推送，前端已准备好接收）
+    manager.subscribe(sessionId, ws)
     ws.on('message', (data) => {
       manager.handleClientMessage(sessionId, data.toString())
     })
@@ -962,6 +1819,14 @@ export function createGateway(config: GatewayConfig = {}) {
       return new Promise(resolve => {
         server.listen(port, host, () => {
           log.info('Gateway 已启动', { host, port })
+          // 启动 IM 平台适配器（异步，不阻塞 HTTP 服务启动）
+          platformManager.start().catch(err => {
+            log.warn('IM 平台管理器启动时出现错误', { error: String(err) })
+          })
+          // 注册 cron → IM 推送回调：cron 触发时将提醒文本推送到对应 IM 会话
+          manager.setCronIMCallback((agentSessionId, text) =>
+            platformManager.sendCronToIM(agentSessionId, text)
+          )
           resolve()
         })
       })
@@ -969,16 +1834,39 @@ export function createGateway(config: GatewayConfig = {}) {
     // 优雅关闭：等待进行中任务完成，再关闭 HTTP/WS 服务
     async stop(gracefulTimeoutMs = 10000): Promise<void> {
       log.info('开始关闭 Gateway')
+
+      // 先停止 IM 平台适配器
+      await platformManager.stop()
+
       await manager.gracefulShutdown(gracefulTimeoutMs)
-      return new Promise((resolve, reject) => {
-        wss.close()
+
+      // 主动关闭所有 WebSocket 连接，否则 server.close() 会因连接保持而一直 pending
+      for (const ws of wss.clients) {
+        try { ws.terminate() } catch { /* 忽略 */ }
+      }
+      wss.close()
+
+      return new Promise((resolve) => {
+        // 尝试使用 Node 18.2+ 的 closeAllConnections() 强制关闭所有 keep-alive 连接
+        if (typeof (server as unknown as { closeAllConnections?: () => void }).closeAllConnections === 'function') {
+          (server as unknown as { closeAllConnections: () => void }).closeAllConnections()
+        }
         server.close(err => {
-          if (err) { log.error('关闭 HTTP 服务失败', { error: String(err) }); reject(err) }
-          else { log.info('Gateway 已关闭'); resolve() }
+          if (err) {
+            log.warn('关闭 HTTP 服务时有错误（忽略）', { error: String(err) })
+          }
+          log.info('Gateway 已关闭')
+          resolve()
         })
+        // 兜底超时：5 秒后强制 resolve，避免残留连接导致进程无法退出
+        setTimeout(() => {
+          log.warn('server.close() 超时，强制完成关闭')
+          resolve()
+        }, 5000)
       })
     },
     manager,
     server,
+    platformManager,
   }
 }

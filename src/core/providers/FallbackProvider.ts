@@ -1,38 +1,48 @@
-// FallbackProvider —— 多 LLM 故障转移
+// FallbackProvider — 多 LLM 故障转移
 // 当前模型重试 MAX_RETRIES_PER_MODEL 次，全部失败后切换下一个模型
-// 记住当前位置，下次调用直接从上次成功的模型开始
+// 记住当前位置，下次调用直接从上次成功的模型开始（进程内存级，不跨进程持久化）
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, StreamChunk } from './types.js'
 import { logger } from '../logger.js'
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
 
 const log = logger.child({ component: 'fallback-provider' })
 
 // 每个模型在切换前的最大重试次数
 const MAX_RETRIES_PER_MODEL = 3
 
-const STATE_PATH = join(homedir(), '.hrids-agent', 'fallback-state.json')
+// Circuit Breaker：对连续失败的 provider 临时熔断，避免立即重试已知故障的模型
+// 连续失败 3 次后熔断 60 秒，期间跳过该 provider
+class CircuitBreaker {
+  private failures = 0
+  private openUntil = 0
+  private readonly threshold: number
+  private readonly cooldownMs: number
 
-function loadState(): { groupIdx: number; modelIdx: number } {
-  try {
-    if (existsSync(STATE_PATH)) {
-      const raw = readFileSync(STATE_PATH, 'utf-8')
-      const parsed = JSON.parse(raw)
-      if (typeof parsed.groupIdx === 'number' && typeof parsed.modelIdx === 'number') {
-        return parsed
-      }
+  constructor(threshold = 3, cooldownMs = 60_000) {
+    this.threshold = threshold
+    this.cooldownMs = cooldownMs
+  }
+
+  isOpen(): boolean {
+    return Date.now() < this.openUntil
+  }
+
+  getTimeUntilOpen(): number {
+    return Math.max(0, this.openUntil - Date.now())
+  }
+
+  recordFailure(): void {
+    this.failures++
+    if (this.failures >= this.threshold) {
+      this.openUntil = Date.now() + this.cooldownMs
+      log.warn(`Circuit breaker 触发，熔断 ${this.cooldownMs / 1000}s`, { failures: this.failures })
     }
-  } catch { /* 读取失败静默忽略，从头开始 */ }
-  return { groupIdx: 0, modelIdx: 0 }
-}
+  }
 
-function saveState(groupIdx: number, modelIdx: number): void {
-  try {
-    mkdirSync(join(homedir(), '.hrids-agent'), { recursive: true })
-    writeFileSync(STATE_PATH, JSON.stringify({ groupIdx, modelIdx }), 'utf-8')
-  } catch { /* 写入失败静默忽略 */ }
+  recordSuccess(): void {
+    this.failures = 0
+    this.openUntil = 0
+  }
 }
 
 // 平台分组：同一平台的多个模型归为一组，组内按顺序切换，组间跨平台切换
@@ -54,8 +64,7 @@ export class FallbackProvider implements LLMProvider {
 
   private providers: LLMProvider[]
   private groups: ProviderGroup[]
-
-  // 当前活跃的平台索引和模型索引（跨重启持久化）
+  private breakers: CircuitBreaker[]
   private currentGroupIdx: number
   private currentModelIdx: number
 
@@ -63,22 +72,15 @@ export class FallbackProvider implements LLMProvider {
     if (providers.length === 0) throw new Error('FallbackProvider 至少需要一个提供商')
     this.providers = providers
     this.groups = groups ?? []
-
-    // 从磁盘恢复上次成功的位置
-    const saved = loadState()
-    const maxGroupIdx = Math.max(0, (this.groups.length || 1) - 1)
-    this.currentGroupIdx = Math.min(saved.groupIdx, maxGroupIdx)
-    const maxModelIdx = this.groups.length > 0
-      ? Math.max(0, this.groups[this.currentGroupIdx].providers.length - 1)
-      : Math.max(0, this.providers.length - 1)
-    this.currentModelIdx = Math.min(saved.modelIdx, maxModelIdx)
-
-    if (saved.groupIdx > 0 || saved.modelIdx > 0) {
-      const p = this.currentProvider()
-      log.info(`从上次记忆位置恢复: ${p.name}/${p.model}`, { groupIdx: this.currentGroupIdx, modelIdx: this.currentModelIdx })
-    }
+    this.currentGroupIdx = 0
+    this.currentModelIdx = 0
+    const total = this.groups.length > 0
+      ? this.groups.reduce((sum, g) => sum + g.providers.length, 0)
+      : providers.length
+    this.breakers = Array.from({ length: total }, () => new CircuitBreaker())
   }
 
+  // 获取当前 provider（供 name/model/modelType getter 使用）
   private currentProvider(): LLMProvider {
     if (this.groups.length > 0) {
       return this.groups[this.currentGroupIdx].providers[this.currentModelIdx]
@@ -86,92 +88,129 @@ export class FallbackProvider implements LLMProvider {
     return this.providers[this.currentModelIdx]
   }
 
-  // 推进到下一个可用模型，到末尾后循环回第一个，返回是否发生了循环（绕回头）
-  private advance(): { hasNext: boolean; wrapped: boolean } {
-    if (this.groups.length > 0) {
-      const group = this.groups[this.currentGroupIdx]
-      if (this.currentModelIdx < group.providers.length - 1) {
-        // 同平台下一个模型
-        this.currentModelIdx++
-        return { hasNext: true, wrapped: false }
-      }
-      if (this.currentGroupIdx < this.groups.length - 1) {
-        // 跨平台
-        this.currentGroupIdx++
-        this.currentModelIdx = 0
-        return { hasNext: true, wrapped: false }
-      }
-      // 已是最后一个，循环回第一个
-      this.currentGroupIdx = 0
-      this.currentModelIdx = 0
-      return { hasNext: true, wrapped: true }
-    }
-    // 无分组，打平列表
-    if (this.currentModelIdx < this.providers.length - 1) {
-      this.currentModelIdx++
-      return { hasNext: true, wrapped: false }
-    }
-    // 已是最后一个，循环回第一个
-    this.currentModelIdx = 0
-    return { hasNext: true, wrapped: true }
-  }
-
   async *stream(
     messages: ChatMessage[],
     tools: ToolDef[],
-    systemPrompt: string,
+    systemPrompt: string[],
     maxTokens: number,
+    signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {
-    // 从当前记住的位置开始尝试
-    // 每个模型最多重试 MAX_RETRIES_PER_MODEL 次，全部失败后切换下一个模型
-    let modelSwitches = 0
+    // 可被 abort 打断的 sleep 工具函数
+    const sleep = (ms: number) => new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) { reject(new Error('aborted')); return }
+      const timer = setTimeout(resolve, ms)
+      signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('aborted')) }, { once: true })
+    })
+
+    const totalProviders = this.groups.length > 0
+      ? this.groups.reduce((sum, g) => sum + g.providers.length, 0)
+      : this.providers.length
+
+    // 并发安全：每次 stream() 调用使用独立的局部索引，不修改实例状态
+    // 这样多个并发子智能体各自独立推进，不会互相干扰
+    let localGroupIdx = this.currentGroupIdx
+    let localModelIdx = this.currentModelIdx
+
+    const localCurrentProvider = () => {
+      if (this.groups.length > 0) {
+        return this.groups[localGroupIdx].providers[localModelIdx]
+      }
+      return this.providers[localModelIdx]
+    }
+
+    const localCurrentBreakerIdx = () => {
+      if (this.groups.length === 0) return localModelIdx
+      let idx = 0
+      for (let g = 0; g < localGroupIdx; g++) idx += this.groups[g].providers.length
+      return idx + localModelIdx
+    }
+
+    const localAdvance = () => {
+      if (this.groups.length > 0) {
+        const group = this.groups[localGroupIdx]
+        if (localModelIdx < group.providers.length - 1) { localModelIdx++; return }
+        if (localGroupIdx < this.groups.length - 1) { localGroupIdx++; localModelIdx = 0; return }
+        localGroupIdx = 0; localModelIdx = 0; return
+      }
+      if (localModelIdx < this.providers.length - 1) { localModelIdx++; return }
+      localModelIdx = 0
+    }
+
+    let failedSwitches = 0
+    let skippedSwitches = 0
 
     while (true) {
-      const provider = this.currentProvider()
+      if (signal?.aborted) return
+
+      const provider = localCurrentProvider()
+      const breakerIdx = localCurrentBreakerIdx()
+      const breaker = this.breakers[breakerIdx]
       const platformInfo = this.groups.length > 0
-        ? `平台[${this.currentGroupIdx + 1}/${this.groups.length}]:${this.groups[this.currentGroupIdx].platformName} `
+        ? `平台[${localGroupIdx + 1}/${this.groups.length}]:${this.groups[localGroupIdx].platformName} `
         : ''
 
-      // 对当前模型最多尝试 MAX_RETRIES_PER_MODEL 次
+      if (breaker.isOpen()) {
+        log.warn(`${platformInfo}模型 ${provider.model} 处于熔断状态，跳过`, { breakerIdx })
+        localAdvance()
+        skippedSwitches++
+
+        if (skippedSwitches >= totalProviders) {
+          const minWait = Math.min(...this.breakers.map(b => b.getTimeUntilOpen()))
+          const waitMs = Math.max(minWait, 1000)
+          log.warn(`所有模型均处于熔断状态，等待 ${waitMs}ms 后重试`)
+          try { await sleep(waitMs) } catch { return }
+          skippedSwitches = 0
+        }
+        continue
+      }
+      skippedSwitches = 0
+
       let lastErr: unknown
-      let succeeded = false
 
       for (let attempt = 1; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
         log.info(
           `${platformInfo}尝试模型: ${provider.name}/${provider.model}` +
           (attempt > 1 ? `（第 ${attempt}/${MAX_RETRIES_PER_MODEL} 次重试）` : ''),
         )
+        log.debug('LLM 请求参数', { model: provider.model, messagesCount: messages.length, toolsCount: tools.length, maxTokens })
 
         try {
           const gen = provider.stream(messages, tools, systemPrompt, maxTokens)
-          const buffer: StreamChunk[] = []
+          const preContentBuffer: StreamChunk[] = []
+          let hasContent = false
 
           for await (const chunk of gen) {
-            buffer.push(chunk)
-
-            // 已有实质性输出，直接透传剩余流（此时不再 fallback）
             if (chunk.type === 'text_delta' || chunk.type === 'tool_call') {
-              saveState(this.currentGroupIdx, this.currentModelIdx)
-              yield chunk
-              for await (const rest of gen) {
-                yield rest
+              if (!hasContent) {
+                hasContent = true
+                log.debug('LLM 开始输出，锁定当前模型', { model: provider.model, chunkType: chunk.type })
+                breaker.recordSuccess()
+                // 成功后原子更新实例状态（单次赋值，避免分步赋值的中间状态）
+                // JS 单线程，两次赋值之间不会被抢占，但合并为语义上的原子操作更清晰
+                ;[this.currentGroupIdx, this.currentModelIdx] = [localGroupIdx, localModelIdx]
+                for (const buffered of preContentBuffer) yield buffered
               }
-              return
+              yield chunk
+              continue
+            }
+
+            if (hasContent) {
+              yield chunk
+              if (chunk.type === 'done') return
+              continue
             }
 
             if (chunk.type === 'done') {
-              saveState(this.currentGroupIdx, this.currentModelIdx)
-              yield chunk
-              return
+              log.warn(`模型 ${provider.model} 返回空响应，触发 fallback`, { attempt })
+              lastErr = new Error('模型返回空响应（无文本也无工具调用）')
+              break
             }
+            preContentBuffer.push(chunk)
           }
 
-          // 流正常结束
-          saveState(this.currentGroupIdx, this.currentModelIdx)
-          for (const chunk of buffer) yield chunk
-          succeeded = true
-          return
+          if (hasContent) return
 
+          if (!lastErr) lastErr = new Error('模型返回空响应（generator 未发送任何 chunk）')
         } catch (err) {
           lastErr = err
           if (attempt < MAX_RETRIES_PER_MODEL) {
@@ -179,29 +218,25 @@ export class FallbackProvider implements LLMProvider {
               `模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，将重试（${attempt}/${MAX_RETRIES_PER_MODEL}）`,
               { error: String(err) },
             )
-            // 简单等待后重试（指数退避：1s, 2s）
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempt))
+            try { await sleep(1000 * attempt) } catch { return }
           }
         }
       }
 
-      if (succeeded) return
+      breaker.recordFailure()
+      localAdvance()
+      failedSwitches++
 
-      // 当前模型三次全部失败，尝试切换下一个模型
-      const { wrapped } = this.advance()
-      modelSwitches++
-
-      const next = this.currentProvider()
+      const next = localCurrentProvider()
       const nextPlatform = this.groups.length > 0
-        ? `平台[${this.currentGroupIdx + 1}]:${this.groups[this.currentGroupIdx].platformName}/`
+        ? `平台[${localGroupIdx + 1}]:${this.groups[localGroupIdx].platformName}/`
         : ''
 
-      if (wrapped) {
-        // 已循环回第一个模型，说明所有模型都试过了
-        log.error('所有模型均失败，无法继续', { error: String(lastErr), modelSwitches })
+      if (failedSwitches >= totalProviders) {
+        log.error('所有模型均失败，无法继续', { error: String(lastErr), failedSwitches })
         throw new Error(
-          `所有模型均失败（每个模型重试 ${MAX_RETRIES_PER_MODEL} 次，共切换 ${modelSwitches} 次）。` +
-          `最后错误: ${String(lastErr)}`,
+          `所有模型均失败（每个模型重试 ${MAX_RETRIES_PER_MODEL} 次，共切换 ${failedSwitches} 次）。` +
+          `最后错误：${String(lastErr)}`,
         )
       }
 

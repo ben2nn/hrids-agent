@@ -1,8 +1,15 @@
 // 多智能体团队工具集
 import { z } from 'zod'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { MessageBus } from '../core/coordinator/MessageBus.js'
+import { getCurrentAgentName } from '../core/coordinator/agentContext.js'
+import { getCurrentSessionId } from '../core/sessionContext.js'
 import type { ToolDef } from '../core/Tool.js'
+
+/** 获取当前会话的 TeamManager（Gateway 模式用会话级，CLI 模式用全局单例） */
+function getTeamManager(): TeamManager | null {
+  const sessionId = getCurrentSessionId()
+  return sessionId ? TeamManager.getForSession(sessionId) : TeamManager.get()
+}
 
 // ── team_create ──────────────────────────────────────────────
 const teamCreateSchema = z.object({
@@ -17,7 +24,7 @@ export const TeamCreateTool: ToolDef<typeof teamCreateSchema> = {
   readonly: false,
   describe: (i) => `创建团队: ${i.name}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
     try {
       mgr.createTeam({ name: input.name, maxConcurrent: input.max_concurrent })
@@ -40,7 +47,7 @@ export const TeamDeleteTool: ToolDef<typeof teamDeleteSchema> = {
   readonly: false,
   describe: (i) => `删除团队: ${i.name}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
     const ok = mgr.deleteTeam(input.name)
     return ok
@@ -66,7 +73,7 @@ export const AgentSpawnTool: ToolDef<typeof agentSpawnSchema> = {
   readonly: false,
   describe: (i) => `派生智能体: ${i.name} → ${i.description}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化，请先调用 team_create' }
 
     try {
@@ -114,7 +121,7 @@ export const TeamStatusTool: ToolDef<typeof teamStatusSchema> = {
   readonly: true,
   describe: (i) => `查看团队状态: ${i.team}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
 
     const team = mgr.getTeam(input.team)
@@ -154,7 +161,7 @@ export const TeamWaitTool: ToolDef<typeof teamWaitSchema> = {
   readonly: true,
   describe: (i) => `等待团队完成: ${i.team}`,
   async execute(input) {
-    const mgr = TeamManager.get()
+    const mgr = getTeamManager()
     if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
 
     try {
@@ -184,10 +191,11 @@ export const SendMessageTool: ToolDef<typeof sendMessageSchema> = {
   readonly: false,
   describe: (i) => `发消息给 ${i.to}`,
   async execute(input) {
-    const bus = MessageBus.getInstance()
-    // 发送方名称从环境变量获取（由 AgentPool 在启动时注入）
-    const from = process.env.AGENT_NAME ?? 'unknown'
-    bus.send(from, input.to, input.content)
+    const mgr = getTeamManager()
+    if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
+    // 从 AsyncLocalStorage 获取当前智能体名称，避免 process.env 多并发覆盖
+    const from = getCurrentAgentName() ?? 'unknown'
+    mgr.bus.send(from, input.to, input.content)
     return {
       type: 'success',
       output: `消息已发送给 "${input.to}"`,
@@ -207,12 +215,14 @@ export const ReceiveMessageTool: ToolDef<typeof receiveMessageSchema> = {
   readonly: true,
   describe: () => '接收消息',
   async execute(input) {
-    const bus = MessageBus.getInstance()
-    const agentName = process.env.AGENT_NAME ?? 'unknown'
+    const mgr = getTeamManager()
+    if (!mgr) return { type: 'error', message: '团队管理器未初始化' }
+    // 从 AsyncLocalStorage 获取当前智能体名称
+    const agentName = getCurrentAgentName() ?? 'unknown'
     const waitMs = (input.wait_seconds ?? 10) * 1000
 
     if (waitMs === 0) {
-      const msgs = bus.drain(agentName)
+      const msgs = mgr.bus.drain(agentName)
       if (msgs.length === 0) return { type: 'success', output: '没有新消息' }
       return {
         type: 'success',
@@ -220,7 +230,7 @@ export const ReceiveMessageTool: ToolDef<typeof receiveMessageSchema> = {
       }
     }
 
-    const msg = await bus.waitForMessage(agentName, waitMs)
+    const msg = await mgr.bus.waitForMessage(agentName, waitMs)
     if (!msg) return { type: 'success', output: '等待超时，没有收到消息' }
     return { type: 'success', output: `[来自 ${msg.from}]: ${msg.content}` }
   },

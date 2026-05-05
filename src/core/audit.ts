@@ -6,21 +6,9 @@ import { join } from 'path'
 const AUDIT_DIR = join(homedir(), '.hrids-agent', 'logs')
 const AUDIT_FILE = join(AUDIT_DIR, 'audit.log')
 
-export type AuditAction =
-  | 'file_write'
-  | 'file_edit'
-  | 'file_delete'
-  | 'bash_execute'
-  | 'powershell_execute'
-  | 'permission_check'
-  | 'permission_denied'
-  | 'session_create'
-  | 'session_destroy'
-  | 'skillhub_config_set'
-  | 'skillhub_install_cli'
-  | 'skillhub_setup'
-  | 'skillhub_uninstall'
-  | 'skillhub_upgrade'
+// 开放字符串类型，新增工具无需修改此文件
+// 建议格式：<模块>_<动作>，如 file_write、bash_execute、skillhub_install
+export type AuditAction = string
 
 export interface AuditEntry {
   ts: string
@@ -28,6 +16,7 @@ export interface AuditEntry {
   action: AuditAction
   resource: string          // 文件路径、命令内容等
   result: 'allowed' | 'denied' | 'error'
+  permissionMode?: string   // 拒绝时记录当时的权限模式，便于诊断
   details?: Record<string, unknown>
 }
 

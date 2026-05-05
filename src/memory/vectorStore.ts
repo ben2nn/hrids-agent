@@ -29,14 +29,13 @@ import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
 import { vectorToBuffer } from './embedding.js'
 
-// rowid（整数）↔ memory id（字符串）双向映射
-const rowidToId = new Map<number, string>()
-const idToRowid = new Map<string, number>()
-
 export class SqliteVecStore implements VectorStore {
   private db: Database.Database
   private dim: number | null = null
   private nextRowid = 1
+  // 实例级映射，避免多个 SqliteVecStore 实例（Gateway 多会话）共享全局 Map 导致 rowid 冲突
+  private rowidToId = new Map<number, string>()
+  private idToRowid = new Map<string, number>()
 
   constructor(db: Database.Database) {
     this.db = db
@@ -63,8 +62,8 @@ export class SqliteVecStore implements VectorStore {
     try {
       const rows = this.db.prepare('SELECT rowid, id FROM memories').all() as { rowid: number; id: string }[]
       for (const { rowid, id } of rows) {
-        rowidToId.set(rowid, id)
-        idToRowid.set(id, rowid)
+        this.rowidToId.set(rowid, id)
+        this.idToRowid.set(id, rowid)
       }
       if (rows.length > 0) {
         this.nextRowid = Math.max(...rows.map(r => r.rowid)) + 1
@@ -78,20 +77,20 @@ export class SqliteVecStore implements VectorStore {
     const row = this.db.prepare('SELECT rowid FROM memories WHERE id = ?').get(memId) as { rowid: number } | undefined
     if (!row) return
     const rowid = row.rowid
-    rowidToId.set(rowid, memId)
-    idToRowid.set(memId, rowid)
+    this.rowidToId.set(rowid, memId)
+    this.idToRowid.set(memId, rowid)
     const blob = vectorToBuffer(vector)
     this.db.prepare('INSERT OR REPLACE INTO vec_memories (rowid, embedding) VALUES (?, ?)').run(BigInt(rowid), blob)
   }
 
   async delete(memId: string): Promise<void> {
-    const rowid = idToRowid.get(memId)
+    const rowid = this.idToRowid.get(memId)
     if (rowid === undefined) return
     try {
       this.db.prepare('DELETE FROM vec_memories WHERE rowid = ?').run(BigInt(rowid))
     } catch { /* vec0 表可能不存在 */ }
-    rowidToId.delete(rowid)
-    idToRowid.delete(memId)
+    this.rowidToId.delete(rowid)
+    this.idToRowid.delete(memId)
   }
 
   async search(queryVec: number[], topK: number): Promise<VectorSearchResult[]> {
@@ -108,7 +107,7 @@ export class SqliteVecStore implements VectorStore {
 
     const results: VectorSearchResult[] = []
     for (const { rowid, distance } of rows) {
-      const id = rowidToId.get(rowid)
+      const id = this.rowidToId.get(rowid)
       if (!id) continue
       // L2 距离转余弦相似度（归一化向量）
       const score = Math.max(0, 1 - (distance * distance) / 2)
@@ -221,6 +220,7 @@ export class SeekDbStore implements VectorStore {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(15_000),
     })
     if (!res.ok && res.status !== 404) {
       throw new Error(`SeekDB ${method} ${path} → ${res.status}: ${await res.text()}`)
@@ -271,20 +271,25 @@ export class SeekDbStore implements VectorStore {
   async close(): Promise<void> { /* HTTP 无需关闭 */ }
 }
 
-// ── 工厂函数：根据环境变量创建对应后端 ──────────────────────────
+// ── 工厂函数：根据 config.json 创建对应后端 ──────────────────────────
+
+import { createRequire } from 'module'
+const _require = createRequire(import.meta.url)
 
 export function createVectorStore(db: Database.Database): VectorStore {
-  const backend = (process.env.VECTOR_STORE ?? 'sqlite').toLowerCase()
-  const url = process.env.VECTOR_STORE_URL ?? ''
-  const table = process.env.VECTOR_STORE_TABLE ?? 'memory_vectors'
+  const { loadConfig } = _require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
+  const cfg = loadConfig().vectorStore ?? {}
+  const backend = (cfg.backend ?? 'sqlite').toLowerCase()
+  const url = cfg.url ?? ''
+  const table = cfg.table ?? 'memory_vectors'
 
   switch (backend) {
     case 'pgvector':
     case 'pg':
-      if (!url) throw new Error('VECTOR_STORE=pgvector 需要配置 VECTOR_STORE_URL')
+      if (!url) throw new Error('vectorStore.backend=pgvector 需要配置 vectorStore.url')
       return new PgVectorStore(url, table)
     case 'seekdb':
-      if (!url) throw new Error('VECTOR_STORE=seekdb 需要配置 VECTOR_STORE_URL')
+      if (!url) throw new Error('vectorStore.backend=seekdb 需要配置 vectorStore.url')
       return new SeekDbStore(url, table)
     default:
       return new SqliteVecStore(db)

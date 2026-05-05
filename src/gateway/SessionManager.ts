@@ -1,6 +1,9 @@
 // 会话管理器 —— 管理 agent 进程的生命周期
-import { createProvider, createProviderFromEnv } from '../core/providers/index.js'
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
+import { createProvider, createProviderFromConfig, createVisionProviderFromConfig } from '../core/providers/index.js'
 import { QueryEngine } from '../core/QueryEngine.js'
+import type { Message, ContentBlock, ImageSource } from '../core/QueryEngine.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { createAgentTool } from '../tools/AgentTool.js'
@@ -8,31 +11,38 @@ import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt } from '../core/coordinator/coordinatorPrompt.js'
-import { loadSession, loadSessionMeta, saveSession, generateSessionId } from '../core/SessionStore.js'
+import { loadSession, loadSessionMeta, saveSession, generateSessionId, archiveSession, listArchives } from '../core/SessionStore.js'
 import { loadConfig } from '../core/Config.js'
-import { setGlobalCwd, getGlobalCwd } from '../tools/BashTool.js'
+import { setGlobalCwd, getGlobalCwd, runWithCwd } from '../core/cwd.js'
+import { runWithSession } from '../core/sessionContext.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
-import { setTodoSessionId, setTodosUpdatedCallback } from '../tools/TodoWriteTool.js'
+import { setTodosUpdatedCallback, setResetDecisionCallback, resolveResetDecision } from '../tools/TodoTool.js'
+import { resolveDecision, setGatewayDecisionCallback } from '../tools/DecisionTool.js'
 import { logger } from '../core/logger.js'
 import { auditLog } from '../core/audit.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
+import { getMemoryStackForSession, destroyMemoryStackForSession, destroyMemoryStoreForSession } from '../memory/index.js'
 import type { LLMProvider } from '../core/providers/types.js'
 import type { CreateSessionRequest, SessionInfo } from './types.js'
 import type WebSocket from 'ws'
-
+import { resolve } from 'path'
+import { loadMediaFromFile, extractMediaFromText } from '../core/MediaProcessor.js'
 const log = logger.child({ component: 'gateway' })
+
+// 事件回放缓冲区容量（每个 session 最多缓存多少条事件）
+const REPLAY_BUFFER_SIZE = 200
 
 export interface ManagedSession {
   info: SessionInfo
   engine: QueryEngine
   provider: LLMProvider
   permissions: PermissionManager
-  // 当前连接的 WebSocket 客户端（同一会话可被多个客户端订阅）
   subscribers: Set<WebSocket>
-  // 空闲超时计时器
   idleTimer: ReturnType<typeof setTimeout> | null
-  // 待处理的权限询问（key = toolName+description，value = resolve 函数）
   pendingPermissions: Map<string, (granted: boolean) => void>
+  replayBuffer: object[]
+  // 内部事件监听器（供 runMessageWithCallback 使用，避免 fake WebSocket）
+  internalListeners: Set<(ev: { type: string; delta?: string; message?: string }) => void>
 }
 
 export interface SessionManagerConfig {
@@ -44,6 +54,8 @@ export interface SessionManagerConfig {
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>()
   private config: SessionManagerConfig
+  /** cron 触发时推送到 IM 的回调（由 PlatformManager 注入） */
+  private cronIMCallback: ((agentSessionId: string, text: string) => Promise<void>) | null = null
 
   constructor(config: SessionManagerConfig = {}) {
     this.config = {
@@ -51,6 +63,19 @@ export class SessionManager {
       maxSessions: config.maxSessions ?? 20,
       authToken: config.authToken,
     }
+  }
+
+  /** 注册 cron → IM 推送回调（由 PlatformManager 在启动后调用） */
+  setCronIMCallback(cb: (agentSessionId: string, text: string) => Promise<void>): void {
+    this.cronIMCallback = cb
+  }
+
+  /**
+   * 获取会话的工作目录
+   */
+  getSessionCwd(sessionId: string): string | null {
+    const session = this.sessions.get(sessionId)
+    return session?.info.cwd ?? null
   }
 
   async createSession(req: CreateSessionRequest): Promise<ManagedSession> {
@@ -74,18 +99,19 @@ export class SessionManager {
 
     // 创建 LLM 提供商
     // 若请求显式指定了 model/provider/apiKey，则用 createProvider 精确创建；
-    // 否则走 .env 的 LLM_FALLBACK_N / DEFAULT_MODEL 多模型 fallback 配置
+    // 否则走 config.json 的 llm.fallbacks / model 多模型 fallback 配置
     const provider = (req.model || req.provider || req.apiKey)
       ? createProvider({
           model,
           apiKey: req.apiKey ?? agentConfig.apiKey,
           baseUrl: req.baseUrl ?? agentConfig.baseUrl,
           provider: req.provider as never ?? agentConfig.provider,
+          customProviders: agentConfig.customProviders,
         })
-      : createProviderFromEnv()
+      : createProviderFromConfig(agentConfig)
 
-    // 权限管理：permissionMode 优先；autoMode 兼容旧字段；否则读全局配置
-    const permMode = req.permissionMode ?? (req.autoMode ? 'auto' : agentConfig.permissionMode)
+    // 权限管理：permissionMode 优先；autoMode 兼容旧字段（映射到 craft）；否则读全局配置
+    const permMode = req.permissionMode ?? (req.autoMode ? 'craft' : agentConfig.permissionMode)
     // 使用 provider 的实际模型名（createProviderFromEnv 时 model 变量可能是旧默认值）
     const actualModel = provider.model
     const session: ManagedSession = {
@@ -96,8 +122,8 @@ export class SessionManager {
         lastActiveAt: Date.now(),
         model: actualModel,
         cwd: sessionCwd,
-        title: resumeMeta?.title,
-        permissionMode: permMode as 'ask' | 'auto' | 'plan',
+        title: resumeMeta?.title ?? req.title,
+        permissionMode: permMode as 'ask' | 'craft' | 'plan',
       },
       engine: null as unknown as QueryEngine, // 下方赋值
       provider,
@@ -105,6 +131,8 @@ export class SessionManager {
       subscribers: new Set(),
       idleTimer: null,
       pendingPermissions: new Map(),
+      replayBuffer: [],
+      internalListeners: new Set(),
     }
 
     const permissions = new PermissionManager(
@@ -114,12 +142,14 @@ export class SessionManager {
         // ask 模式：通过 WebSocket 广播权限询问，等待客户端回复
         const key = `${permReq.toolName}::${permReq.description}`
 
-        // 广播权限询问给所有订阅者
+        // 广播权限询问给所有订阅者（携带 ruleContent 供前端展示和回传）
         this.broadcast(session, {
           type: 'permission_request',
           toolName: permReq.toolName,
           description: permReq.description,
-          isReadonly: permReq.isReadonly,
+          readonly: permReq.isReadonly,
+          isDestructive: permReq.isDestructive,
+          ruleContent: permReq.ruleContent,
           key,
         })
 
@@ -150,9 +180,9 @@ export class SessionManager {
       },
     )
 
-    // 加载 MCP 工具
+    // 加载 MCP 工具（绑定到当前会话，避免跨会话共享连接）
     const mcpTools = agentConfig.mcpServers.length > 0
-      ? await loadMcpTools(agentConfig.mcpServers)
+      ? await loadMcpTools(agentConfig.mcpServers, sessionId)
       : []
 
     const tools = [
@@ -161,12 +191,12 @@ export class SessionManager {
       ...mcpTools,
     ]
 
-    TeamManager.init(provider, tools)
+    TeamManager.initForSession(sessionId, provider, tools)
 
     // 恢复已有会话或新建
     const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
 
-    const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(), sessionCwd)
+    const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd, sessionId)
 
     session.engine = new QueryEngine({
       provider,
@@ -178,23 +208,49 @@ export class SessionManager {
       maxBudgetUsd: agentConfig.maxBudgetUsd,
       autoCompactThreshold: agentConfig.autoCompactThreshold,
       initialMessages,
+      sessionCwd,
     })
     session.permissions = permissions
 
-    setGlobalCwd(sessionCwd)
+    // 注册压缩前归档回调：保留完整历史，workDir 不变
+    session.engine.onBeforeCompact = async (summary: string) => {
+      saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+      archiveSession(sessionId, summary)
+    }
 
-    setTodoSessionId(sessionId)
-    setTodosUpdatedCallback((sid, todos) => {
-      const s = this.sessions.get(sid)
+    // 注册 todos_updated 推送回调（按 sessionId 隔离，避免多会话串流）
+    // 传入 sessionId 确保只有当前会话的 todo 操作才触发此回调
+    // 注意：直接从 session.info.cwd 读取，而非 loadTodos()（后者依赖 getGlobalCwd()，
+    // 在异步回调中 getGlobalCwd() 可能已切换到其他会话的 cwd，导致读到旧数据）
+    setTodosUpdatedCallback(() => {
+      const s = this.sessions.get(sessionId)
       if (s) {
+        const todoFile = join(s.info.cwd, '.hrids', 'tasks', 'todos.json')
+        let todos: unknown[] = []
+        try {
+          if (existsSync(todoFile)) {
+            const raw = JSON.parse(readFileSync(todoFile, 'utf-8'))
+            todos = Array.isArray(raw) ? raw : []
+          }
+        } catch { /* 读取失败时推送空数组，不阻断广播 */ }
         this.broadcast(s, { type: 'todos_updated', todos })
       }
-    })
+    }, sessionId)
 
-    // Gateway 模式：注册 ask_user 回调，将问题广播给前端
+    // Gateway 模式：注册 ask_user 回调，将问题广播给前端（按 sessionId 隔离）
     setGatewayAskCallback((question, options) => {
       this.broadcast(session, { type: 'ask_user', question, options })
-    })
+    }, sessionId)
+
+    // Gateway 模式：注册 decision_request 回调，将决策请求广播给前端（按 sessionId 隔离）
+    setGatewayDecisionCallback((payload) => {
+      this.broadcast(session, payload)
+    }, sessionId)
+
+    // Gateway 模式：注册 todo_reset 决策推送回调，将重置请求广播给前端（按 sessionId 隔离）
+    setResetDecisionCallback((payload) => {
+      this.broadcast(session, payload)
+    }, sessionId)
 
     this.sessions.set(sessionId, session)
     this.resetIdleTimer(session)
@@ -203,6 +259,12 @@ export class SessionManager {
 
   getSession(id: string): ManagedSession | undefined {
     return this.sessions.get(id)
+  }
+
+  /** 向指定 session 的所有 WebSocket 订阅者广播消息 */
+  broadcastToSession(sessionId: string, msg: object): void {
+    const session = this.sessions.get(sessionId)
+    if (session) this.broadcast(session, msg)
   }
 
   listSessions(): SessionInfo[] {
@@ -232,9 +294,15 @@ export class SessionManager {
     }
     session.subscribers.clear()
 
-    await disconnectAllMcp()
-    setTodoSessionId(null)
-    setGatewayAskCallback(null)
+    await disconnectAllMcp(id)
+    setTodosUpdatedCallback(null, id)
+    setGatewayAskCallback(null, id)
+    setGatewayDecisionCallback(null, id)
+    setResetDecisionCallback(null, id)
+    TeamManager.destroySession(id)
+    // 清理会话级记忆实例（释放 SQLite 连接）
+    destroyMemoryStackForSession(id)
+    destroyMemoryStoreForSession(id)
     this.sessions.delete(id)
   }
 
@@ -273,90 +341,500 @@ export class SessionManager {
     const session = this.sessions.get(sessionId)
     if (!session) return
     session.subscribers.add(ws)
-    this.resetIdleTimer(session)
+    log.debug('WS 订阅', { sessionId, subscriberCount: session.subscribers.size })
+
+    // 只在 agent 正在运行时才回放缓冲区（busy 状态）
+    // ready 状态下历史消息通过 REST API /sessions/:id/messages 加载，无需回放
+    if (session.info.status === 'busy' && session.replayBuffer.length > 0) {
+      log.debug('回放缓冲区（agent 运行中）', { sessionId, events: session.replayBuffer.length })
+      for (const msg of session.replayBuffer) {
+        try { ws.send(JSON.stringify(msg)) } catch { /* 忽略 */ }
+      }
+    }
   }
 
   unsubscribe(sessionId: string, ws: WebSocket): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
     session.subscribers.delete(ws)
-    this.resetIdleTimer(session)
+    log.debug('WS 取消订阅', { sessionId, subscriberCount: session.subscribers.size })
+    // 注意：不重置空闲计时器 —— session 生命周期与订阅者数量无关
   }
 
-  // 向会话的所有订阅者广播消息
   broadcast(session: ManagedSession, msg: object): void {
-    const text = JSON.stringify(msg)
+    const msgWithTs = { ...msg, timestamp: Date.now() }
+    const text = JSON.stringify(msgWithTs)
+    const msgType = (msg as Record<string, unknown>).type
+    if (msgType !== 'text_delta' && msgType !== 'tool_log') {
+      log.debug('广播消息', { sessionId: session.info.id, type: msgType, subscribers: session.subscribers.size })
+    }
+
+    // 触发内部监听器（供 runMessageWithCallback 使用）
+    if (session.internalListeners.size > 0) {
+      const ev = msg as { type: string; delta?: string; message?: string }
+      for (const listener of session.internalListeners) {
+        try { listener(ev) } catch { /* 忽略监听器异常 */ }
+      }
+    }
+
+    if (msgType === 'done' || msgType === 'error' || msgType === 'interrupted') {
+      session.replayBuffer.push(msgWithTs)
+    } else if (msgType === 'message') {
+      session.replayBuffer = [msgWithTs]
+    } else {
+      session.replayBuffer.push(msgWithTs)
+      if (session.replayBuffer.length > REPLAY_BUFFER_SIZE) {
+        session.replayBuffer.shift()
+      }
+    }
+
     for (const ws of session.subscribers) {
       try { ws.send(text) } catch { /* 忽略断开的连接 */ }
     }
   }
 
-  // 执行用户消息，流式广播事件
-  async runMessage(sessionId: string, content: string): Promise<void> {
+  // 定时任务触发：直接发送提醒消息，不经过 LLM
+  async sendCronReminder(sessionId: string, cronJob: { id: string; description: string; task: string }): Promise<void> {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
-    if (session.info.status === 'busy') throw new Error('会话正忙，请等待当前任务完成')
+
+    // 生成本次请求的唯一 ID
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 
     session.info.status = 'busy'
     session.info.lastActiveAt = Date.now()
     this.resetIdleTimer(session)
 
-    log.debug('处理消息', { sessionId, contentLength: content.length })
+    log.info('定时任务触发，发送提醒', { sessionId, requestId, jobId: cronJob.id, description: cronJob.description })
 
+    try {
+      // 广播请求开始事件
+      this.broadcast(session, {
+        type: 'request_start',
+        requestId,
+        trigger: 'cron',
+        description: cronJob.description,
+      })
+
+      // 广播定时任务分隔标记
+      this.broadcast(session, {
+        type: 'cron_trigger',
+        requestId,
+        description: cronJob.description,
+      })
+
+      // 直接广播 assistant 消息（提醒内容）
+      this.broadcast(session, {
+        type: 'text_delta',
+        requestId,
+        delta: cronJob.task,
+      })
+
+      // 广播完成事件
+      this.broadcast(session, {
+        type: 'done',
+        requestId,
+      })
+
+      // 将提醒消息写入 history（作为 assistant 消息），并持久化
+      // content 中加 [定时任务触发] 前缀，让 LLM 能识别这条消息是 cron 自动触发的，
+      // 而非对话上下文的一部分，避免用户回复"知了"时 LLM 误判为需要重新执行任务。
+      session.engine.setHistory([
+        ...session.engine.getHistory(),
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: `[定时任务触发: ${cronJob.description}]\n${cronJob.task}` }],
+          requestId,
+          trigger: 'cron' as const,
+          cronDescription: cronJob.description,
+        },
+      ])
+      saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+
+      // 推送到 IM 平台（如果有绑定的 IM 会话）
+      if (this.cronIMCallback) {
+        void this.cronIMCallback(sessionId, cronJob.task).catch(err => {
+          log.warn('cron 推送到 IM 失败', { sessionId, error: String(err) })
+        })
+      }
+
+    } catch (err) {
+      log.error('定时任务提醒失败', { sessionId, error: String(err) })
+      this.broadcast(session, {
+        type: 'error',
+        requestId,
+        message: `定时任务提醒失败: ${String(err)}`,
+      })
+    } finally {
+      session.info.status = 'ready'
+    }
+  }
+
+  /**
+   * 执行用户消息，通过回调接收事件流（供 IM 平台等非 WebSocket 场景使用）。
+   * 避免 fake WebSocket 的类型不安全和内存泄漏问题。
+   *
+   * @param onEvent 事件回调，接收 { type, delta?, message? } 格式的事件
+   */
+  async runMessageWithCallback(
+    sessionId: string,
+    content: string,
+    onEvent: (ev: { type: string; delta?: string; message?: string }) => void,
+    attachments?: Array<{ name: string; data: string; mediaType: string }>,
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    if (session.info.status === 'busy') throw new Error('会话正忙，请等待当前任务完成')
+
+    // 注册内部监听器，broadcast 时会同步触发
+    session.internalListeners.add(onEvent)
+    try {
+      await runWithCwd(session.info.cwd, () =>
+        runWithSession(sessionId, () =>
+          this._runMessageInContext(session, sessionId, content, attachments, undefined)
+        )
+      )
+    } finally {
+      session.internalListeners.delete(onEvent)
+    }
+  }
+
+  // 执行用户消息，流式广播事件
+  async runMessage(sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>, cronJob?: { id: string; description: string }): Promise<void> {
+    const session = this.sessions.get(sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    if (session.info.status === 'busy') throw new Error('会话正忙，请等待当前任务完成')
+
+    // 在会话自己的 cwd 上下文中运行，与其他并发会话完全隔离
+    // 同时注入 sessionId 上下文，供工具层获取会话级 TeamManager
+    return runWithCwd(session.info.cwd, () =>
+      runWithSession(sessionId, () =>
+        this._runMessageInContext(session, sessionId, content, attachments, cronJob)
+      )
+    )
+  }
+
+  // 实际执行逻辑（已在正确的 cwd 上下文中）
+  private async _runMessageInContext(session: ManagedSession, sessionId: string, content: string, attachments?: Array<{ name: string; data: string; mediaType: string }>, cronJob?: { id: string; description: string }, systemContinuation = false): Promise<void> {
+    // 生成本次请求的唯一 ID，用于前端消息分组
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    
+    // 设置 QueryEngine 的 requestId，用于 tool_result 关联
+    session.engine.setRequestId(requestId)
+    // 设置触发来源，用于历史消息标记
+    session.engine.setTrigger(cronJob ? 'cron' : 'user', cronJob?.description)
+    
+    session.info.status = 'busy'
+    session.info.lastActiveAt = Date.now()
+    this.resetIdleTimer(session)
+
+    // 新一轮开始：清空上一轮的回放缓冲区，避免新客户端看到旧轮次的输出
+    session.replayBuffer = []
+
+    log.debug('处理消息', { sessionId, requestId, contentLength: content.length, attachmentCount: attachments?.length ?? 0 })
+    log.info('开始执行消息', { sessionId, requestId, model: session.info.model, permissionMode: session.permissions.getMode(), contentPreview: content.slice(0, 100) })
+
+    // 广播请求开始事件，携带 requestId 和触发类型
+    // systemContinuation（轮次上限自动续跑）不广播，避免前端出现系统内部消息
+    if (!systemContinuation) {
+      this.broadcast(session, {
+        type: 'request_start',
+        requestId,
+        trigger: cronJob ? 'cron' : 'user',
+        description: cronJob?.description,
+      })
+    }
+
+    // 定时任务触发时，额外发送独立的分隔标记事件
+    if (cronJob) {
+      this.broadcast(session, {
+        type: 'cron_trigger',
+        requestId,
+        description: cronJob.description,
+      })
+    }
+
+    // 记录最近一条用户消息（跳过系统内部注入的消息和自动续跑）
+    if (!systemContinuation && !content.startsWith('[系统') && !content.startsWith('[上下文压缩]')) {
+      session.info.lastUserMessage = content.slice(0, 80)
+    }
+
+    // 检测是否包含图片或 PDF 附件
+    const visionMediaTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
+    const hasVisionAttachment = attachments?.some(a => visionMediaTypes.includes(a.mediaType)) ?? false
+
+    log.info('[图片诊断] 入口', {
+      sessionId,
+      attachmentsCount: attachments?.length ?? 0,
+      attachmentMimeTypes: attachments?.map(a => a.mediaType) ?? [],
+      hasVisionAttachment,
+      contentPreview: content.slice(0, 80),
+    })
+
+    // 如果没有显式附件，尝试从消息文本中提取 @引用的媒体（本地文件 / URL）
+    // 委托给 MediaProcessor：支持压缩、缓存、URL fetch、PDF
+    const inlineAttachments: Array<{ name: string; data: string; mediaType: string }> = []
+    let processedContent = content  // 去掉 @引用后的干净文本
+    if (!hasVisionAttachment) {
+      const cwd = session.info.cwd
+      const { attachments: extracted, cleanText, errors } = await extractMediaFromText(content, cwd)
+      if (extracted.length > 0) {
+        inlineAttachments.push(...extracted)
+        processedContent = cleanText
+        if (errors.length > 0) {
+          processedContent += `\n\n[媒体加载失败]\n${errors.join('\n')}`
+        }
+        log.info('从消息文本提取媒体附件', { sessionId, count: extracted.length, errors: errors.length })
+      }
+    }
+
+    // 如果仍然没有附件，检测消息是否有视觉意图，并从历史中找最近上传的图片
+    if (!hasVisionAttachment && inlineAttachments.length === 0) {
+      const hasVisionIntent = isVisionIntent(content)
+      if (hasVisionIntent) {
+        const recentImages = await extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd)
+        inlineAttachments.push(...recentImages)
+        if (recentImages.length > 0) {
+          log.info('检测到视觉意图，从历史中提取最近图片', { sessionId, count: recentImages.length, files: recentImages.map(a => a.name) })
+        }
+      }
+    }
+
+    const effectiveAttachments = attachments ?? inlineAttachments
+    const hasEffectiveVision = effectiveAttachments.some(a => visionMediaTypes.includes(a.mediaType))
+
+    log.info('[图片诊断] effectiveAttachments', {
+      sessionId,
+      effectiveCount: effectiveAttachments.length,
+      hasEffectiveVision,
+      mimeTypes: effectiveAttachments.map(a => a.mediaType),
+      inlineCount: inlineAttachments.length,
+    })
+
+    // 如果有视觉内容，尝试切换到视觉模型
+    let originalProvider: LLMProvider | null = null
+    let visionProvider: LLMProvider | null = null
+    if (hasEffectiveVision) {
+      const agentConfig = loadConfig()
+      visionProvider = createVisionProviderFromConfig(agentConfig)
+      log.info('[图片诊断] 视觉模型创建', {
+        sessionId,
+        hasVisionConfig: !!agentConfig.vision,
+        visionFallbacks: (agentConfig.vision as { fallbacks?: unknown[] } | undefined)?.fallbacks?.length ?? 0,
+        providerCreated: !!visionProvider,
+        providerModel: visionProvider?.model ?? null,
+      })
+      if (visionProvider) {
+        log.info('检测到图片/PDF，切换到视觉模型', { sessionId, model: visionProvider.model })
+        originalProvider = session.provider
+        session.engine.setProvider(visionProvider)
+        this.broadcast(session, { type: 'model_switched', requestId, model: visionProvider.model, reason: 'vision_content' })
+      } else {
+        log.warn('检测到图片/PDF，但未配置视觉模型（config.json 的 vision 字段），使用当前模型', { sessionId })
+      }
+    }
+
+    // 构建用户消息（支持多模态内容块）
+    // processedContent：去掉 @引用后的干净文本（inlineAttachments 场景），或原始 content
+    const textForMsg = inlineAttachments.length > 0 ? processedContent : content
+    let userMsg: Message | string
+    if (effectiveAttachments.length > 0) {
+      const contentBlocks: ContentBlock[] = []
+      // 先添加文本内容
+      if (textForMsg.trim()) {
+        contentBlocks.push({ type: 'text', text: textForMsg })
+      }
+      // 添加附件内容块
+      for (const att of effectiveAttachments) {
+        if (visionMediaTypes.includes(att.mediaType)) {
+          contentBlocks.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              mediaType: att.mediaType as ImageSource['mediaType'],
+              data: att.data,
+            },
+          })
+        }
+      }
+      log.info('[图片诊断] 构建 ContentBlock', { sessionId, blockTypes: contentBlocks.map(b => b.type) })
+      userMsg = { role: 'user', content: contentBlocks }
+    } else {
+      log.info('[图片诊断] 无附件，纯文本消息', { sessionId })
+      userMsg = content
+    }
+
+    // ── 视觉模型：精简调用（不走 QueryEngine，避免携带工具和无关历史）──────────
+    if (hasEffectiveVision && visionProvider) {
+      // system prompt 精简为一句话，不注入工具规范、记忆等无关内容
+      const visionSystemPrompt = ['你是一个图像分析助手，请根据用户提供的图片和问题给出准确、详细的回答。']
+
+      // 只传图片消息，不传历史（视觉模型无需上下文）
+      const visionMessages = [userMsg as Message]
+
+      log.info('视觉模型精简调用', { sessionId, model: visionProvider.model })
+
+      let visionText = ''
+      const VISION_TIMEOUT_MS = 60_000  // 视觉调用超时 60 秒
+      const visionAbort = new AbortController()
+      const visionTimer = setTimeout(() => visionAbort.abort(), VISION_TIMEOUT_MS)
+
+      try {
+        for await (const chunk of visionProvider.stream(
+          visionMessages as never,
+          [],           // 不传工具
+          visionSystemPrompt,
+          4096,
+          visionAbort.signal,
+        )) {
+          if (visionAbort.signal.aborted) break
+          if (chunk.type === 'text_delta' && chunk.delta) {
+            visionText += chunk.delta
+            const clientMsg = toClientMessage({ type: 'text_delta', delta: chunk.delta }, requestId, visionProvider.model)
+            if (clientMsg) this.broadcast(session, clientMsg)
+          } else if (chunk.type === 'usage' && chunk.usage) {
+            const clientMsg = toClientMessage({ type: 'usage', inputTokens: chunk.usage.inputTokens, outputTokens: chunk.usage.outputTokens, costUsd: 0 }, requestId, visionProvider.model)
+            if (clientMsg) this.broadcast(session, clientMsg)
+          }
+        }
+      } catch (err) {
+        const isTimeout = visionAbort.signal.aborted
+        log.error('视觉模型调用失败', { sessionId, error: String(err), isTimeout })
+        this.broadcast(session, { type: 'error', requestId, message: isTimeout ? '视觉模型响应超时（60s）' : `视觉模型调用失败: ${String(err)}` })
+      } finally {
+        clearTimeout(visionTimer)
+      }
+
+      // 将视觉模型的回答写入主会话历史，供后续对话引用
+      if (visionText.trim()) {
+        const history = [...session.engine.getHistory()]
+        // 历史存储策略：统一存 @filename 文本（图片已落盘，无论 Web 还是 IM 路径）
+        // inlineAttachments 路径（@filename 提取）：processedContent 文本已含 @filename
+        // 显式 attachments 路径（IM 落盘后）：content 已被 PlatformManager 改为含 @filename 的文本
+        // 两种情况下 content 都已包含 @filename，直接存字符串即可
+        const userMsgForHistory: Message = {
+          role: 'user',
+          content: inlineAttachments.length > 0 ? processedContent : content,
+          requestId,
+          timestamp: Date.now(),
+          trigger: 'user' as const,
+        }
+        history.push(userMsgForHistory)
+        history.push({ role: 'assistant', content: visionText, requestId, timestamp: Date.now(), trigger: 'user' as const })
+        session.engine.setHistory(history)
+        saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+      }
+
+      this.broadcast(session, toClientMessage({ type: 'done' }, requestId, visionProvider.model) ?? { type: 'done', requestId })
+      // 视觉调用完成，恢复原始 provider 和 session 状态
+      if (originalProvider) session.engine.setProvider(originalProvider)
+      session.info.status = 'ready'
+      session.info.lastActiveAt = Date.now()
+      this.resetIdleTimer(session)
+      return
+    }
     // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
-    const coordinatorPrompt = getCoordinatorSystemPrompt(content)
+    const allTools = session.engine.getTools()
+    const coordinatorPrompt = getCoordinatorSystemPrompt(content, allTools)
+
+    // 追加动态层（记忆、环境信息），确保每条消息都能看到最新的记忆和 Git 状态
+    const fullPrompt = await buildSystemContext(coordinatorPrompt, session.info.cwd, sessionId)
 
     // plan 模式：动态注入规划模式系统提示，让 LLM 知道文档类文件可写，代码文件不可写
     if (session.permissions.getMode() === 'plan') {
-      const planModeAppendix = `
+      const readonlyTools = allTools.filter(t => t.readonly).map(t => t.name)
+      const writeTools = allTools.filter(t => !t.readonly).map(t => t.name)
 
-## 当前模式：Plan（规划模式）
-你现在处于规划模式。在此模式下：
+      const planModeAppendix = `## 当前模式：Plan（规划模式）
+你现在处于规划模式，所有写操作均被系统禁止。只读工具可以正常使用，包括 ask_user（询问用户）和 web_search（搜索信息）。
 
-**允许的写操作（文档类文件）：**
-- 扩展名为 .md、.txt、.rst、.adoc 的文档文件
-- 扩展名为 .json、.yaml、.yml、.toml 的结构化数据文件
-- 扩展名为 .csv、.tsv 的数据文件
-- .kiro/、docs/、spec/、design/、plans/、notes/ 等文档目录下的任意文件
+### 可用工具（只读，可正常调用）
+${readonlyTools.join('、')}
 
-**禁止的写操作（代码/配置文件）：**
-- 源代码文件（.ts、.js、.py、.go 等）
-- 系统配置文件（.env、package.json、tsconfig.json 等）
-- 执行命令（bash、powershell 等）
+### 不可用工具（写操作，调用将被拒绝）
+${writeTools.join('、')}
 
-你的工作流程：
-1. 使用只读工具（file_read、glob、grep 等）充分了解现状
-2. 将需求文档、设计文档、任务清单等写入 .md 文件
-3. 不要尝试修改代码或执行命令，调用了也会被系统拒绝
-用户确认文档后，会切换到执行模式来实施变更。`
-      session.engine.setSystemPrompt(coordinatorPrompt + planModeAppendix)
+### 你的任务
+1. 使用只读工具充分了解现状：可以读文件、搜索代码、搜索网络信息、询问用户等
+2. 制定详细的执行计划：列出每一步要做什么、修改哪些文件、执行什么命令
+3. 不要尝试调用写操作工具，即使调用也会被系统拒绝
+4. 计划完成后，告知用户"已完成规划，请切换到执行模式后继续"
+
+用户确认计划后，会将模式切换为 ask 或 craft，届时写操作将可用。`
+      session.engine.setSystemPrompt([...fullPrompt, planModeAppendix])
     } else {
-      // 非 plan 模式：使用动态注入了任务扩展的 coordinator prompt
-      session.engine.setSystemPrompt(coordinatorPrompt)
+      session.engine.setSystemPrompt(fullPrompt)
     }
 
-    const msgWithCtx = content
+    const msgWithCtx = userMsg
 
+    // 保存 generator 引用，以便在异常时显式关闭，确保 QueryEngine 内部 finally 执行
+    const gen = session.engine.send(msgWithCtx)
+    let hitTurnLimit = false
     try {
-      for await (const ev of session.engine.send(msgWithCtx)) {
+      for await (const ev of gen) {
+        // 检测轮次上限，标记后根据 todo 状态决定处理方式
+        if (ev.type === 'turn_limit') {
+          hitTurnLimit = true
+        }
         // 将 QueryEngine 内部事件格式转换为前端协议格式
-        const clientMsg = toClientMessage(ev)
-        if (clientMsg) this.broadcast(session, clientMsg)
+        const clientMsg = toClientMessage(ev, requestId, session.info.model)
+        if (clientMsg) {
+          // 过滤高频事件，避免日志爆炸
+          if (ev.type !== 'text_delta' && ev.type !== 'tool_log') {
+            log.debug('QueryEngine 事件 → 广播', { sessionId, requestId, evType: ev.type })
+          }
+          this.broadcast(session, clientMsg)
+        } else if (ev.type !== 'text_delta' && ev.type !== 'tool_log') {
+          log.debug('QueryEngine 事件（无对应客户端消息，跳过广播）', { sessionId, requestId, evType: ev.type })
+        }
 
         // 每次工具调用结束后增量保存，减少崩溃时的数据丢失
         if (ev.type === 'tool_end' || ev.type === 'done') {
           saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
         }
       }
+    } catch (err) {
+      log.error('runMessage 事件循环异常', { sessionId, error: String(err) })
+      // 显式关闭 generator，触发 QueryEngine.send() 的 finally 块，释放 running 锁
+      await gen.return(undefined)
+      throw err
     } finally {
+      // 视觉模型切换后恢复原始 provider
+      if (originalProvider) {
+        session.engine.setProvider(originalProvider)
+        log.debug('视觉模型任务完成，恢复原始模型', { sessionId, model: originalProvider.model })
+      }
       session.info.status = 'ready'
       session.info.lastActiveAt = Date.now()
+      // 任务完成后重置空闲计时器，从此刻开始计算空闲时间
+      this.resetIdleTimer(session)
+      log.debug('runMessage 完成', { sessionId })
+    }
+
+    // 达到轮次上限：仅 ask/plan 模式会触发（craft 模式 QueryEngine 内部无限制）
+    // 无论是否有 todo，都自动续跑——用户选 ask/plan 是为了控制写操作权限，
+    // 不是为了每 N 轮被打断。continuation_needed 只用于 LLM 主动停下的场景。
+    if (hitTurnLimit) {
+      log.info('轮次上限，自动续跑', { sessionId, permMode: session.permissions.getMode() })
+      // 以系统身份续跑：不广播 request_start，不记录 lastUserMessage，不在前端显示为用户消息
+      // QueryEngine 在 turn_limit 时已往 history 注入了 [系统提示]，此处直接触发下一轮执行
+      void runWithCwd(session.info.cwd, () =>
+        runWithSession(sessionId, () =>
+          this._runMessageInContext(session, sessionId, '[系统提示] 请继续执行之前未完成的任务，从中断处接着做。', undefined, undefined, true)
+        )
+      ).catch((err) => {
+        log.error('轮次上限续跑失败', { sessionId, error: String(err) })
+        this.broadcast(session, { type: 'error', requestId, message: `自动续跑失败: ${String(err)}` })
+      })
+      return
     }
 
     // 后台钩子：记忆提炼 + Skill 自动沉淀（不阻塞响应）
     const memoryCondense = loadConfig().memoryCondense ?? false
+    const skillDistill = loadConfig().autoDistillSkill ?? false
     void autoExtractMemories(session.engine, sessionId, session.provider, memoryCondense)
-    void autoDistillSkill(session.engine, session.provider)
+    void autoDistillSkill(session.engine, session.provider, skillDistill)
   }
 
   // 处理客户端发来的控制消息
@@ -367,14 +845,21 @@ export class SessionManager {
     let msg: Record<string, unknown>
     try { msg = JSON.parse(raw) } catch { return }
 
+    log.debug('收到客户端消息', { sessionId, type: msg.type, contentLength: typeof msg.content === 'string' ? msg.content.length : undefined })
+
     switch (msg.type) {
-      case 'message':
-        void this.runMessage(sessionId, String(msg.content ?? '')).catch((err) => {
+      case 'message': {
+        // 支持附件（图片/PDF）：attachments 为 Array<{ name, data, mediaType }>
+        const attachments = Array.isArray(msg.attachments)
+          ? (msg.attachments as Array<{ name: string; data: string; mediaType: string }>)
+          : undefined
+        void this.runMessage(sessionId, String(msg.content ?? ''), attachments).catch((err) => {
           log.error('runMessage 未捕获异常', { sessionId, error: String(err) })
           this.broadcast(session, { type: 'error', message: `执行失败: ${String(err)}` })
           session.info.status = 'ready'
         })
         break
+      }
       // 恢复中断的任务：直接注入"继续执行"指令，history 里已有中断上下文
       case 'resume':
         void this.runMessage(sessionId, String(msg.content ?? '请继续执行之前未完成的任务，从中断处接着做。')).catch((err) => {
@@ -387,15 +872,38 @@ export class SessionManager {
         session.engine.abort()
         break
       case 'user_reply':
-        resolveAskUser(String(msg.answer ?? ''))
+        resolveAskUser(String(msg.answer ?? ''), sessionId)
+        break
+      case 'decision_reply':
+        resolveDecision(String(msg.answer ?? ''), sessionId)
+        break
+      case 'todo_reset_reply':
+        resolveResetDecision(String(msg.answer ?? ''), sessionId)
         break
       // 客户端回复权限询问
       case 'permission_reply': {
         const key = String(msg.key ?? '')
         const granted = msg.granted === true
+        // permanent=true 时持久化规则；session=true 时会话内批准（含内容级）
+        const permanent = msg.permanent === true
+        const sessionApprove = msg.session === true
         const resolve = session.pendingPermissions.get(key)
         if (resolve) {
-          log.info('收到权限回复', { sessionId, key, granted })
+          log.info('收到权限回复', { sessionId, key, granted, permanent, sessionApprove })
+          if (granted) {
+            // 解析 key 中的 toolName 和 ruleContent（key = "toolName::description"）
+            // ruleContent 由前端从 permission_request 的 ruleContent 字段回传
+            const ruleContent = msg.ruleContent ? String(msg.ruleContent) : undefined
+            const toolName = key.split('::')[0]
+            if (permanent) {
+              // 永久批准：持久化到磁盘
+              const rule = ruleContent ? `${toolName}(${ruleContent})` : toolName
+              session.permissions.approvePermanent(rule)
+            } else if (sessionApprove) {
+              // 会话内批准：精确到内容级
+              session.permissions.approveSession(toolName, ruleContent)
+            }
+          }
           resolve(granted)
         }
         break
@@ -403,7 +911,8 @@ export class SessionManager {
       case 'set_cwd': {
         const cwd = String(msg.cwd ?? '')
         if (cwd) {
-          setGlobalCwd(cwd)
+          // 只更新会话自己的 cwd，不修改全局变量
+          // 下次 runMessage 时 runWithCwd 会用 session.info.cwd 建立新的上下文
           session.info.cwd = cwd
           this.broadcast(session, { type: 'cwd_changed', cwd })
         }
@@ -411,7 +920,7 @@ export class SessionManager {
       }
       case 'set_permission_mode': {
         const mode = msg.mode as string
-        if (mode === 'ask' || mode === 'auto' || mode === 'plan') {
+        if (mode === 'ask' || mode === 'craft' || mode === 'plan') {
           session.permissions.setMode(mode)
           session.info.permissionMode = mode
           this.broadcast(session, { type: 'permission_mode_changed', mode })
@@ -419,19 +928,44 @@ export class SessionManager {
         }
         break
       }
+      case 'clear_history': {
+        // 清除会话历史：中止当前任务，清空 engine 历史，通知前端
+        if (session.info.status === 'busy') {
+          session.engine.abort()
+        }
+        session.engine.clearHistory()
+        saveSession(sessionId, [], session.info.model, session.info.cwd)
+        this.broadcast(session, { type: 'history_cleared' })
+        log.info('会话历史已清除', { sessionId })
+        break
+      }
     }
   }
 
   private resetIdleTimer(session: ManagedSession): void {
     if (session.idleTimer) clearTimeout(session.idleTimer)
-    if (this.config.idleTimeoutMs === 0) return
+    if (!this.config.idleTimeoutMs) return
 
+    const timeoutMs = this.config.idleTimeoutMs
     session.idleTimer = setTimeout(() => {
-      if (session.subscribers.size === 0) {
-        log.info('会话空闲超时，自动销毁', { sessionId: session.info.id })
-        void this.destroySession(session.info.id)
+      // 空闲超时：基于 lastActiveAt，与订阅者数量无关
+      // agent 运行中（busy）不销毁，等任务完成后下一次计时器触发再判断
+      if (session.info.status === 'busy') {
+        this.resetIdleTimer(session)
+        return
       }
-    }, this.config.idleTimeoutMs)
+      const idleMs = Date.now() - session.info.lastActiveAt
+      if (idleMs >= timeoutMs) {
+        log.info('会话空闲超时，自动销毁', { sessionId: session.info.id, idleMs })
+        void this.destroySession(session.info.id)
+      } else {
+        // 还没到超时时间（可能 lastActiveAt 被更新过），重新调度
+        session.idleTimer = setTimeout(() => {
+          log.info('会话空闲超时，自动销毁', { sessionId: session.info.id })
+          void this.destroySession(session.info.id)
+        }, timeoutMs - idleMs)
+      }
+    }, timeoutMs)
   }
 }
 
@@ -439,59 +973,150 @@ export class SessionManager {
 // QueryEngine 使用内部字段名（id/name/line/costUsd），前端期望不同的字段名
 import type { StreamEvent } from '../core/QueryEngine.js'
 
-function toClientMessage(ev: StreamEvent): object | null {
+function toClientMessage(ev: StreamEvent, requestId: string, model = ''): object | null {
   switch (ev.type) {
     case 'text_delta':
-      return { type: 'text_delta', delta: ev.delta }
+      return { type: 'text_delta', requestId, delta: ev.delta }
 
     case 'tool_start':
-      return { type: 'tool_start', toolId: ev.id, toolName: ev.name, input: ev.input }
+      return { type: 'tool_start', requestId, toolId: ev.id, toolName: ev.name, input: ev.input }
 
     case 'tool_log':
-      return { type: 'tool_log', toolId: ev.id, log: ev.line }
+      return { type: 'tool_log', requestId, toolId: ev.id, log: ev.line }
 
     case 'tool_end': {
       // result.type: 'success' | 'error' → status; 'denied' 由 permission_denied 事件处理
       const status = ev.result.type === 'success' ? 'success' : 'error'
       const result = ev.result.type === 'success' ? ev.result.output : ev.result.message
-      return { type: 'tool_end', toolId: ev.id, toolName: ev.name, status, result }
+      return { type: 'tool_end', requestId, toolId: ev.id, toolName: ev.name, status, result }
     }
 
     case 'permission_denied':
       // 权限拒绝：以 tool_end denied 状态通知前端
-      return { type: 'tool_end', toolId: ev.id, toolName: ev.toolName, status: 'denied' }
+      return { type: 'tool_end', requestId, toolId: ev.id, toolName: ev.toolName, status: 'denied' }
 
     case 'usage':
       return {
         type: 'usage',
+        requestId,
         inputTokens: ev.inputTokens,
         outputTokens: ev.outputTokens,
         cost: ev.costUsd,
-        model: '',
+        model,
       }
 
     case 'budget_exceeded':
       return { type: 'budget_exceeded', message: `已超出预算上限（$${ev.limitUsd}），当前花费 $${ev.costUsd.toFixed(4)}` }
 
     case 'done':
-      return { type: 'done' }
+      return { type: 'done', requestId }
 
     case 'error':
-      return { type: 'error', message: ev.message }
+      return { type: 'error', requestId, message: ev.message }
 
     case 'interrupted':
-      return { type: 'error', message: ev.message }
+      return { type: 'error', requestId, message: ev.message }
 
     // 以下事件不需要推送给前端
     case 'turn_limit':
     case 'compact_start':
-    case 'compact_done':
       return null
 
+    case 'compact_done':
+      return { type: 'compact_done', summary: ev.summary }
+
     case 'continuation_needed':
-      return { type: 'continuation_needed' }
+      return { type: 'continuation_needed', requestId }
 
     default:
       return null
   }
+}
+
+// ── 视觉意图检测 ──────────────────────────────────────────────────────────────
+// 判断用户消息是否在请求分析/查看图片或 PDF
+function isVisionIntent(message: string): boolean {
+  const VISION_PATTERNS = [
+    // 中文：分析/解析/识别/描述/看/读/理解 + 图片/图像/照片/截图/PDF
+    /分析.{0,10}(图|照片|截图|图片|图像|pdf)/i,
+    /解析.{0,10}(图|照片|截图|图片|图像|pdf)/i,
+    /识别.{0,10}(图|照片|截图|图片|图像)/i,
+    /描述.{0,10}(图|照片|截图|图片|图像)/i,
+    /(看|读|理解|查看|检查).{0,10}(图|照片|截图|图片|图像|pdf)/i,
+    /这(张|幅|个|份).{0,5}(图|照片|截图|图片|图像|pdf)/i,
+    /图(片|像|中|上|里).{0,20}(是|有|写|显示|包含)/i,
+    /图(片|像)是什么/i,
+    /图(片|像)里/i,
+    /照片(里|中|上)/i,
+    /截图(里|中|上)/i,
+    /pdf(里|中|内容)/i,
+    // 英文
+    /analyze.{0,10}(image|photo|picture|screenshot|pdf)/i,
+    /describe.{0,10}(image|photo|picture|screenshot)/i,
+    /what.{0,10}(image|photo|picture|screenshot)/i,
+    /read.{0,10}(image|photo|picture|pdf)/i,
+    /this (image|photo|picture|screenshot|pdf)/i,
+  ]
+  return VISION_PATTERNS.some(p => p.test(message))
+}
+
+// ── 从历史消息中提取最近上传的图片文件 ──────────────────────────────────────
+// 扫描历史中最近的用户消息：
+//   1. 优先从 ContentBlock 数组中直接取 image block（IM 图片走这条路）
+//   2. 其次扫描文本中的 @filename 引用（Web 上传走这条路）
+async function extractRecentImagesFromHistory(
+  history: readonly import('../core/QueryEngine.js').Message[],
+  cwd: string,
+): Promise<Array<{ name: string; data: string; mediaType: string }>> {
+  const imagePattern = /@([^\s@]+\.(?:jpg|jpeg|png|gif|webp|bmp|tiff?|avif|pdf))/gi
+
+  // 从最新消息往前扫描，找到第一批图片（最近一次上传的那批）
+  const result: Array<{ name: string; data: string; mediaType: string }> = []
+  const seen = new Set<string>()
+
+  // 只扫描最近 20 条消息，避免性能问题
+  const recentHistory = history.slice(-20)
+  for (let i = recentHistory.length - 1; i >= 0; i--) {
+    const msg = recentHistory[i]
+    if (msg.role !== 'user') continue
+
+    // 路径 1：ContentBlock 数组中的 image block（IM 图片直接携带 base64）
+    if (Array.isArray(msg.content)) {
+      const blocks = msg.content as Array<{ type: string; source?: { type: string; mediaType?: string; data?: string } }>
+      for (const b of blocks) {
+        if (b.type === 'image' && b.source?.type === 'base64' && b.source.data && b.source.mediaType) {
+          const key = b.source.data.slice(0, 32)  // 用 base64 前缀去重
+          if (seen.has(key)) continue
+          seen.add(key)
+          result.push({ name: 'image', data: b.source.data, mediaType: b.source.mediaType })
+        }
+      }
+      if (result.length > 0) break
+    }
+
+    // 路径 2：文本中的 @filename 引用（Web 上传）
+    const text = typeof msg.content === 'string'
+      ? msg.content
+      : (msg.content as Array<{ type: string; text?: string }>)
+          .filter(b => b.type === 'text')
+          .map(b => b.text ?? '')
+          .join('')
+
+    let match: RegExpExecArray | null
+    imagePattern.lastIndex = 0
+    while ((match = imagePattern.exec(text)) !== null) {
+      const filename = match[1]
+      if (seen.has(filename)) continue
+      seen.add(filename)
+
+      const absPath = resolve(cwd, filename)
+      const attachment = await loadMediaFromFile(absPath, filename)
+      if (attachment) result.push(attachment)
+    }
+
+    // 找到图片就停止（只取最近一次上传的那批）
+    if (result.length > 0) break
+  }
+
+  return result
 }

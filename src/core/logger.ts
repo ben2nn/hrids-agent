@@ -1,7 +1,10 @@
 // 结构化日志系统 —— 支持级别控制、JSON 格式、文件持久化
-import { existsSync, mkdirSync, appendFileSync } from 'fs'
+import { existsSync, mkdirSync, appendFileSync, statSync, renameSync } from 'fs'
+import { createRequire } from 'module'
 import { homedir } from 'os'
 import { join } from 'path'
+
+const _require = createRequire(import.meta.url)
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -25,9 +28,7 @@ function ensureLogDir() {
 
 function rotateIfNeeded() {
   try {
-    const { statSync } = require('fs') as typeof import('fs')
     if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > MAX_LOG_BYTES) {
-      const { renameSync } = require('fs') as typeof import('fs')
       renameSync(LOG_FILE, LOG_FILE + '.' + Date.now() + '.bak')
     }
   } catch { /* 轮转失败不影响主流程 */ }
@@ -39,8 +40,17 @@ class Logger {
   private get serverMode() { return !!process.env.AGENT_SERVER_MODE }
 
   constructor() {
-    const envLevel = process.env.LOG_LEVEL as LogLevel | undefined
-    this.minLevel = envLevel && LEVEL_RANK[envLevel] !== undefined ? envLevel : 'info'
+    // 优先从 config.json 读取，其次环境变量（兼容旧用法），最后默认 info
+    let level: LogLevel = 'info'
+    try {
+      // 延迟 import 避免循环依赖，且 logger 在 config 加载前就可能被使用
+      const { loadConfig } = _require('./Config.js') as { loadConfig: () => { logLevel?: LogLevel } }
+      level = loadConfig().logLevel ?? 'info'
+    } catch {
+      const envLevel = process.env.LOG_LEVEL as LogLevel | undefined
+      if (envLevel && LEVEL_RANK[envLevel] !== undefined) level = envLevel
+    }
+    this.minLevel = level
   }
 
   private write(level: LogLevel, msg: string, meta?: Record<string, unknown>) {

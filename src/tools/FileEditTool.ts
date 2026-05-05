@@ -1,9 +1,11 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { resolve } from 'path'
+import { execSync } from 'child_process'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
-import { getGlobalCwd } from './BashTool.js'
+import { checkWritePath } from '../core/pathSafety.js'
+import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
   path: z.string().describe('要编辑的文件路径'),
@@ -25,9 +27,22 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
     return input.path
   },
 
+  getRuleContent(input) {
+    return input.path
+  },
+
   async execute(input) {
+    const cwd = getGlobalCwd()
+
+    // 路径安全检查
+    const safety = checkWritePath(input.path, cwd)
+    if (!safety.safe) {
+      auditLog({ action: 'file_edit', resource: input.path, result: 'error', details: { error: safety.reason } })
+      return { type: 'error', message: safety.reason }
+    }
+
     // 相对路径基于当前工作目录（persistentCwd）解析，绝对路径保持不变
-    const filePath = resolve(getGlobalCwd(), input.path)
+    const filePath = resolve(cwd, input.path)
     if (!existsSync(filePath)) {
       return { type: 'error', message: `文件不存在: ${filePath}` }
     }
@@ -44,6 +59,15 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
       }
 
       const updated = content.replace(input.oldStr, input.newStr)
+
+      // 写入前先将当前状态提交到 git，使 HEAD 保留修改前内容
+      try {
+        execSync(`git add "${input.path}"`, { cwd, stdio: 'ignore' })
+        execSync(`git commit -m "file_edit: ${input.path}"`, { cwd, stdio: 'ignore' })
+      } catch {
+        // 非 git 仓库或无变更时静默忽略
+      }
+
       writeFileSync(filePath, updated, 'utf-8')
       auditLog({ action: 'file_edit', resource: filePath, result: 'allowed' })
       return { type: 'success', output: `文件已更新: ${filePath}` }

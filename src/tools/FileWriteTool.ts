@@ -1,10 +1,10 @@
 import { writeFileSync, mkdirSync } from 'fs'
-import { dirname, resolve, isAbsolute } from 'path'
-import { homedir } from 'os'
+import { dirname, resolve } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
-import { getGlobalCwd } from './BashTool.js'
+import { checkWritePath } from '../core/pathSafety.js'
+import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
   path: z.string().describe('要写入的文件路径'),
@@ -16,6 +16,7 @@ export const FileWriteTool: ToolDef<typeof inputSchema> = {
   description: '创建或覆盖写入文件，自动创建父目录',
   inputSchema,
   readonly: false,
+  isDestructive: true,  // 覆盖写入是不可逆操作
 
   describe(input) {
     return `写入文件: ${input.path}`
@@ -25,21 +26,21 @@ export const FileWriteTool: ToolDef<typeof inputSchema> = {
     return input.path
   },
 
-  async execute(input) {
-    // 相对路径基于当前工作目录（persistentCwd）解析，绝对路径保持不变
-    const filePath = resolve(getGlobalCwd(), input.path)
+  getRuleContent(input) {
+    return input.path
+  },
 
-    // 防御性检查：禁止将文件写入用户主目录根层级
-    // 允许写入主目录下的子目录（如 ~/.hrids-agent/），但禁止直接写到 ~/xxx.md
-    const home = homedir()
-    if (isAbsolute(input.path) && dirname(filePath) === home) {
-      const suggestion = input.path.replace(/^.*[/\\]/, '')  // 提取文件名
-      auditLog({ action: 'file_write', resource: filePath, result: 'error', details: { error: '路径被拒绝：目标为用户主目录根层级' } })
-      return {
-        type: 'error',
-        message: `路径被拒绝：不允许直接写入用户主目录 (${home})。\n请使用相对路径（如 "${suggestion}"），文件将写入当前工作目录 ${getGlobalCwd()}。`,
-      }
+  async execute(input) {
+    const cwd = getGlobalCwd()
+
+    // 路径安全检查
+    const safety = checkWritePath(input.path, cwd)
+    if (!safety.safe) {
+      auditLog({ action: 'file_write', resource: input.path, result: 'error', details: { error: safety.reason } })
+      return { type: 'error', message: safety.reason }
     }
+
+    const filePath = resolve(cwd, input.path)
 
     try {
       mkdirSync(dirname(filePath), { recursive: true })

@@ -1,8 +1,8 @@
 import { readdirSync, readFileSync, statSync, existsSync } from 'fs'
-import { join, relative } from 'path'
+import { join, relative, resolve } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
   pattern: z.string().describe('正则表达式搜索模式'),
@@ -91,7 +91,7 @@ export const GrepTool: ToolDef<typeof inputSchema> = {
   },
 
   async execute(input) {
-    const searchRoot = input.path ?? getGlobalCwd()
+    const searchRoot = input.path ? resolve(getGlobalCwd(), input.path) : getGlobalCwd()
 
     if (!existsSync(searchRoot)) {
       return { type: 'error', message: `路径不存在: ${searchRoot}` }

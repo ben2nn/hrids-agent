@@ -3,19 +3,22 @@
 // 技能安装后放入 ~/.hrids-agent/skills/，由 SkillRegistry 自动加载
 
 import { z } from 'zod'
+import { createRequire } from 'module'
 import { readFileSync, existsSync, writeFileSync, mkdirSync, cpSync, rmSync } from 'fs'
 import { resolve, join } from 'path'
 import { homedir } from 'os'
 import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getGlobalCwd } from '../core/cwd.js'
+
+const _require = createRequire(import.meta.url)
 
 // ─────────────────────────────────────────────
 // 常量与辅助
 // ─────────────────────────────────────────────
 
 const DEFAULT_SKILLHUB_URL = 'https://skillhub.cn'
-const DEFAULT_SKILLHUB_API = 'https://skillhub.cn'
+const DEFAULT_SKILLHUB_API = 'https://api.skillhub.cn'
 
 function getUserSkillsDir(): string {
   return join(homedir(), '.hrids-agent', 'skills')
@@ -25,12 +28,17 @@ function getProjectSkillsDir(): string {
   return join(getGlobalCwd(), '.agent', 'skills')
 }
 
+function getSkillHubConfig() {
+  const { loadConfig } = _require('../core/Config.js') as typeof import('../core/Config.js')
+  return loadConfig().skillHub ?? {}
+}
+
 function getSkillHubUrl(): string {
-  return (process.env.SKILLHUB_URL ?? DEFAULT_SKILLHUB_URL).replace(/\/$/, '')
+  return (getSkillHubConfig().url ?? DEFAULT_SKILLHUB_URL).replace(/\/$/, '')
 }
 
 function getSkillHubApiBase(): string {
-  return (process.env.SKILLHUB_API_BASE ?? DEFAULT_SKILLHUB_API).replace(/\/$/, '')
+  return (getSkillHubConfig().apiBase ?? DEFAULT_SKILLHUB_API).replace(/\/$/, '')
 }
 
 function decodeHtmlEntities(str: string): string {
@@ -143,11 +151,11 @@ const configSchema = z.object({
 
 export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
   name: 'skillhub_config',
-  description: `查看或修改 SkillHub 的地址配置（写入项目根目录的 .env 文件）。
+  description: `查看或修改 SkillHub 的地址配置（写入 ~/.hrids-agent/config.json）。
 
-配置项（.env 中的环境变量）：
-- SKILLHUB_URL        SkillHub 前端地址（默认 https://skillhub.cloud.tencent.com）
-- SKILLHUB_API_BASE   SkillHub API 基础地址（默认 https://skillhub.cn）`,
+配置项（config.json 中的 skillHub 字段）：
+- url        SkillHub 前端地址（默认 https://skillhub.cn）
+- apiBase    SkillHub API 基础地址（默认 https://api.skillhub.cn）`,
   inputSchema: configSchema,
   readonly: false,
 
@@ -156,13 +164,16 @@ export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
   },
 
   async execute(input) {
+    const { loadConfig, saveConfig } = _require('../core/Config.js') as typeof import('../core/Config.js')
+
     if (input.action === 'get') {
+      const cfg = loadConfig().skillHub ?? {}
       return {
         type: 'success',
         output: [
-          '当前 SkillHub 配置（来自 .env）：',
-          `  SKILLHUB_URL:      ${process.env.SKILLHUB_URL ?? DEFAULT_SKILLHUB_URL}（${process.env.SKILLHUB_URL ? '已自定义' : '默认值'}）`,
-          `  SKILLHUB_API_BASE: ${process.env.SKILLHUB_API_BASE ?? DEFAULT_SKILLHUB_API}（${process.env.SKILLHUB_API_BASE ? '已自定义' : '默认值'}）`,
+          '当前 SkillHub 配置（来自 config.json）：',
+          `  url:     ${cfg.url ?? DEFAULT_SKILLHUB_URL}（${cfg.url ? '已自定义' : '默认值'}）`,
+          `  apiBase: ${cfg.apiBase ?? DEFAULT_SKILLHUB_API}（${cfg.apiBase ? '已自定义' : '默认值'}）`,
           '',
           `技能浏览地址：${getSkillHubUrl()}/skills`,
           `用户级技能目录：${getUserSkillsDir()}`,
@@ -174,30 +185,16 @@ export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
       return { type: 'error', message: '请提供至少一个要修改的配置项（skillhub_url 或 skillhub_api_base）' }
     }
 
-    const envPath = resolve(getGlobalCwd(), '.env')
-    let envContent = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : ''
+    const updates: Partial<import('../core/Config.js').SkillHubConfig> = {}
+    if (input.skillhub_url) updates.url = input.skillhub_url
+    if (input.skillhub_api_base) updates.apiBase = input.skillhub_api_base
 
-    const updates: Record<string, string> = {}
-    if (input.skillhub_url) updates['SKILLHUB_URL'] = input.skillhub_url
-    if (input.skillhub_api_base) updates['SKILLHUB_API_BASE'] = input.skillhub_api_base
-
-    for (const [key, value] of Object.entries(updates)) {
-      const lineRe = new RegExp(`^(#\\s*)?${key}=.*$`, 'm')
-      const newLine = `${key}=${value}`
-      if (lineRe.test(envContent)) {
-        envContent = envContent.replace(lineRe, newLine)
-      } else {
-        envContent = envContent.trimEnd() + `\n\n# SkillHub 配置\n${newLine}\n`
-      }
-      process.env[key] = value
-    }
-
-    writeFileSync(envPath, envContent, 'utf-8')
-    auditLog({ action: 'skillhub_config_set', resource: envPath, result: 'allowed', details: updates })
+    saveConfig({ skillHub: { ...loadConfig().skillHub, ...updates } })
+    auditLog({ action: 'skillhub_config_set', resource: 'config.json', result: 'allowed', details: updates })
 
     return {
       type: 'success',
-      output: `✓ SkillHub 配置已写入 .env：\n${Object.entries(updates).map(([k, v]) => `  ${k}=${v}`).join('\n')}\n\n配置立即生效，无需重启。`,
+      output: `✓ SkillHub 配置已写入 config.json：\n${Object.entries(updates).map(([k, v]) => `  ${k}=${v}`).join('\n')}\n\n配置立即生效，无需重启。`,
     }
   },
 }
@@ -211,11 +208,11 @@ const DEFAULT_DOWNLOAD_URL_TEMPLATE = 'https://lightmake.site/api/v1/download?sl
 const DEFAULT_FALLBACK_DOWNLOAD_TEMPLATE = 'https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/skills/{slug}.zip'
 
 function getSearchApiUrl(): string {
-  return (process.env.SKILLHUB_SEARCH_URL ?? DEFAULT_SEARCH_API).replace(/\/$/, '')
+  return (getSkillHubConfig().searchUrl ?? DEFAULT_SEARCH_API).replace(/\/$/, '')
 }
 
 function getDownloadUrl(slug: string): string {
-  const template = process.env.SKILLHUB_PRIMARY_DOWNLOAD_URL_TEMPLATE ?? DEFAULT_DOWNLOAD_URL_TEMPLATE
+  const template = getSkillHubConfig().primaryDownloadUrlTemplate ?? DEFAULT_DOWNLOAD_URL_TEMPLATE
   return template.replace('{slug}', encodeURIComponent(slug))
 }
 

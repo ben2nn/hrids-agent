@@ -48,6 +48,9 @@ export async function runMemoryPipeline(
   )
   if (extracted.length === 0) return result
 
+  // 记忆写入全局 store（跨会话积累知识）
+  // 会话 ID 仅作为来源标记（sourceSession），不影响写入目标
+  // 这样用户在任意会话里积累的记忆，在所有会话中都可见
   const store = getMemoryStore()
 
   // ② LLM 批量提炼：一次调用压缩所有需要提炼的条目
@@ -139,7 +142,7 @@ ${numbered}`
     for await (const chunk of provider.stream(
       [{ role: 'user', content: prompt }],
       [],
-      '你是记忆提炼助手，严格按编号格式输出压缩结果，不输出任何其他内容。',
+      ['你是记忆提炼助手，严格按编号格式输出压缩结果，不输出任何其他内容。'],
       Math.min(200 * contents.length, 2000),
     )) {
       if (chunk.type === 'text_delta' && chunk.delta) raw += chunk.delta

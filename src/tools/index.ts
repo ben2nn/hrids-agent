@@ -8,7 +8,7 @@ import { GrepTool } from './GrepTool.js'
 import { WebFetchTool } from './WebFetchTool.js'
 import { WebSearchTool } from './WebSearchTool.js'
 import { AskUserTool } from './AskUserTool.js'
-import { TodoWriteTool, TodoReadTool } from './TodoWriteTool.js'
+import { TodoWriteTool, TodoUpdateTool, TodoAppendTool, TodoResetTool, TodoReadTool } from './TodoTool.js'
 import { DecisionTool } from './DecisionTool.js'
 import { ScheduleCronTool } from './ScheduleCronTool.js'
 import { SkillTool, SkillListTool, SkillSaveTool } from './SkillTool.js'
@@ -23,7 +23,7 @@ const shellTool = process.platform === 'win32' ? PowerShellTool : BashTool
 export {
   BashTool, PowerShellTool, FileReadTool, FileWriteTool, FileEditTool,
   GlobTool, GrepTool, WebFetchTool, WebSearchTool,
-  AskUserTool, TodoWriteTool, TodoReadTool,
+  AskUserTool, TodoWriteTool, TodoUpdateTool, TodoAppendTool, TodoResetTool, TodoReadTool,
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
   SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool,
   SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
@@ -42,6 +42,9 @@ export const ALL_TOOLS: ToolDef[] = [
   WebSearchTool,
   AskUserTool,
   TodoWriteTool,
+  TodoUpdateTool,
+  TodoAppendTool,
+  TodoResetTool,
   TodoReadTool,
   DecisionTool,
   ScheduleCronTool,
@@ -53,9 +56,8 @@ export const ALL_TOOLS: ToolDef[] = [
   SkillHubInstallTool,
   SkillHubRecommendTool,
   SkillHubSetupTool,
-  SkillHubListTool,
-  SkillHubUninstallTool,
-  SkillHubUpgradeTool,
+  // SkillHubListTool、SkillHubUninstallTool、SkillHubUpgradeTool 已从 ALL_TOOLS 移除，
+  // 减少 LLM 工具列表膨胀。如需使用，可通过 bash 命令或直接 import 调用。
   ...TEAM_TOOLS,
   ...MEMORY_TOOLS,
 ]

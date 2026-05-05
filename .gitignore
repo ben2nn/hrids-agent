@@ -1,9 +1,4 @@
-
-.env
-.env
+dist
 node_modules
-docs
 refercode
-tests
-.kiro
 .vscode

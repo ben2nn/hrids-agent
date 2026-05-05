@@ -7,13 +7,17 @@ import type { ToolDef } from '../core/Tool.js'
 import { QueryEngine } from '../core/QueryEngine.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { setGlobalCwd, getGlobalCwd } from './BashTool.js'
+import { runWithCwd, getGlobalCwd } from '../core/cwd.js'
+import { getCurrentSessionId, runWithSession } from '../core/sessionContext.js'
 
-// 懒加载记忆系统，避免未初始化时报错
-async function getMemoryContext(): Promise<string> {
+// 懒加载记忆系统，优先使用当前会话的会话级记忆，降级到全局记忆
+// 与 AgentPool 保持一致的记忆获取策略
+async function getMemoryContext(sessionId?: string): Promise<string> {
   try {
-    const { getMemoryStack } = await import('../memory/index.js')
-    const stack = getMemoryStack()
+    const { getMemoryStackForSession, getMemoryStack } = await import('../memory/index.js')
+    const stack = sessionId
+      ? getMemoryStackForSession(sessionId)
+      : getMemoryStack()
     const stats = await stack.status()
     if (stats.totalMemories === 0) return ''
     const { l0Identity, l1Essential } = stack.wakeUp()
@@ -39,7 +43,8 @@ const SUB_AGENT_SYSTEM_PROMPT = `你是一个专注的子智能体，负责完�
 - 完成后输出清晰的结果摘要
 - 如果遇到无法解决的问题，说明原因并返回已完成的部分`
 
-export function createAgentTool(apiKey: string, model: string): ToolDef<typeof inputSchema> {
+// apiKey/model 参数保留签名兼容性，实际执行时优先从 TeamManager 继承配置
+export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof inputSchema> {
   return {
     name: 'agent',
     description: '派生一个子智能体来执行独立的子任务。适合需要多步骤操作的复杂任务。',
@@ -51,100 +56,79 @@ export function createAgentTool(apiKey: string, model: string): ToolDef<typeof i
     },
 
     async execute(input) {
-      // 获取记忆快照，注入子智能体的 system prompt
-      const memoryContext = await getMemoryContext()
+      // 从会话级（Gateway）或全局（CLI）TeamManager 继承 provider 和 tools
+      const sessionId = getCurrentSessionId()
+      const mgr = sessionId ? TeamManager.getForSession(sessionId) : TeamManager.get()
+
+      if (!mgr) {
+        return { type: 'error', message: '子智能体无法启动：TeamManager 未初始化' }
+      }
+
+      // 获取记忆快照，优先使用当前会话的会话级记忆（与 AgentPool 保持一致）
+      const memoryContext = await getMemoryContext(sessionId ?? undefined)
       const systemPrompt = memoryContext
         ? `${SUB_AGENT_SYSTEM_PROMPT}\n\n${memoryContext}`
         : SUB_AGENT_SYSTEM_PROMPT
+
       // worktree 隔离：为子智能体创建独立的临时工作目录
+      // 使用 runWithCwd 包裹，避免修改父上下文的 cwd（解决 CLI 模式并发竞争问题）
       const parentCwd = getGlobalCwd()
-      let worktreeDir: string | null = null
+      const subCwd = (() => {
+        if (input.isolated) {
+          const safeDesc = input.description.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30)
+          const dir = join(tmpdir(), `hrids-agent-worktree-${safeDesc}-${Date.now()}`)
+          mkdirSync(dir, { recursive: true })
+          return dir
+        }
+        return parentCwd
+      })()
 
-      if (input.isolated) {
-        const safeDesc = input.description.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30)
-        worktreeDir = join(tmpdir(), `hrids-agent-worktree-${safeDesc}-${Date.now()}`)
-        mkdirSync(worktreeDir, { recursive: true })
-        // 切换到隔离目录（子智能体的 bash 工具会使用这个目录）
-        setGlobalCwd(worktreeDir)
-      }
+      const allTools = mgr.getBaseTools()
 
-      // 优先从全局 TeamManager 获取 provider 和 tools（继承父智能体配置）
-      const mgr = TeamManager.get()
+      // 子智能体默认排除 todo 写工具，防止子任务修改共享任务计划文件后
+      // 父 QueryEngine 的 activeTodoSnapshot 不刷新，导致双真相问题。
+      // todo_read 保留：只读操作，子智能体可以查看任务状态。
+      // 显式传入 allowed_tools 时不受此限制（高级场景可按需开放）。
+      const SUB_AGENT_EXCLUDED_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset'])
+      const tools = input.allowed_tools
+        ? allTools.filter(t => input.allowed_tools!.includes(t.name))
+        : allTools.filter(t => !SUB_AGENT_EXCLUDED_TOOLS.has(t.name))
 
-      let subEngine: QueryEngine
-
-      if (mgr) {
-        const allTools = mgr.getBaseTools()
-        const tools = input.allowed_tools
-          ? allTools.filter(t => input.allowed_tools!.includes(t.name))
-          : allTools
-
-        const permissions = new PermissionManager('auto', async () => true)
-        subEngine = new QueryEngine({
-          provider: mgr.getProvider(),
-          systemPrompt,
-          tools,
-          permissions,
-          maxTurns: 30,
-        })
-      } else {
-        // 回退：使用传入的 apiKey/model
-        const { createProvider } = await import('../core/providers/index.js')
-        const { BashTool } = await import('./BashTool.js')
-        const { PowerShellTool } = await import('./PowerShellTool.js')
-        const { FileReadTool } = await import('./FileReadTool.js')
-        const { FileWriteTool } = await import('./FileWriteTool.js')
-        const { FileEditTool } = await import('./FileEditTool.js')
-        const { GlobTool } = await import('./GlobTool.js')
-        const { GrepTool } = await import('./GrepTool.js')
-        const { WebFetchTool } = await import('./WebFetchTool.js')
-        const { TodoWriteTool, TodoReadTool } = await import('./TodoWriteTool.js')
-
-        // 根据平台选择 shell 工具
-        const shellTool = process.platform === 'win32' ? PowerShellTool : BashTool
-
-        const allFallbackTools = [
-          shellTool, FileReadTool, FileWriteTool, FileEditTool,
-          GlobTool, GrepTool, WebFetchTool, TodoWriteTool, TodoReadTool,
-        ]
-
-        const provider = createProvider({ model, apiKey })
-        const tools = input.allowed_tools
-          ? allFallbackTools.filter(t => input.allowed_tools!.includes(t.name))
-          : allFallbackTools
-
-        const permissions = new PermissionManager('auto', async () => true)
-        subEngine = new QueryEngine({
-          provider,
-          systemPrompt,
-          tools,
-          permissions,
-          maxTurns: 30,
-        })
-      }
+      const permissions = new PermissionManager('craft', async () => true)
+      const subEngine = new QueryEngine({
+        provider: mgr.getProvider(),
+        systemPrompt: [systemPrompt],
+        tools,
+        permissions,
+        maxTurns: 30,
+      })
 
       let result = ''
       let hasError = false
+      let worktreeDir: string | null = input.isolated ? subCwd : null
 
       try {
-        for await (const event of subEngine.send(input.prompt)) {
-          if (event.type === 'text_delta') {
-            result += event.delta
-          } else if (event.type === 'error') {
-            hasError = true
-            result += `\n错误: ${event.message}`
-          }
-        }
+        // runWithCwd 创建独立的 AsyncLocalStorage 上下文，不影响父调用链的 cwd
+        // runWithSession 给子智能体独立的 sessionId，避免 todo 等工具污染父会话状态
+        // 使用 "ephemeral-" 前缀标记为临时会话，与 AgentPool 保持一致，便于 pruneOldSessions 清理
+        const subSessionId = `ephemeral-sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        await runWithCwd(subCwd, () =>
+          runWithSession(subSessionId, async () => {
+            for await (const event of subEngine.send(input.prompt)) {
+              if (event.type === 'text_delta') {
+                result += event.delta
+              } else if (event.type === 'error') {
+                hasError = true
+                result += `\n错误: ${event.message}`
+              }
+            }
+          })
+        )
       } catch (err) {
         return { type: 'error', message: `子智能体执行失败: ${String(err)}` }
       } finally {
-        // 恢复父智能体的工作目录
-        if (input.isolated) {
-          setGlobalCwd(parentCwd)
-          // 清理临时目录（可选，注释掉则保留供调试）
-          if (worktreeDir && existsSync(worktreeDir)) {
-            try { rmSync(worktreeDir, { recursive: true, force: true }) } catch { /* 忽略清理失败 */ }
-          }
+        if (input.isolated && worktreeDir && existsSync(worktreeDir)) {
+          try { rmSync(worktreeDir, { recursive: true, force: true }) } catch { /* 忽略清理失败 */ }
         }
       }
 

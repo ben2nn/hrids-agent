@@ -1,36 +1,28 @@
 import { spawn } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
-import { homedir } from 'os'
 import { z } from 'zod'
 import type { ToolDef, ToolContext } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { logger } from '../core/logger.js'
+import { isDangerousRemovalPath } from '../core/pathSafety.js'
+
+// cwd 管理已迁移到 src/core/cwd.ts，此处重新导出保持向后兼容
+export { getGlobalCwd, setGlobalCwd, runWithCwd } from '../core/cwd.js'
+import { getGlobalCwd, setGlobalCwd } from '../core/cwd.js'
 
 const log = logger.child({ component: 'bash-tool' })
 
-// 持久化工作目录，在当前 session 进程内跨命令调用保持 cd 状态
-// 默认使用 ~/.hrids-agent/work/，由 setGlobalCwd 覆盖
-function initDefaultCwd(): string {
-  const dir = path.join(homedir(), '.hrids-agent', 'work')
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  return dir
-}
-
-let persistentCwd: string = initDefaultCwd()
-
-// 供 main.ts server 模式在处理 set_cwd 指令时同步更新
-export function setGlobalCwd(dir: string) {
-  persistentCwd = dir
-}
-
-export function getGlobalCwd(): string {
-  return persistentCwd
-}
-
 const inputSchema = z.object({
   command: z.string().describe('要执行的 shell 命令（bash/sh 语法）'),
-  timeout: z.number().optional().describe('超时时间（毫秒），默认 60000。长时间任务（如爬虫、编译）可设置更大的值，例如 1800000（30分钟）'),
+  timeout: z.number().optional().describe(
+    '超时时间（毫秒），默认 120000（2分钟）。' +
+    '长时间任务请主动设置更大的值：\n' +
+    '  - npm install / pip install 等依赖安装：600000（10分钟）\n' +
+    '  - cargo build / tsc / webpack 等编译：1800000（30分钟）\n' +
+    '  - 大文件下载 / 爬虫任务：3600000（60分钟）\n' +
+    '  - 不确定时宁可设大，超时会强制终止进程'
+  ),
 })
 
 // 危险命令黑名单（Linux/macOS）
@@ -47,11 +39,29 @@ const BLOCKED_PATTERNS = [
   /passwd\s+root/,                  // 修改 root 密码
   /curl.*\|\s*(ba)?sh/,            // 管道执行远程脚本
   /wget.*\|\s*(ba)?sh/,            // 管道执行远程脚本
+  // 追加：更多高危操作
+  /\bsudo\s+rm\s+-rf/,             // sudo rm -rf
+  /\bsudo\s+dd\b/,                 // sudo dd
+  /\bsudo\s+mkfs\b/,               // sudo mkfs
+  /\bsudo\s+chmod\s+-R\s+777/,    // sudo chmod -R 777
+  /\bnohup\b.*&\s*$|&\s*disown/,  // 后台脱离进程（可能逃逸超时控制）
+  /\bscreen\b|\btmux\b/,           // 会话复用（可能逃逸超时控制）
+  /\bkillall\b|\bpkill\b/,         // 批量杀进程（可能误杀 agent 自身）
+  /\bcrontab\s+-[re]\b/,           // 修改 crontab（应通过 schedule_cron 工具）
+  /\biptables\b|\bnftables\b/,     // 修改防火墙规则
+  /\bsystemctl\s+(stop|disable|mask)\b/, // 停止系统服务
 ]
+
+// 提取 rm/rmdir 命令的目标路径，用于危险路径检测
+function extractRemovalTarget(command: string): string | null {
+  const match = command.match(/\brm\s+(?:-[a-zA-Z]*\s+)*(.+)$/)
+  if (match) return match[1].trim().split(/\s+/)[0]
+  return null
+}
 
 export const BashTool: ToolDef<typeof inputSchema> = {
   name: 'bash',
-  description: '在 Linux/macOS 的 bash/sh 环境中执行命令，返回 stdout 和 stderr。仅适用于 Unix 系统。',
+  description: '执行 shell 命令（当前平台：Linux/macOS bash/sh），返回 stdout 和 stderr。',
   inputSchema,
   readonly: false,
 
@@ -59,24 +69,30 @@ export const BashTool: ToolDef<typeof inputSchema> = {
     return `执行命令: ${input.command}`
   },
 
+  getRuleContent(input) {
+    return input.command
+  },
+
   async checkPermission(input) {
+    // 危险命令黑名单
     for (const pattern of BLOCKED_PATTERNS) {
       if (pattern.test(input.command)) {
         return { granted: false, reason: `命令包含危险模式: ${pattern}` }
       }
     }
+    // 危险删除路径检测
+    const removalTarget = extractRemovalTarget(input.command)
+    if (removalTarget && isDangerousRemovalPath(removalTarget)) {
+      return { granted: false, reason: `危险的删除目标路径: ${removalTarget}` }
+    }
     return { granted: true }
   },
 
   async execute(input, ctx?: ToolContext) {
-    const permCheck = await BashTool.checkPermission!(input)
-    if (!permCheck.granted) {
-      return { type: 'error', message: permCheck.reason }
-    }
-
     // 记录 bash 执行审计日志
     auditLog({ action: 'bash_execute', resource: input.command.slice(0, 200), result: 'allowed' })
-    log.info('执行命令', { command: input.command.slice(0, 200), cwd: persistentCwd })
+    const cwd = getGlobalCwd()
+    log.info('执行命令', { command: input.command.slice(0, 200), cwd })
 
     const logLine = (line: string, isStderr = false) => {
       // server 模式下 stdout 是 JSON 通信通道，不能直接写明文
@@ -89,28 +105,36 @@ export const BashTool: ToolDef<typeof inputSchema> = {
       ctx?.onLog?.(line.trimEnd())
     }
 
-    // 拦截纯 cd 命令，直接更新持久目录
-    const cdMatch = input.command.trim().match(/^cd\s+(.+)$/)
+    // 拦截 cd 命令（纯 cd 或 "cd dir; rest" / "cd dir && rest" 复合形式）
+    // 匹配：cd <dir>  |  cd <dir>; rest  |  cd <dir> && rest
+    const cdMatch = input.command.trim().match(/^cd\s+((?:"[^"]*"|'[^']*'|[^;&|])+?)(?:\s*(?:;|&&)\s*(.+))?$/)
     if (cdMatch) {
       const target = cdMatch[1].trim().replace(/^["']|["']$/g, '').trim()
-      const newDir = path.resolve(persistentCwd, target)
+      const rest = cdMatch[2]?.trim()
+      const newDir = path.resolve(cwd, target)
       if (fs.existsSync(newDir) && fs.statSync(newDir).isDirectory()) {
-        persistentCwd = newDir
-        logLine(`[bash] 切换目录: ${persistentCwd}`)
-        return { type: 'success', output: persistentCwd }
+        setGlobalCwd(newDir)
+        logLine(`[bash] 切换目录: ${newDir}`)
+        if (!rest) {
+          // 纯 cd，直接返回
+          return { type: 'success', output: newDir }
+        }
+        // 有后续命令，在新目录下继续执行（递归调用，cwd 已更新）
+        logLine(`[bash] 在新目录下执行: ${rest}`)
+        return BashTool.execute({ command: rest, timeout: input.timeout }, ctx)
       } else {
         return { type: 'error', message: `目录不存在: ${newDir}` }
       }
     }
 
-    const timeout = input.timeout ?? 60000
+    const timeout = input.timeout ?? 120000  // 默认 2 分钟（原 60s 太短，下载/编译场景常超时）
     const startTime = Date.now()
     logLine(`[bash] 开始执行: ${input.command}`)
-    logLine(`[bash] 工作目录: ${persistentCwd}`)
+    logLine(`[bash] 工作目录: ${cwd}`)
 
     return new Promise<ReturnType<typeof BashTool.execute> extends Promise<infer R> ? R : never>((resolve) => {
       const child = spawn('/bin/sh', ['-c', input.command], {
-        cwd: persistentCwd,
+        cwd,
         env: {
           ...process.env,
           PYTHONIOENCODING: 'utf-8',

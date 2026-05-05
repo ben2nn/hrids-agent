@@ -1,0 +1,263 @@
+/* ─── 字体引入（必须在所有规则之前） ───────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── 夜间模式（默认） ──────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+
+  /* 背景层次 — 适度提亮，增加层次感 */
+  --bg-primary:    #111114;
+  --bg-secondary:  #1a1a20;
+  --bg-tertiary:   #22222a;
+  --bg-elevated:   #2c2c36;
+
+  /* 边框 — 提高可见度 */
+  --border:        #38384a;
+  --border-subtle: #2a2a36;
+  --border-focus:  rgba(139, 92, 246, 0.65);
+
+  /* 文字 — 大幅提升对比度 */
+  --text-primary:  #f2f2f6;   /* 主文字：接近纯白，清晰易读 */
+  --text-secondary:#a8a8c0;   /* 次要文字：提亮，可清晰辨认 */
+  --text-muted:    #62627a;   /* 辅助文字：提亮，不再几乎不可见 */
+
+  /* 强调色 — 紫罗兰，略微提亮 */
+  --accent:        #9b6dff;
+  --accent-hover:  #b08aff;
+  --accent-light:  #c4b5fd;
+  --accent-subtle: rgba(155, 109, 255, 0.14);
+  --accent-border: rgba(155, 109, 255, 0.32);
+
+  /* 状态色 — 夜间模式下适度提亮，保证可读性 */
+  --success:        #4ade80;
+  --success-subtle: rgba(74, 222, 128, 0.12);
+  --warning:        #fcd34d;
+  --warning-subtle: rgba(252, 211, 77, 0.12);
+  --error:          #fb7185;
+  --error-subtle:   rgba(251, 113, 133, 0.12);
+  --info:           #60a5fa;
+  --info-subtle:    rgba(96, 165, 250, 0.12);
+
+  /* 阴影 */
+  --shadow-sm:   0 1px 3px rgba(0,0,0,0.5);
+  --shadow-md:   0 4px 16px rgba(0,0,0,0.6);
+  --shadow-lg:   0 8px 32px rgba(0,0,0,0.7);
+  --shadow-glow: 0 0 24px rgba(155, 109, 255, 0.22);
+}
+
+/* ─── 日间模式 ──────────────────────────────────────────────────────────── */
+.light {
+  color-scheme: light;
+
+  /* 背景层次 — 暖白 */
+  --bg-primary:    #f8f8fb;
+  --bg-secondary:  #ffffff;
+  --bg-tertiary:   #f0f0f5;
+  --bg-elevated:   #ffffff;
+
+  /* 边框 */
+  --border:        #e2e2ec;
+  --border-subtle: #ebebf2;
+  --border-focus:  rgba(139, 92, 246, 0.45);
+
+  /* 文字 */
+  --text-primary:  #18181f;
+  --text-secondary:#5c5c72;
+  --text-muted:    #a0a0b8;
+
+  /* 强调色 */
+  --accent:        #7c3aed;
+  --accent-hover:  #6d28d9;
+  --accent-light:  #7c3aed;
+  --accent-subtle: rgba(124, 58, 237, 0.08);
+  --accent-border: rgba(124, 58, 237, 0.20);
+
+  /* 状态色 */
+  --success:        #059669;
+  --success-subtle: rgba(5, 150, 105, 0.08);
+  --warning:        #d97706;
+  --warning-subtle: rgba(217, 119, 6, 0.08);
+  --error:          #dc2626;
+  --error-subtle:   rgba(220, 38, 38, 0.08);
+  --info:           #2563eb;
+  --info-subtle:    rgba(37, 99, 235, 0.08);
+
+  /* 阴影 */
+  --shadow-sm:   0 1px 3px rgba(0,0,0,0.07);
+  --shadow-md:   0 4px 16px rgba(0,0,0,0.09);
+  --shadow-lg:   0 8px 32px rgba(0,0,0,0.12);
+  --shadow-glow: 0 0 24px rgba(124, 58, 237, 0.12);
+}
+
+/* ─── 全局基础样式 ──────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+
+  /* 字体栈：优先 Inter，中文回退到系统字体 */
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+
+  /* 字体渲染优化 */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11', 'ss01';
+
+  /* 字号基准 */
+  font-size: 14px;
+  line-height: 1.6;
+  letter-spacing: -0.01em;
+}
+
+/* ─── 滚动条 ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ─── 选中文字颜色 ──────────────────────────────────────────────────────── */
+::selection {
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
+
+/* ─── 输入框容器 ────────────────────────────────────────────────────────── */
+.input-container {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input-container:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+/* ─── 夜间模式图标增强 ──────────────────────────────────────────────────── */
+:root svg {
+  /* 确保 SVG 描边在暗色背景下清晰渲染 */
+  shape-rendering: geometricPrecision;
+}
+
+/* ─── 代码字体 ──────────────────────────────────────────────────────────── */
+pre, code, kbd, samp {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono',
+    Consolas, 'Liberation Mono', Menlo, monospace;
+  font-feature-settings: 'liga' 1, 'calt' 1;
+}
+
+/* ─── 动画 ──────────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+.animate-fade-in  { animation: fadeIn  0.18s ease-out; }
+.animate-slide-in { animation: slideIn 0.18s ease-out; }
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-tertiary) 25%,
+    var(--bg-elevated) 50%,
+    var(--bg-tertiary) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ─── 主题切换过渡 ──────────────────────────────────────────────────────── */
+html.theme-transitioning,
+html.theme-transitioning * {
+  transition:
+    background-color 0.25s ease,
+    border-color     0.25s ease,
+    color            0.20s ease,
+    box-shadow       0.25s ease !important;
+}
+
+/* ─── 消息气泡 ──────────────────────────────────────────────────────────── */
+
+/* Agent 回复气泡：无边框，微妙背景 + 阴影 */
+.agent-bubble {
+  background: var(--bg-secondary);
+  border-radius: 16px;
+  border-top-left-radius: 4px;
+  box-shadow:
+    0 1px 2px rgba(0,0,0,0.3),
+    0 0 0 1px rgba(255,255,255,0.04) inset;
+}
+
+/* 用户消息气泡：渐变 + 阴影 */
+.user-bubble {
+  background: linear-gradient(135deg, var(--accent) 0%, #7c5ce8 100%);
+  color: #fff;
+  border-radius: 16px;
+  border-top-right-radius: 4px;
+  box-shadow:
+    0 2px 8px rgba(155, 109, 255, 0.35),
+    0 1px 2px rgba(0,0,0,0.3);
+}
+
+/* ─── 工具卡片基础样式（已迁移到 ToolCard.tsx inline styles） ─────────── */
+
+/* 日间模式适配 */
+.light .agent-bubble {
+  background: var(--bg-secondary);
+  box-shadow:
+    0 1px 4px rgba(0,0,0,0.07),
+    0 0 0 1px rgba(0,0,0,0.05) inset;
+}
+
+.light .user-bubble {
+  background: linear-gradient(135deg, var(--accent) 0%, #6d28d9 100%);
+  box-shadow:
+    0 2px 8px rgba(124, 58, 237, 0.3),
+    0 1px 2px rgba(0,0,0,0.1);
+}
+
+.light .tool-card-base {
+  background: var(--bg-secondary);
+  border: 1px solid rgba(0,0,0,0.07);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+.light .tool-card-pending,
+.light .tool-card-success,
+.light .tool-card-error,
+.light .tool-card-denied {
+  background: var(--bg-secondary);
+}

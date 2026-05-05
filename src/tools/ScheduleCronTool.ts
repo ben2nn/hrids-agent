@@ -1,12 +1,17 @@
 // 定时调度工具 —— 让工作者能够设置定时任务，主动触发执行
 // 基于 node-cron 实现，持久化到 ~/.hrids-agent/crons.json
 import { z } from 'zod'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { ToolDef } from '../core/Tool.js'
+import { getCurrentSessionId } from '../core/sessionContext.js'
 
 const CRON_FILE = join(homedir(), '.hrids-agent', 'crons.json')
+
+// ── 并发写入保护：防止同一轮次并行工具调用导致重复创建 ──────────────────────
+// 使用内存级互斥锁，确保 create 操作串行执行（读-检查-写 原子化）
+let createLock: Promise<void> = Promise.resolve()
 
 export interface CronJob {
   id: string
@@ -18,6 +23,9 @@ export interface CronJob {
   nextRunAt?: number
   enabled: boolean
   once?: boolean       // 一次性任务：触发后自动删除
+  startDate?: string   // 生效开始日期（ISO 日期字符串，如 "2026-05-01"）
+  endDate?: string     // 生效结束日期（ISO 日期字符串，如 "2026-12-31"）
+  sessionId?: string   // 归属会话 ID（Gateway 多会话下精确路由触发目标）
 }
 
 // ── 持久化 ──────────────────────────────────────────────────────────────────
@@ -34,44 +42,152 @@ function loadCrons(): CronJob[] {
 function saveCrons(crons: CronJob[]) {
   const dir = join(homedir(), '.hrids-agent')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(CRON_FILE, JSON.stringify(crons, null, 2), 'utf-8')
+  // 原子写入：先写临时文件再 rename，防止并发写入时文件损坏
+  const tmp = CRON_FILE + '.tmp'
+  writeFileSync(tmp, JSON.stringify(crons, null, 2), 'utf-8')
+  renameSync(tmp, CRON_FILE)
 }
 
-// ── 简单 cron 表达式解析（计算下次执行时间）────────────────────────────────
+// ── cron 表达式解析（计算下次执行时间）────────────────────────────────────
+//
+// 支持格式（5位：分 时 日 月 周）：
+//   固定值：  "0 9 * * *"      每天 09:00
+//   步进值：  "*/30 * * * *"   每 30 分钟
+//             "0 */2 * * *"    每 2 小时
+//   范围：    "0 9 * * 1-5"    工作日 09:00
+//   列表：    "0 9 * * 1,3,5"  周一三五 09:00
+//   具体日期："0 15 15 4 *"    4 月 15 日 15:00
 
-function parseNextRun(expression: string): number | undefined {
-  // 支持常用格式：分 时 日 月 周
-  // 这里用简单估算，生产环境建议引入 cron-parser
+/** 解析单个 cron 字段，返回该字段在 [min, max] 范围内、大于 current 的最小合法值。
+ *  若当前值已合法则返回 current，否则返回下一个合法值（可能需要进位）。
+ *  返回 null 表示该字段无法在当前范围内满足（需要进位到上一级字段）。
+ */
+function nextValueInField(field: string, current: number, min: number, max: number): number | null {
+  // 收集所有合法值
+  const valid: number[] = []
+
+  for (const part of field.split(',')) {
+    if (part === '*') {
+      for (let i = min; i <= max; i++) valid.push(i)
+    } else if (part.startsWith('*/')) {
+      const step = parseInt(part.slice(2), 10)
+      if (isNaN(step) || step <= 0) continue
+      for (let i = min; i <= max; i += step) valid.push(i)
+    } else if (part.includes('/')) {
+      const [rangeStr, stepStr] = part.split('/')
+      const step = parseInt(stepStr, 10)
+      const [rangeMin, rangeMax] = (rangeStr ?? '').includes('-')
+        ? (rangeStr ?? '').split('-').map(Number)
+        : [parseInt(rangeStr ?? '', 10), max]
+      if (isNaN(step) || step <= 0) continue
+      for (let i = (rangeMin ?? min); i <= (rangeMax ?? max); i += step) valid.push(i)
+    } else if (part.includes('-')) {
+      const [lo, hi] = part.split('-').map(Number)
+      for (let i = (lo ?? min); i <= (hi ?? max); i++) valid.push(i)
+    } else {
+      const v = parseInt(part, 10)
+      if (!isNaN(v)) valid.push(v)
+    }
+  }
+
+  // 去重排序
+  const sorted = [...new Set(valid)].sort((a, b) => a - b)
+  if (sorted.length === 0) return null
+
+  // 找到 >= current 的最小值
+  const found = sorted.find(v => v >= current)
+  return found ?? null
+}
+
+function parseNextRun(expression: string, fromTime?: number): number | undefined {
   try {
     const parts = expression.trim().split(/\s+/)
     if (parts.length !== 5) return undefined
 
-    const now = new Date()
-    const next = new Date(now)
-    next.setSeconds(0, 0)
-    next.setMinutes(next.getMinutes() + 1) // 至少1分钟后
+    const [minField, hourField, domField, monField, dowField] = parts as [string, string, string, string, string]
 
-    // 简单处理：只解析固定值（非 * 的情况）
-    const [min, hour, , , weekday] = parts
+    // 从 fromTime（默认 now+1分钟）开始向前搜索，最多搜索 366 天
+    const start = new Date(fromTime ?? Date.now())
+    start.setSeconds(0, 0)
+    start.setMinutes(start.getMinutes() + 1)
 
-    if (hour !== '*' && !isNaN(Number(hour))) {
-      const h = Number(hour)
-      if (next.getHours() > h || (next.getHours() === h && next.getMinutes() > Number(min))) {
-        next.setDate(next.getDate() + 1)
+    const candidate = new Date(start)
+    const deadline = new Date(start)
+    deadline.setDate(deadline.getDate() + 366)
+
+    // 最多迭代 366*24*60 次（分钟级步进），实际上会快得多
+    for (let iter = 0; iter < 366 * 24 * 60; iter++) {
+      if (candidate >= deadline) return undefined
+
+      // 检查月份（1-12）
+      const mon = nextValueInField(monField, candidate.getMonth() + 1, 1, 12)
+      if (mon === null) return undefined
+      if (mon !== candidate.getMonth() + 1) {
+        // 跳到下个合法月份的第一天 00:00
+        candidate.setMonth(mon - 1, 1)
+        candidate.setHours(0, 0, 0, 0)
+        continue
       }
-      next.setHours(h)
-    }
-    if (min !== '*' && !isNaN(Number(min))) {
-      next.setMinutes(Number(min))
-    }
-    if (weekday !== '*' && !isNaN(Number(weekday))) {
-      const targetDay = Number(weekday) % 7
-      const currentDay = next.getDay()
-      const daysUntil = (targetDay - currentDay + 7) % 7 || 7
-      next.setDate(next.getDate() + daysUntil)
+
+      // 检查日期（1-31）
+      const daysInMonth = new Date(candidate.getFullYear(), candidate.getMonth() + 1, 0).getDate()
+      const dom = nextValueInField(domField, candidate.getDate(), 1, daysInMonth)
+      if (dom === null || dom > daysInMonth) {
+        // 跳到下个月
+        candidate.setMonth(candidate.getMonth() + 1, 1)
+        candidate.setHours(0, 0, 0, 0)
+        continue
+      }
+      if (dom !== candidate.getDate()) {
+        candidate.setDate(dom)
+        candidate.setHours(0, 0, 0, 0)
+        continue
+      }
+
+      // 检查星期（0=周日，1=周一，...，6=周六；cron 中 7 也表示周日）
+      if (dowField !== '*') {
+        const dow = candidate.getDay() // 0=周日
+        // 将 cron 的 7 映射为 0
+        const normalizedField = dowField.replace(/\b7\b/g, '0')
+        const validDow = nextValueInField(normalizedField, dow, 0, 6)
+        if (validDow === null || validDow !== dow) {
+          // 跳到明天
+          candidate.setDate(candidate.getDate() + 1)
+          candidate.setHours(0, 0, 0, 0)
+          continue
+        }
+      }
+
+      // 检查小时（0-23）
+      const hour = nextValueInField(hourField, candidate.getHours(), 0, 23)
+      if (hour === null) {
+        // 跳到明天
+        candidate.setDate(candidate.getDate() + 1)
+        candidate.setHours(0, 0, 0, 0)
+        continue
+      }
+      if (hour !== candidate.getHours()) {
+        candidate.setHours(hour, 0, 0, 0)
+        continue
+      }
+
+      // 检查分钟（0-59）
+      const min = nextValueInField(minField, candidate.getMinutes(), 0, 59)
+      if (min === null) {
+        // 跳到下一小时
+        candidate.setHours(candidate.getHours() + 1, 0, 0, 0)
+        continue
+      }
+      if (min !== candidate.getMinutes()) {
+        candidate.setMinutes(min, 0, 0)
+        continue
+      }
+
+      // 所有字段都匹配，找到了
+      return candidate.getTime()
     }
 
-    return next.getTime()
+    return undefined
   } catch {
     return undefined
   }
@@ -105,13 +221,93 @@ export function setCronTriggerCallback(cb: (job: CronJob) => void) {
   onTrigger = cb
 }
 
+/** 导出 parseNextRun 供外部（server.ts）复用 */
+export { parseNextRun as parseCronNextRun }
+
+/** 供外部（server.ts POST /crons）调用，注册新创建的任务到调度器 */
+export function scheduleNewJob(job: CronJob) {
+  scheduleJob(job)
+}
+
+/**
+ * 供外部（server.ts PUT /crons/:id/toggle）调用，同步更新内存调度器。
+ * 禁用时清除 timer，启用时重新调度。
+ */
+export function toggleJobInScheduler(id: string, enabled: boolean): void {
+  if (!enabled) {
+    const timer = activeTimers.get(id)
+    if (timer) { clearTimeout(timer); activeTimers.delete(id) }
+  } else {
+    // 从文件读取最新状态后重新调度
+    const crons = loadCrons()
+    const job = crons.find(c => c.id === id)
+    if (job && job.enabled) scheduleJob(job)
+  }
+}
+
+/**
+ * 供外部（server.ts DELETE /crons/:id）调用，清除内存中的 timer。
+ */
+export function deleteJobFromScheduler(id: string): void {
+  const timer = activeTimers.get(id)
+  if (timer) { clearTimeout(timer); activeTimers.delete(id) }
+}
+
 function scheduleJob(job: CronJob) {
   if (!job.enabled) return
-  const nextRun = job.nextRunAt ?? parseNextRun(job.expression)
-  if (!nextRun) return
 
-  const delay = nextRun - Date.now()
-  if (delay <= 0) return
+  const now = Date.now()
+
+  // 检查 endDate：已过有效期则跳过调度（契约落地）
+  if (job.endDate) {
+    // 使用当天结束时间（23:59:59.999），确保 endDate 当天全天都有效
+    // 避免 new Date('2026-05-01') 解析为 00:00:00 导致当天就失效的问题
+    const endDay = new Date(job.endDate)
+    endDay.setHours(23, 59, 59, 999)
+    const end = endDay.getTime()
+    if (!isNaN(end) && now > end) {
+      console.info(`[cron] 任务已过有效期，跳过调度: ${job.id} (endDate: ${job.endDate})`)
+      return
+    }
+  }
+
+  // 检查 startDate：未到生效日期则从 startDate 当天开始时间起算第一次执行时间
+  let fromTime: number | undefined
+  if (job.startDate) {
+    // 使用当天开始时间（00:00:00.000），确保 startDate 当天就能触发
+    const startDay = new Date(job.startDate)
+    startDay.setHours(0, 0, 0, 0)
+    const start = startDay.getTime()
+    if (!isNaN(start) && now < start) {
+      fromTime = start  // parseNextRun 将从此时间点开始搜索
+    }
+  }
+
+  // 计算下次执行时间：优先使用已保存的 nextRunAt，若已过期则重新计算
+  let nextRun = job.nextRunAt
+  let delay = nextRun ? nextRun - now : -1
+
+  if (delay <= 0) {
+    // 已过期或未设置，重新计算（传入 fromTime 影响起算点）
+    nextRun = parseNextRun(job.expression, fromTime)
+    if (!nextRun) {
+      console.warn(`[cron] 无法解析 cron 表达式，跳过任务: ${job.id} (${job.expression})`)
+      return
+    }
+    delay = nextRun - now
+    // 更新到磁盘，避免下次重启再次过期
+    const crons = loadCrons()
+    const idx = crons.findIndex(c => c.id === job.id)
+    if (idx >= 0) {
+      crons[idx]!.nextRunAt = nextRun
+      saveCrons(crons)
+    }
+  }
+
+  if (delay <= 0) {
+    console.warn(`[cron] 计算出的下次执行时间仍然过期，跳过任务: ${job.id}`)
+    return
+  }
 
   const timer = setTimeout(() => {
     activeTimers.delete(job.id)
@@ -163,7 +359,8 @@ const createSchema = z.object({
 
 const deleteSchema = z.object({
   action: z.literal('delete'),
-  id: z.string().describe('要删除的 cron 任务 ID'),
+  id: z.string().optional().describe('要删除的 cron 任务 ID（精确匹配，优先使用）'),
+  description: z.string().optional().describe('任务描述关键词（模糊匹配，id 未知时使用）'),
 })
 
 const listSchema = z.object({
@@ -234,6 +431,32 @@ cron 表达式格式（5位）：分 时 日 月 周
     }
 
     if (input.action === 'create') {
+      // ── 串行化保护：防止并行工具调用导致重复创建（竞态条件）──
+      let resolveCreate!: () => void
+      const prevLock = createLock
+      createLock = new Promise<void>(resolve => { resolveCreate = resolve })
+      await prevLock
+
+      try {
+      // ── 去重检查：相同 expression + description 的任务已存在时，直接返回已有任务 ──
+      const sessionId = getCurrentSessionId()
+      const crons = loadCrons()
+      const duplicate = crons.find(c =>
+        c.expression === input.expression &&
+        c.description === input.description &&
+        // 同一会话内去重（sessionId 相同或均为空）
+        (c.sessionId ?? '') === (sessionId ?? '')
+      )
+      if (duplicate) {
+        const nextStr = duplicate.nextRunAt
+          ? `下次执行: ${new Date(duplicate.nextRunAt).toLocaleString('zh-CN')}`
+          : '未调度'
+        return {
+          type: 'success',
+          output: `⚠️ 相同的定时任务已存在，未重复创建，操作已完成。\nID: ${duplicate.id}\n表达式: ${duplicate.expression}\n描述: ${duplicate.description}\n${nextStr}`,
+        }
+      }
+
       const id = `cron-${Date.now().toString(36)}`
       const nextRunAt = parseNextRun(input.expression)
 
@@ -250,6 +473,7 @@ cron 表达式格式（5位）：分 时 日 月 周
         nextRunAt,
         enabled: true,
         once,
+        ...(sessionId ? { sessionId } : {}),
       }
       crons.push(job)
       saveCrons(crons)
@@ -262,18 +486,42 @@ cron 表达式格式（5位）：分 时 日 月 周
       const correctedStr = (isRecurring && input.once === true) ? '\n📌 注意：检测到周期性 cron 表达式，已自动将 once 修正为 false' : ''
       return {
         type: 'success',
-        output: `✅ 定时任务已创建\nID: ${id}\n表达式: ${input.expression}\n描述: ${input.description}\n${nextStr}${onceStr}${correctedStr}`,
+        output: `✅ 定时任务已创建，无需再次查询验证，操作已完成。\nID: ${id}\n表达式: ${input.expression}\n描述: ${input.description}\n${nextStr}${onceStr}${correctedStr}`,
+      }
+      } finally {
+        resolveCreate()
       }
     }
 
     if (input.action === 'delete') {
-      const idx = crons.findIndex(c => c.id === input.id)
-      if (idx === -1) return { type: 'error', message: `未找到任务 ID: ${input.id}` }
-      const timer = activeTimers.get(input.id)
-      if (timer) { clearTimeout(timer); activeTimers.delete(input.id) }
+      if (!input.id && !input.description) {
+        return { type: 'error', message: '必须提供 id 或 description 之一' }
+      }
+
+      const crons = loadCrons()
+
+      // 优先按 id 精确匹配，否则按 description 模糊匹配
+      let idx = -1
+      if (input.id) {
+        idx = crons.findIndex(c => c.id === input.id)
+      } else if (input.description) {
+        const keyword = input.description.toLowerCase()
+        idx = crons.findIndex(c => c.description.toLowerCase().includes(keyword))
+      }
+
+      if (idx === -1) {
+        const hint = input.id
+          ? `未找到 ID 为 "${input.id}" 的定时任务`
+          : `未找到描述包含 "${input.description}" 的定时任务`
+        return { type: 'error', message: `${hint}，无需删除，操作已完成。` }
+      }
+
+      const job = crons[idx]
+      const timer = activeTimers.get(job.id)
+      if (timer) { clearTimeout(timer); activeTimers.delete(job.id) }
       crons.splice(idx, 1)
       saveCrons(crons)
-      return { type: 'success', output: `✅ 定时任务 ${input.id} 已删除` }
+      return { type: 'success', output: `✅ 定时任务已删除，无需再次查询验证，操作已完成。\nID: ${job.id}\n描述: ${job.description}` }
     }
 
     if (input.action === 'toggle') {

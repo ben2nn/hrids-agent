@@ -1,55 +1,65 @@
-// 提供商工厂 —— 根据配置自动选择正确的提供商
+// 提供商工厂 —— 根据注册表和 config.json 自动选择正确的提供商
 import { AnthropicProvider } from './AnthropicProvider.js'
 import { OpenAIProvider } from './OpenAIProvider.js'
+import { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 import { FallbackProvider } from './FallbackProvider.js'
 import type { LLMProvider, ModelType, ProviderConfig } from './types.js'
+import {
+  getBuiltinProvider,
+  getCustomProvider,
+  inferProviderByModel,
+  normalizeProvider,
+  type CustomProviderConfig,
+  type ProviderDef,
+} from './registry.js'
+import type { ModelFallbackGroup, ModelTypeConfig } from '../Config.js'
 
 export type { LLMProvider, ModelType, ProviderConfig, StreamChunk, ChatMessage, EmbeddingProvider, SpeechProvider } from './types.js'
 export { AnthropicProvider } from './AnthropicProvider.js'
 export { OpenAIProvider } from './OpenAIProvider.js'
+export { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 export { FallbackProvider } from './FallbackProvider.js'
-
-// ── 模型前缀 → 提供商映射 ─────────────────────────────────────
-const ANTHROPIC_PREFIXES = ['claude-']
-const OPENAI_PREFIXES = ['gpt-', 'o1', 'o3', 'o4']
-const DEEPSEEK_PREFIXES = ['deepseek-']
-const GROQ_PREFIXES = ['llama', 'mixtral', 'gemma', 'whisper']
-// 阿里云百炼（DashScope）模型前缀
-const ALIYUN_PREFIXES = ['qwen', 'qwq-', 'qvq-', 'tongyi-', 'MiniMax-']
-// 智谱 AI 模型前缀
-const ZHIPU_PREFIXES = ['glm-', 'cogview-', 'cogvideo-', 'embedding-']
-
-// ── 各模型类型的默认环境变量前缀 ─────────────────────────────
-// 格式：LLM_FALLBACK_N / VISION_FALLBACK_N / MULTIMODAL_FALLBACK_N /
-//       SPEECH_FALLBACK_N / EMBEDDING_FALLBACK_N
-const MODEL_TYPE_ENV_PREFIX: Record<ModelType, string> = {
-  llm:        'LLM_FALLBACK',
-  vision:     'VISION_FALLBACK',
-  multimodal: 'MULTIMODAL_FALLBACK',
-  speech:     'SPEECH_FALLBACK',
-  embedding:  'EMBEDDING_FALLBACK',
-}
+export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel } from './registry.js'
+export type { ProviderDef, CustomProviderConfig } from './registry.js'
 
 // ── ProviderOptions ───────────────────────────────────────────
+
 export interface ProviderOptions {
   model: string
   apiKey?: string
   baseUrl?: string
   modelType?: ModelType
-  // 显式指定提供商（覆盖自动检测）
-  provider?: 'anthropic' | 'openai' | 'deepseek' | 'groq' | 'ollama' | 'aliyun' | 'zhipu' | 'nvidia' | 'custom'
+  /** 显式指定提供商（支持内置 ID、别名、自定义提供商名称） */
+  provider?: string
+  /** 用户自定义提供商列表（来自 config.json 的 customProviders） */
+  customProviders?: CustomProviderConfig[]
+  /**
+   * 工具调用模式（默认 "native"）：
+   *   - "native"：原生 function calling
+   *   - "dsml"：强制走 DSML 文本解析（DS2API 等兼容层）
+   */
+  toolMode?: 'native' | 'dsml'
 }
 
 // ── 单一提供商创建 ────────────────────────────────────────────
-export function createProvider(opts: ProviderOptions): LLMProvider {
-  const { model, baseUrl } = opts
 
-  // 显式指定提供商
+export function createProvider(opts: ProviderOptions): LLMProvider {
+  const { model, baseUrl, customProviders = [] } = opts
+
+  // 1. 显式指定提供商
   if (opts.provider) {
-    return buildProvider(opts.provider, opts)
+    const def = resolveProviderDef(opts.provider, customProviders)
+    if (!def) {
+      throw new Error(
+        `未知提供商: "${opts.provider}"。\n` +
+        `内置提供商: ${BUILTIN_PROVIDER_IDS.join(', ')}\n` +
+        `如需自定义提供商，请在 config.json 的 customProviders 中添加。`
+      )
+    }
+    return buildFromDef(def, opts)
   }
 
-  // 根据 baseUrl 自动判断（Ollama 通常是 localhost）
+  // 2. 根据 baseUrl 自动判断（localhost → Ollama）
   if (baseUrl?.includes('localhost') || baseUrl?.includes('127.0.0.1')) {
     return new OpenAIProvider(
       { apiKey: opts.apiKey ?? 'ollama', baseUrl, model, modelType: opts.modelType },
@@ -57,128 +67,63 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
     )
   }
 
-  // 根据模型名前缀自动判断
-  if (ANTHROPIC_PREFIXES.some(p => model.startsWith(p))) {
-    return new AnthropicProvider({ apiKey: requireKey(opts, 'ANTHROPIC_API_KEY'), baseUrl, model, modelType: opts.modelType })
-  }
-  if (OPENAI_PREFIXES.some(p => model.startsWith(p))) {
-    return new OpenAIProvider({ apiKey: requireKey(opts, 'OPENAI_API_KEY'), baseUrl, model, modelType: opts.modelType }, 'openai')
-  }
-  if (DEEPSEEK_PREFIXES.some(p => model.startsWith(p))) {
-    return new OpenAIProvider({
-      apiKey: requireKey(opts, 'DEEPSEEK_API_KEY'),
-      baseUrl: baseUrl ?? 'https://api.deepseek.com/v1',
-      model, modelType: opts.modelType,
-    }, 'deepseek')
-  }
-  if (GROQ_PREFIXES.some(p => model.toLowerCase().startsWith(p))) {
-    return new OpenAIProvider({
-      apiKey: requireKey(opts, 'GROQ_API_KEY'),
-      baseUrl: baseUrl ?? 'https://api.groq.com/openai/v1',
-      model, modelType: opts.modelType,
-    }, 'groq')
-  }
-  if (ALIYUN_PREFIXES.some(p => model.startsWith(p))) {
-    return new OpenAIProvider({
-      apiKey: requireKey(opts, 'DASHSCOPE_API_KEY'),
-      baseUrl: baseUrl ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      model, modelType: opts.modelType,
-    }, 'aliyun')
-  }
-  if (ZHIPU_PREFIXES.some(p => model.startsWith(p))) {
-    return new OpenAIProvider({
-      apiKey: requireKey(opts, 'ZHIPU_API_KEY'),
-      baseUrl: baseUrl ?? 'https://open.bigmodel.cn/api/paas/v4',
-      model, modelType: opts.modelType,
-    }, 'zhipu')
-  }
+  // 3. 根据模型名前缀自动推断提供商
+  const inferred = inferProviderByModel(model)
+  if (inferred) return buildFromDef(inferred, opts)
 
-  // 默认尝试 Anthropic
-  const key = opts.apiKey ?? process.env.ANTHROPIC_API_KEY
-  if (key) return new AnthropicProvider({ apiKey: key, baseUrl, model, modelType: opts.modelType })
+  // 4. 兜底：有 apiKey 则尝试 Anthropic
+  if (opts.apiKey) {
+    return new AnthropicProvider({ apiKey: opts.apiKey, baseUrl, model, modelType: opts.modelType })
+  }
 
   throw new Error(
     `无法自动识别模型 "${model}" 的提供商。\n` +
-    `请通过 --provider 指定，或设置对应的环境变量。\n` +
-    `支持的提供商: anthropic, openai, deepseek, groq, ollama, aliyun, zhipu, nvidia, custom`
+    `请在 config.json 中设置 provider 字段，或在 llm.fallbacks 中指定 provider。\n` +
+    `内置提供商: ${BUILTIN_PROVIDER_IDS.join(', ')}`
   )
 }
 
-function buildProvider(provider: string, opts: ProviderOptions): LLMProvider {
-  const { model, baseUrl, modelType } = opts
-  switch (provider) {
-    case 'anthropic':
-      return new AnthropicProvider({ apiKey: requireKey(opts, 'ANTHROPIC_API_KEY'), baseUrl, model, modelType })
-    case 'openai':
-      return new OpenAIProvider({ apiKey: requireKey(opts, 'OPENAI_API_KEY'), baseUrl, model, modelType }, 'openai')
-    case 'deepseek':
-      return new OpenAIProvider({
-        apiKey: requireKey(opts, 'DEEPSEEK_API_KEY'),
-        baseUrl: baseUrl ?? 'https://api.deepseek.com/v1',
-        model, modelType,
-      }, 'deepseek')
-    case 'groq':
-      return new OpenAIProvider({
-        apiKey: requireKey(opts, 'GROQ_API_KEY'),
-        baseUrl: baseUrl ?? 'https://api.groq.com/openai/v1',
-        model, modelType,
-      }, 'groq')
-    case 'aliyun':
-      return new OpenAIProvider({
-        apiKey: requireKey(opts, 'DASHSCOPE_API_KEY'),
-        baseUrl: baseUrl ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        model, modelType,
-      }, 'aliyun')
-    case 'zhipu':
-      return new OpenAIProvider({
-        apiKey: requireKey(opts, 'ZHIPU_API_KEY'),
-        baseUrl: baseUrl ?? 'https://open.bigmodel.cn/api/paas/v4',
-        model, modelType,
-      }, 'zhipu')
-    case 'nvidia':
-      return new OpenAIProvider({
-        apiKey: requireKey(opts, 'NVIDIA_API_KEY'),
-        baseUrl: baseUrl ?? 'https://integrate.api.nvidia.com/v1',
-        model, modelType,
-      }, 'nvidia')
-    case 'ollama':
-      return new OpenAIProvider({
-        apiKey: 'ollama',
-        baseUrl: baseUrl ?? 'http://localhost:11434/v1',
-        model, modelType,
-      }, 'ollama')
-    case 'custom':
-      return new OpenAIProvider({
-        apiKey: requireKey(opts, 'CUSTOM_API_KEY'),
-        baseUrl: baseUrl ?? (() => { throw new Error('custom 提供商需要 --base-url') })(),
-        model, modelType,
-      }, 'custom')
-    default:
-      throw new Error(`未知提供商: ${provider}，支持的提供商: anthropic, openai, deepseek, groq, ollama, aliyun, zhipu, nvidia, custom`)
+// ── 内部：从 ProviderDef 构建 LLMProvider ─────────────────────
+
+function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
+  const { model, modelType, toolMode = 'native' } = opts
+  const baseUrl = opts.baseUrl ?? def.defaultBaseUrl
+  const apiKey = opts.apiKey
+
+  const config: ProviderConfig = { apiKey: apiKey ?? '', baseUrl, model, modelType }
+
+  if (def.transport === 'anthropic_messages') {
+    if (!apiKey) throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
+    // dsml 模式或 deepseekCompat：使用 DeepSeekAnthropicProvider
+    // 去掉 cache_control 等不兼容字段，工具调用走 DSML 文本解析
+    if (toolMode === 'dsml' || def.deepseekCompat) {
+      return new DeepSeekAnthropicProvider(config)
+    }
+    return new AnthropicProvider(config)
   }
+
+  if (def.id !== 'ollama' && !apiKey) {
+    throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
+  }
+  // dsml 模式下禁用 OpenAI function calling，让模型输出 DSML 文本
+  return new OpenAIProvider({ ...config, apiKey: apiKey ?? 'ollama' }, def.id, toolMode === 'dsml')
 }
 
-function requireKey(opts: ProviderOptions, envVar: string): string {
-  const key = opts.apiKey ?? process.env[envVar]
-  if (!key) throw new Error(`缺少 API Key，请设置环境变量 ${envVar} 或使用 --api-key 参数`)
-  return key
+/** 解析提供商定义（内置 → 自定义） */
+function resolveProviderDef(name: string, customs: CustomProviderConfig[]): ProviderDef | undefined {
+  return getBuiltinProvider(name) ?? getCustomProvider(name, customs)
 }
+
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'deepseek-anthropic', 'groq', 'aliyun', 'zhipu', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
 
 // ── 多模型 Fallback 工厂 ──────────────────────────────────────
 
-/**
- * 创建多 LLM 故障转移提供商（带平台分组）
- */
 export function createFallbackProvider(configs: ProviderOptions[]): LLMProvider {
   if (configs.length === 0) throw new Error('至少需要一个提供商配置')
   if (configs.length === 1) return createProvider(configs[0])
   return new FallbackProvider(configs.map(c => createProvider(c)))
 }
 
-/**
- * 创建带平台分组的故障转移提供商
- * groups 内同平台模型先切换，平台全挂再跨平台
- */
 export function createGroupedFallbackProvider(groups: Array<{ platformName: string; configs: ProviderOptions[] }>): LLMProvider {
   if (groups.length === 0) throw new Error('至少需要一个平台配置')
 
@@ -195,164 +140,116 @@ export function createGroupedFallbackProvider(groups: Array<{ platformName: stri
   return new FallbackProvider(allProviders, providerGroups)
 }
 
-// ── 从环境变量创建指定类型的 Provider ────────────────────────
+// ── 从 config 创建指定类型的 Provider ────────────────────────
+
+interface TypedProviderContext {
+  typeConfig?: ModelTypeConfig
+  customProviders?: CustomProviderConfig[]
+  modelType: ModelType
+}
 
 /**
- * 从环境变量读取指定模型类型的多模型配置并创建 FallbackProvider
- *
- * 环境变量格式（以 LLM 类型为例）：
- *   LLM_FALLBACK_1=provider:aliyun,models:qwen3.5-flash,qwen3.5-plus
- *   LLM_FALLBACK_2=provider:deepseek,models:deepseek-chat
- *
- * 其他类型对应的前缀：
- *   VISION_FALLBACK_N      视觉模型
- *   MULTIMODAL_FALLBACK_N  全模态大模型
- *   SPEECH_FALLBACK_N      语音模型
- *   EMBEDDING_FALLBACK_N   向量模型
- *
- * 同一行内的模型属于同一平台，优先在平台内切换，平台全挂后跨到下一行。
+ * 从 ModelTypeConfig（config.json 中的 llm / vision / multimodal / speech）
+ * 创建对应的 LLMProvider，支持多平台 Fallback。
+ * API Key 直接从各 fallback 条目的 apiKey 字段读取。
  */
-export function createTypedProviderFromEnv(modelType: ModelType): LLMProvider | null {
-  const envPrefix = MODEL_TYPE_ENV_PREFIX[modelType]
-  const groups: Array<{ platformName: string; configs: ProviderOptions[] }> = []
+export function createTypedProvider(ctx: TypedProviderContext): LLMProvider | null {
+  const { typeConfig, customProviders = [], modelType } = ctx
+  if (!typeConfig) return null
 
-  for (let i = 1; i <= 20; i++) {
-    const raw = process.env[`${envPrefix}_${i}`]
-    if (!raw) break
+  // 有 fallbacks 配置 → 构建分组 Fallback
+  if (typeConfig.fallbacks && typeConfig.fallbacks.length > 0) {
+    const groups = typeConfig.fallbacks.map(g => ({
+      platformName: g.provider,
+      configs: g.models.map(model => ({
+        model,
+        provider: normalizeProvider(g.provider),
+        apiKey: g.apiKey,
+        baseUrl: g.baseUrl,
+        modelType,
+        customProviders,
+        toolMode: g.toolMode,
+      } satisfies ProviderOptions)),
+    }))
 
-    const entries = parseProviderLine(raw, modelType)
-    if (entries.length === 0) {
-      throw new Error(`${envPrefix}_${i} 解析失败，请检查格式`)
+    if (!process.env.AGENT_SERVER_MODE) {
+      const chain = groups.map((g, i) =>
+        `[平台${i + 1}:${g.platformName}] ${g.configs.map(c => c.model).join(' → ')}`
+      ).join(' || ')
+      process.stderr.write(`[providers] ${modelType} fallback 链: ${chain}\n`)
     }
 
-    const platformName = entries[0].provider ?? entries[0].model
-    groups.push({ platformName, configs: entries })
+    return createGroupedFallbackProvider(groups)
   }
 
-  if (groups.length === 0) return null
-
-  if (!process.env.AGENT_SERVER_MODE) {
-    const chain = groups.map((g, gi) =>
-      `[平台${gi + 1}:${g.platformName}] ${g.configs.map(c => c.model).join(' → ')}`
-    ).join(' || ')
-    process.stderr.write(`[providers] ${modelType} fallback 链: ${chain}\n`)
+  // 只有单一 model
+  if (typeConfig.model) {
+    return createProvider({ model: typeConfig.model, modelType, customProviders })
   }
 
-  return createGroupedFallbackProvider(groups)
+  return null
 }
+
+// ── 便捷工厂（供 setupProvider / gateway 使用）────────────────
 
 /**
- * 从环境变量读取大语言模型配置（LLM_FALLBACK_N 或 DEFAULT_MODEL）
- * 这是主对话引擎使用的入口，保持向后兼容。
+ * 从完整 config 创建 LLM 提供商。
+ * 优先级：config.llm.fallbacks > config.llm.model > config.model
  */
-export function createProviderFromEnv(): LLMProvider {
-  const provider = createTypedProviderFromEnv('llm')
-  if (provider) return provider
+export function createProviderFromConfig(config: {
+  model: string
+  provider?: string
+  apiKey?: string
+  baseUrl?: string
+  llm?: ModelTypeConfig
+  customProviders?: CustomProviderConfig[]
+}): LLMProvider {
+  const { customProviders = [] } = config
 
-  // 没有 LLM_FALLBACK_* 配置，使用单一 DEFAULT_MODEL
-  const model = process.env.DEFAULT_MODEL
-  if (!model) throw new Error('请设置 DEFAULT_MODEL 或 LLM_FALLBACK_1 环境变量')
-  return createProvider({ model, modelType: 'llm' })
+  // 1. llm 字段（含 fallbacks）
+  const fromLlm = createTypedProvider({ typeConfig: config.llm, customProviders, modelType: 'llm' })
+  if (fromLlm) return fromLlm
+
+  // 2. 顶层 model + provider
+  return createProvider({
+    model: config.model,
+    provider: config.provider,
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+    modelType: 'llm',
+    customProviders,
+  })
 }
 
-/**
- * 从环境变量读取视觉模型配置（VISION_FALLBACK_N 或 VISION_MODEL）
- * 返回 null 表示未配置，调用方可降级到 LLM 模型。
- */
-export function createVisionProviderFromEnv(): LLMProvider | null {
-  const provider = createTypedProviderFromEnv('vision')
-  if (provider) return provider
-
-  const model = process.env.VISION_MODEL
-  if (!model) return null
-  return createProvider({ model, modelType: 'vision' })
+export function createVisionProviderFromConfig(config: {
+  vision?: ModelTypeConfig
+  customProviders?: CustomProviderConfig[]
+}): LLMProvider | null {
+  return createTypedProvider({
+    typeConfig: config.vision,
+    customProviders: config.customProviders,
+    modelType: 'vision',
+  })
 }
 
-/**
- * 从环境变量读取全模态模型配置（MULTIMODAL_FALLBACK_N 或 MULTIMODAL_MODEL）
- * 全模态模型同时支持文本、图像、音频输入/输出。
- */
-export function createMultimodalProviderFromEnv(): LLMProvider | null {
-  const provider = createTypedProviderFromEnv('multimodal')
-  if (provider) return provider
-
-  const model = process.env.MULTIMODAL_MODEL
-  if (!model) return null
-  return createProvider({ model, modelType: 'multimodal' })
+export function createMultimodalProviderFromConfig(config: {
+  multimodal?: ModelTypeConfig
+  customProviders?: CustomProviderConfig[]
+}): LLMProvider | null {
+  return createTypedProvider({
+    typeConfig: config.multimodal,
+    customProviders: config.customProviders,
+    modelType: 'multimodal',
+  })
 }
 
-/**
- * 从环境变量读取语音模型配置（SPEECH_FALLBACK_N 或 SPEECH_MODEL）
- * 语音模型用于 TTS（文字转语音）和 STT（语音转文字）。
- */
-export function createSpeechProviderFromEnv(): LLMProvider | null {
-  const provider = createTypedProviderFromEnv('speech')
-  if (provider) return provider
-
-  const model = process.env.SPEECH_MODEL
-  if (!model) return null
-  return createProvider({ model, modelType: 'speech' })
-}
-
-// ── 解析工具函数 ──────────────────────────────────────────────
-
-/**
- * 解析一行 FALLBACK_N 配置，返回一组 ProviderOptions
- *
- * 支持两种格式：
- * - 新格式: provider:aliyun,models:qwen3-235b,qwen3-8b[,apiKey:xxx][,baseUrl:xxx]
- * - 旧格式: model:qwen3-235b,provider:aliyun[,apiKey:xxx]
- */
-function parseProviderLine(raw: string, modelType: ModelType = 'llm'): ProviderOptions[] {
-  const modelsMatch = raw.match(/(?:^|,)models:(.+)$/)
-
-  if (modelsMatch) {
-    const beforeModels = raw.slice(0, raw.indexOf('models:'))
-    const kvPairs = parseKV(beforeModels)
-
-    const afterModels = modelsMatch[1]
-    const modelTokens: string[] = []
-    const extraKV: Record<string, string> = {}
-
-    for (const token of afterModels.split(',')) {
-      const t = token.trim()
-      if (!t) continue
-      if (t.includes(':')) {
-        const idx = t.indexOf(':')
-        extraKV[t.slice(0, idx)] = t.slice(idx + 1)
-      } else {
-        modelTokens.push(t)
-      }
-    }
-
-    const merged = { ...kvPairs, ...extraKV }
-    const provider = merged.provider as ProviderOptions['provider']
-    const apiKey = merged.apiKey
-    const baseUrl = merged.baseUrl
-
-    return modelTokens.map(model => ({ model, provider, apiKey, baseUrl, modelType }))
-  }
-
-  // 旧格式：model:xxx,provider:yyy,...
-  const kv = parseKV(raw)
-  if (!kv.model) throw new Error(`配置行缺少 model 字段: ${raw}`)
-  return [{
-    model: kv.model,
-    provider: kv.provider as ProviderOptions['provider'],
-    apiKey: kv.apiKey,
-    baseUrl: kv.baseUrl,
-    modelType,
-  }]
-}
-
-/** 解析 "key:val,key2:val2" 形式的字符串为对象 */
-function parseKV(str: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  for (const token of str.split(',')) {
-    const t = token.trim()
-    if (!t || !t.includes(':')) continue
-    const idx = t.indexOf(':')
-    result[t.slice(0, idx).trim()] = t.slice(idx + 1).trim()
-  }
-  return result
+export function createSpeechProviderFromConfig(config: {
+  speech?: ModelTypeConfig
+  customProviders?: CustomProviderConfig[]
+}): LLMProvider | null {
+  return createTypedProvider({
+    typeConfig: config.speech,
+    customProviders: config.customProviders,
+    modelType: 'speech',
+  })
 }

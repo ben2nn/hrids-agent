@@ -4,6 +4,16 @@ import type { ToolDef } from '../core/Tool.js'
 import { getMemoryStack } from './layers.js'
 import { getMemoryStore } from './store.js'
 
+/** 获取全局 MemoryStack（记忆跨会话共享，会话 ID 仅作来源标记） */
+function resolveStack() {
+  return getMemoryStack()
+}
+
+/** 获取全局 MemoryStore（记忆跨会话共享，会话 ID 仅作来源标记） */
+function resolveStore() {
+  return getMemoryStore()
+}
+
 // ── memory_add ───────────────────────────────────────────────
 
 const addSchema = z.object({
@@ -34,7 +44,7 @@ export const MemoryAddTool: ToolDef<typeof addSchema> = {
 
   async execute(input) {
     try {
-      const store = getMemoryStore()
+      const store = resolveStore()
       const mem = store.addMemory({
         content: input.content,
         type: input.type,
@@ -71,7 +81,7 @@ export const MemorySearchTool: ToolDef<typeof searchSchema> = {
 
   async execute(input) {
     try {
-      const stack = getMemoryStack()
+      const stack = resolveStack()
       const text = await stack.searchText(input.query, {
         wing: input.wing,
         room: input.room,
@@ -104,7 +114,7 @@ export const MemoryRecallTool: ToolDef<typeof recallSchema> = {
 
   async execute(input) {
     try {
-      const stack = getMemoryStack()
+      const stack = resolveStack()
       const text = stack.recall({ wing: input.wing, room: input.room, limit: input.limit })
       return { type: 'success', output: text }
     } catch (err) {
@@ -135,7 +145,7 @@ export const MemoryFactTool: ToolDef<typeof factSchema> = {
 
   async execute(input) {
     try {
-      const stack = getMemoryStack()
+      const stack = resolveStack()
       const triple = stack.addFact(input.subject, input.predicate, input.object, {
         validFrom: input.validFrom,
         confidence: input.confidence,
@@ -173,7 +183,7 @@ export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
 
   async execute(input) {
     try {
-      const store = getMemoryStore()
+      const store = resolveStore()
       const updated = store.updateMemory(input.oldId, {
         content: input.content,
         type: input.type,
@@ -203,7 +213,7 @@ export const MemoryStatusTool: ToolDef<typeof statusSchema> = {
 
   async execute() {
     try {
-      const stack = getMemoryStack()
+      const stack = resolveStack()
       const stats = await stack.status()
       const lines = [
         `记忆总数: ${stats.totalMemories}`,

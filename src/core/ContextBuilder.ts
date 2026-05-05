@@ -1,9 +1,12 @@
-// 系统上下文构建器 —— 注入 Git 状态、CLAUDE.md 记忆文件等
-import { execSync } from 'child_process'
-import { existsSync, readFileSync, mkdirSync } from 'fs'
+// 系统上下文构建器 —— 注入 Git 状态、AGENT.md 记忆文件等
+import { exec, execSync } from 'child_process'
+import { existsSync, readFileSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { promisify } from 'util'
 import { homedir } from 'os'
-import { join, resolve } from 'path'
-import { getMemoryStack } from '../memory/index.js'
+import { join } from 'path'
+import { getGlobalCwd } from './cwd.js'
+
+const execAsync = promisify(exec)
 
 export interface ContextInfo {
   gitStatus: string | null
@@ -32,42 +35,104 @@ export function getSessionWorkDir(sessionId: string): string {
   const dir = join(homedir(), '.hrids-agent', 'work', dirName)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
+    // 初始化 git 仓库，使差异功能可用
+    try {
+      execSync('git init', { cwd: dir, stdio: 'ignore' })
+      execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
+    } catch {
+      // git 不可用时静默忽略
+    }
   }
   return dir
 }
 
 // 读取 git 状态（分支、最近提交、工作区变更）
-function getGitContext(): string | null {
+// 结果按 cwd 分桶缓存 5 秒，避免每条消息都阻塞执行 3 次 git 命令
+// Gateway 多会话模式下不同会话的 cwd 不同，分桶避免缓存污染
+const _gitCacheMap = new Map<string, { result: string | null; ts: number }>()
+const GIT_CACHE_TTL_MS = 5000
+// 缓存条目上限，防止长期运行的 Gateway 进程内存泄漏
+const GIT_CACHE_MAX_ENTRIES = 200
+
+async function getGitContext(cwd?: string): Promise<string | null> {
+  const key = cwd ?? ''
+  const now = Date.now()
+  const cached = _gitCacheMap.get(key)
+  if (cached && now - cached.ts < GIT_CACHE_TTL_MS) {
+    // LRU：命中时将条目移到 Map 末尾（删除再重新插入）
+    _gitCacheMap.delete(key)
+    _gitCacheMap.set(key, cached)
+    return cached.result
+  }
+  const result = await _fetchGitContext(cwd)
+
+  // 超出上限时，淘汰最旧（最久未访问）的条目（Map 迭代顺序即插入/访问顺序）
+  if (!_gitCacheMap.has(key) && _gitCacheMap.size >= GIT_CACHE_MAX_ENTRIES) {
+    const oldestKey = _gitCacheMap.keys().next().value
+    if (oldestKey !== undefined) _gitCacheMap.delete(oldestKey)
+  }
+
+  _gitCacheMap.set(key, { result, ts: now })
+  return result
+}
+
+async function _fetchGitContext(cwd?: string): Promise<string | null> {
+  const opts = cwd ? { cwd } : {}
   try {
-    const isGit = execSync('git rev-parse --is-inside-work-tree 2>/dev/null', {
-      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim()
-    if (isGit !== 'true') return null
+    const { stdout: isGitOut } = await execAsync('git rev-parse --is-inside-work-tree', opts)
+    if (isGitOut.trim() !== 'true') return null
 
-    const [branch, status, log] = [
-      execSync('git branch --show-current', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(),
-      execSync('git status --short', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(),
-      execSync('git log --oneline -5', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim(),
-    ]
+    const [{ stdout: branch }, { stdout: status }, { stdout: gitLog }] = await Promise.all([
+      execAsync('git branch --show-current', opts),
+      execAsync('git status --short', opts),
+      execAsync('git log --oneline -5', opts),
+    ])
 
-    const parts = [`当前分支: ${branch}`]
-    if (status) parts.push(`工作区变更:\n${status}`)
-    if (log) parts.push(`最近提交:\n${log}`)
+    const parts = [`当前分支: ${branch.trim()}`]
+    if (status.trim()) parts.push(`工作区变更:\n${status.trim()}`)
+    if (gitLog.trim()) parts.push(`最近提交:\n${gitLog.trim()}`)
     return parts.join('\n')
   } catch {
     return null
   }
 }
 
-// 查找并读取 CLAUDE.md / AGENT.md 记忆文件
-// 搜索顺序：当前目录 → 父目录 → 用户主目录
+// 查找并读取项目记忆文件（AGENT.md）
+// 搜索顺序：
+//   1. {cwd}/AGENT.md          —— 项目级记忆（随代码库存放）
+//   2. {cwd}/.hrids/AGENT.md   —— 项目级记忆（隐藏目录，适合不想提交到 git 的场景）
+//   3. ~/.hrids-agent/AGENT.md —— 用户级全局记忆（跨项目通用规则）
+//
+// 结果按 cwd 分桶缓存 30 秒，避免每条消息都重复读磁盘
+const _memFilesCacheMap = new Map<string, { result: string[]; ts: number }>()
+const MEM_FILES_CACHE_TTL_MS = 30_000
+const MEM_FILES_CACHE_MAX_ENTRIES = 100
+
 function findMemoryFiles(cwd: string): string[] {
+  const now = Date.now()
+  const cached = _memFilesCacheMap.get(cwd)
+  if (cached && now - cached.ts < MEM_FILES_CACHE_TTL_MS) {
+    // LRU：命中时将条目移到 Map 末尾
+    _memFilesCacheMap.delete(cwd)
+    _memFilesCacheMap.set(cwd, cached)
+    return cached.result
+  }
+
+  const result = _fetchMemoryFiles(cwd)
+
+  if (!_memFilesCacheMap.has(cwd) && _memFilesCacheMap.size >= MEM_FILES_CACHE_MAX_ENTRIES) {
+    const oldestKey = _memFilesCacheMap.keys().next().value
+    if (oldestKey !== undefined) _memFilesCacheMap.delete(oldestKey)
+  }
+  _memFilesCacheMap.set(cwd, { result, ts: now })
+  return result
+}
+
+function _fetchMemoryFiles(cwd: string): string[] {
   const candidates = [
-    join(cwd, 'CLAUDE.md'),
     join(cwd, 'AGENT.md'),
-    join(cwd, '.claude', 'CLAUDE.md'),
-    join(homedir(), 'CLAUDE.md'),
-    join(homedir(), '.claude', 'CLAUDE.md'),
+    join(cwd, '.hrids', 'AGENT.md'),
+    join(homedir(), '.hrids-agent', 'AGENT.md'),
   ]
 
   const contents: string[] = []
@@ -84,51 +149,45 @@ function findMemoryFiles(cwd: string): string[] {
   return contents
 }
 
-// 构建完整的系统上下文字符串，注入到 system prompt
+// 构建完整的系统上下文，注入动态内容（记忆、环境信息）
+// 接受 string[]，追加动态 section 后返回 string[]
 // cwd 参数可选，不传则使用 ~/.hrids-agent/work/（仅用于记忆文件查找）
-export async function buildSystemContext(basePrompt: string, cwd?: string): Promise<string> {
+// sessionId 参数可选，传入时注入会话级记忆（Gateway 多会话隔离），否则注入全局记忆
+export async function buildSystemContext(basePrompt: string[], cwd?: string, sessionId?: string): Promise<string[]> {
   const resolvedCwd = cwd ?? getDefaultAgentCwd()
-  const gitCtx = getGitContext()
-  const memFiles = findMemoryFiles(resolvedCwd)
+  const [gitCtx, memFiles] = await Promise.all([
+    getGitContext(resolvedCwd),
+    Promise.resolve(findMemoryFiles(resolvedCwd)),
+  ])
 
-  const sections: string[] = [basePrompt]
+  // 动态 section 追加到静态层之后，不影响静态层缓存
+  const dynamicSections: string[] = []
 
   // 注入记忆文件内容
   if (memFiles.length > 0) {
-    sections.push('## 项目记忆\n' + memFiles.join('\n\n'))
+    dynamicSections.push('## 项目记忆\n' + memFiles.join('\n\n'))
   }
 
   // 注入长期记忆（L0 身份 + L1 核心摘要）
+  // Gateway 多会话模式：使用会话级记忆（按 sessionId 隔离，防止跨用户泄漏）
+  // CLI 单会话模式：使用全局记忆（跨会话积累知识）
   try {
-    const stack = getMemoryStack()
+    const { getMemoryStackForSession, getMemoryStack } = await import('../memory/index.js')
+    const stack = sessionId ? getMemoryStackForSession(sessionId) : getMemoryStack()
     const { l0Identity, l1Essential, totalTokens } = stack.wakeUp()
     const stats = await stack.status()
     if (stats.totalMemories > 0) {
-      sections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${l0Identity}\n\n${l1Essential}`)
+      dynamicSections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${l0Identity}\n\n${l1Essential}`)
     }
   } catch {
     // 记忆系统不可用时静默跳过
   }
 
-  // 注入记忆触发规则（让 agent 知道何时必须主动写记忆）
-  sections.push(`## 记忆规则
-遇到以下情况时，必须立即调用 memory_add，不要等到会话结束：
-- 用户表达偏好或习惯："以后都用X"、"不要用Y"、"我喜欢X风格" → type=preference
-- 做出技术决策："选择X方案"、"用X替代Y"、"因为X所以用Y" → type=decision
-- 完成重要任务："搞定了"、"上线了"、"终于解决了" → type=milestone
-- 发现 bug 根因或解决方案 → type=problem
-- 用户提到项目名、技术栈、团队成员等事实 → type=fact
-
-如果新信息与已有记忆矛盾（用户改变了决策或偏好），先用 memory_search 找到旧记忆 ID，再调用 memory_update 替换，不要重复新增。
-
-wing 填当前项目名（从工作目录或对话上下文推断），room 填具体主题（如 architecture、auth、deployment）。`)
-
-  // 注入环境信息（工作目录不在此处注入，由 getDynamicContext 动态提供）
+  // 注入环境信息
   const platform = process.platform
   const isWindows = platform === 'win32'
   const isMac = platform === 'darwin'
 
-  // 检测实际使用的 shell
   const shellEnv = process.env.SHELL ?? process.env.ComSpec ?? ''
   const shellName = isWindows
     ? (shellEnv.toLowerCase().includes('powershell') || process.env.PSModulePath ? 'PowerShell' : 'cmd.exe')
@@ -142,6 +201,8 @@ wing 填当前项目名（从工作目录或对话上下文推断），room 填�
     `当前时间: ${new Date().toLocaleString('zh-CN')}`,
     `用户主目录: ${homedir()}`,
     `用户名: ${process.env.USERNAME ?? process.env.USER ?? process.env.LOGNAME ?? '未知'}`,
+    // 注入实时工作目录（getGlobalCwd() 反映最新的 cd 状态，比 resolvedCwd 更准确）
+    `当前工作目录 (cwd): ${getGlobalCwd()}`,
   ]
 
   if (isWindows) {
@@ -152,21 +213,63 @@ wing 填当前项目名（从工作目录或对话上下文推断），room 填�
     envInfo.push('注意: Linux 环境，使用 bash 命令')
   }
 
-  envInfo.push(`\nbash 工具超时设置（必须显式传入 timeout 参数，否则默认 60s）：
-- 快速命令（ls/cat/echo）：不传或 timeout=10000
-- 安装依赖（pip/npm install）：timeout=120000
-- 运行脚本/爬虫（短任务）：timeout=300000
-- 大批量处理/全量爬取：timeout=1800000（30分钟）
-- 超长任务：timeout=3600000（1小时）`)
+  // 检测当前工作目录下的 Python 虚拟环境状态
+  const currentCwd = getGlobalCwd()
+  const venvPaths = [
+    join(currentCwd, '.venv'),
+    join(currentCwd, 'venv'),
+  ]
+  const venvDir = venvPaths.find(p => existsSync(p))
+  const venvActivated = !!(process.env.VIRTUAL_ENV)
+
+  if (venvActivated) {
+    envInfo.push(`Python 虚拟环境：已激活（${process.env.VIRTUAL_ENV}）`)
+  } else if (venvDir) {
+    const activateHint = isWindows
+      ? `${venvDir}\\Scripts\\Activate.ps1`
+      : `source ${venvDir}/bin/activate`
+    envInfo.push(`Python 虚拟环境：未激活（已存在 ${venvDir}，执行 \`${activateHint}\` 激活）`)
+  } else {
+    envInfo.push(`Python 虚拟环境：不存在（执行 python -m venv .venv 在当前目录创建）`)
+  }
+
+  // 安全边界说明：告知 LLM 工作目录约束和禁止操作
+  envInfo.push(
+    '\n## 安全边界\n' +
+    `- 所有文件操作应在当前工作目录（${getGlobalCwd()}）内进行\n` +
+    '- 禁止操作系统关键目录（/etc、/usr、/bin、/sbin、/boot、/dev 等）\n' +
+    '- 禁止修改用户主目录根层级文件\n' +
+    '- 禁止执行 shutdown/reboot/halt 等系统命令\n' +
+    '- 长时间任务（编译/下载）请在 bash 工具的 timeout 参数中设置合适的超时时间（毫秒）\n' +
+    '- 如需安装依赖，优先在项目目录内安装（npm install、pip install -r requirements.txt 等）'
+  )
 
   if (gitCtx) envInfo.push(`\nGit 状态:\n${gitCtx}`)
 
-  sections.push('## 环境信息\n' + envInfo.join('\n'))
+  dynamicSections.push('## 环境信息\n' + envInfo.join('\n'))
 
-  return sections.join('\n\n---\n\n')
+  // 注入 .cache/ 目录中的上传文件列表，让 LLM 知道可以用 @.cache/filename 引用
+  const cacheDir = join(resolvedCwd, '.cache')
+  if (existsSync(cacheDir)) {
+    try {
+      const cacheFiles = readdirSync(cacheDir)
+        .filter(f => {
+          try { return statSync(join(cacheDir, f)).isFile() } catch { return false }
+        })
+      if (cacheFiles.length > 0) {
+        const fileList = cacheFiles.map(f => `  - @.cache/${f}`).join('\n')
+        dynamicSections.push(
+          `## 已上传的附件文件（位于 cwd/.cache/）\n` +
+          `以下文件已上传到当前会话工作目录，可直接用 @.cache/<文件名> 语法引用：\n${fileList}\n` +
+          `例如：分析 @.cache/${cacheFiles[0]}`
+        )
+      }
+    } catch {
+      // 读取失败时静默忽略
+    }
+  }
+
+  return [...basePrompt, ...dynamicSections]
 }
 
-// 动态上下文：每次发消息前调用，返回最新工作目录信息
-export function getDynamicContext(cwd: string): string {
-  return `\n\n---\n\n## 当前工作目录\n${cwd}`
-}
+

@@ -1,4 +1,5 @@
 // 智能体间消息总线 —— 支持点对点和广播通信
+// 每个 TeamManager 持有独立实例，避免多会话消息混串
 
 export interface AgentMessage {
   id: string
@@ -11,16 +12,10 @@ export interface AgentMessage {
 type MessageHandler = (msg: AgentMessage) => void
 
 export class MessageBus {
-  private static instance: MessageBus
   // 每个智能体的消息队列
   private queues = new Map<string, AgentMessage[]>()
   // 实时订阅（用于 await 等待消息）
   private subscribers = new Map<string, MessageHandler[]>()
-
-  static getInstance(): MessageBus {
-    if (!MessageBus.instance) MessageBus.instance = new MessageBus()
-    return MessageBus.instance
-  }
 
   // 注册智能体，创建其消息队列
   register(agentName: string) {
