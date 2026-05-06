@@ -36,6 +36,9 @@ jobs:
       - name: Run linter (root)
         run: npm run lint
 
+      - name: Install dependencies (web)
+        run: cd web && npm ci
+
       - name: Run linter (web)
         run: cd web && npm run lint
 
