@@ -1,79 +1,134 @@
-# hrids-agent
+<h1 align="center">hrids-agent</h1>
 
-> 通用自主工作者 CLI —— 你只做决策，它负责执行。
+<p align="center">
+  <strong>通用自主工作者 CLI</strong> — 你只做决策，它负责执行。
+</p>
 
-基于 Agentic CLI 架构思想构建，支持多 LLM 提供商、长期记忆、多智能体协调、定时任务、MCP 工具扩展。
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-green" alt="node">
+  <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
+  <img src="https://img.shields.io/badge/type-module-black" alt="module">
+</p>
+
+---
+
+## 简介
+
+hrids-agent 是一个 TypeScript 编写的通用自主工作者 CLI 工具。借鉴 agentic CLI 架构思想，支持多种 LLM 提供商、长期记忆、多智能体协调、定时任务和 MCP 工具扩展。
+
+### 核心特性
+
+- **多模型支持** — Anthropic / OpenAI / DeepSeek / Groq / 阿里云百炼 / 智谱 / Ollama 等 13+ 提供商，自动故障转移
+- **20+ 内置工具** — 文件读写、网络搜索/抓取、Shell 执行、任务管理、定时调度、人机交互
+- **4 种运行模式** — 交互式 TUI / 单次执行 / Server(stdin NDJSON) / Gateway(HTTP + WebSocket)
+- **4 层长期记忆** — L0 身份 → L1 摘要 → L2 按需 → L3 语义搜索，支持 sqlite-vec 向量检索 + 知识图谱
+- **多智能体协作** — 派生子智能体并行处理，团队管理，消息总线通信
+- **MCP 协议** — 兼容 Model Context Protocol，支持 Claude Desktop 格式的 mcp.json
+- **Skill 系统** — 内置 + 用户自定义技能 + SkillHub 市场集成，自动沉淀工作流
+- **定时任务** — Cron 表达式调度，持久化存储，进程重启自动恢复
+- **权限控制** — ask / craft / plan 三种模式，细粒度路径和内容规则
+- **Gateway 服务** — 内置 Web UI，JWT 鉴权，Telegram / 微信 / Webhook 多 IM 平台接入
 
 ---
 
 ## 快速开始
 
+### 安装
+
 ```bash
-# 安装依赖
+git clone <repo-url> && cd hrids-agent
 npm install
+```
 
-# 设置 API Key（以阿里云百炼为例）
-export DASHSCOPE_API_KEY=sk-...
+### 配置
 
-# 启动交互模式
+首次运行自动生成 `~/.hrids-agent/config.json`，也可手动初始化：
+
+```bash
+npm run dev -- init
+```
+
+复制 `config.example.json` 到 `~/.hrids-agent/config.json` 并填入 API Key：
+
+```json
+{
+  "llm": {
+    "fallbacks": [
+      {
+        "provider": "aliyun",
+        "apiKey": "sk-xxxxxxxx",
+        "models": ["qwen-plus"]
+      }
+    ]
+  }
+}
+```
+
+### 启动
+
+```bash
+# 交互模式（默认 TUI，自动恢复上次会话）
 npm run dev
+
+# 单次执行
+npm run dev -- -p "帮我写一个 hello world"
+
+# Server 模式（stdin NDJSON）
+npm run dev -- --server
+
+# Gateway 模式（HTTP + WebSocket + Web UI）
+npm run gateway
 ```
 
 ---
 
-## 启动模式
+## 使用示例
 
-### 交互模式（默认）
+### 交互模式
+
+```
+$ npm run dev
+
+你：帮我统计 src/ 目录下所有 TypeScript 文件的代码行数
+
+▸ 正在扫描 src/ 目录...
+  找到 42 个 .ts 文件
+
+▸ 执行统计...
+  总行数：8,523 行
+  总字符数：234,567
+  平均每文件：203 行
+
+已完成统计。
+```
+
+### 单次执行
 
 ```bash
-npm run dev
+npm run dev -- -p "用 Python 写一个简单的 HTTP 服务器" --craft
 ```
 
-进入 TUI 界面，支持多轮对话、斜杠命令、实时流式输出。默认自动恢复上次会话。
-
-### 单次执行模式
+### Gateway 模式
 
 ```bash
-npm run dev -- -p "帮我调研一下 Rust 和 Go 在高并发场景下的性能对比"
+npm run gateway
+# 打开浏览器访问 http://127.0.0.1:3282
 ```
 
-执行完一条指令后自动退出，适合脚本调用。可用 `--max-chars <n>` 限制输出长度。
+---
 
-### Server 模式（NDJSON）
+## 启动模式对比
 
-```bash
-npm run dev -- --server
-```
-
-从 stdin 持续读取 NDJSON 消息，保持会话历史，供前端或外部程序调用。
-
-消息格式：
-
-```json
-{ "message": "你的指令" }
-```
-
-特殊消息类型：
-
-```json
-{ "type": "abort" }                           // 中止当前任务
-{ "type": "user_reply", "answer": "..." }     // 回复 ask_user 问题
-{ "type": "decision_reply", "answer": "1" }  // 回复 request_decision 决策
-{ "type": "set_cwd", "cwd": "/path/to/dir" } // 切换工作目录
-```
-
-### Gateway 模式（HTTP + WebSocket）
-
-```bash
-npm run dev -- --gateway --gateway-port 3282 --gateway-token my-secret
-```
-
-启动 HTTP REST + WebSocket 服务，支持多会话并发，供前端或远程客户端连接。
-
-```
-REST  http://127.0.0.1:3282/sessions
-WS    ws://127.0.0.1:3282/sessions/:id/stream
-```
+| 特性 | 交互模式 | 单次执行 `-p` | Server `--server` | Gateway `--gateway` |
+|------|:---:|:---:|:---:|:---:|
+| 多轮对话 | ✓ | ✗ | ✓ | ✓ |
+| 流式输出 | Ink TUI | stdout | NDJSON | WebSocket JSON |
+| 会话持久化 | ✓ | ✓ | ✓ | ✓ |
+| 多会话并发 | ✗ | ✗ | ✗ | ✓ |
+| Web UI | ✗ | ✗ | ✗ | ✓ |
+| IM 接入 | ✗ | ✗ | ✗ | ✓ |
+| 历史恢复 | 自动 | — | 手动 | 手动 |
 
 ---
 
@@ -81,60 +136,53 @@ WS    ws://127.0.0.1:3282/sessions/:id/stream
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-m, --model <model>` | 模型名称（自动识别提供商） | `claude-sonnet-4-5` |
-| `--provider <name>` | 显式指定提供商 | 自动识别 |
-| `--api-key <key>` | API Key | 读取环境变量 |
-| `--base-url <url>` | 自定义 API 端点 | — |
-| `--auto` | 自动模式，无需确认写操作 | — |
-| `--readonly` | 只读模式，禁止所有写操作 | — |
-| `--plan` | 计划模式，写操作需手动确认 | — |
-| `--resume <sessionId>` | 恢复指定会话 | — |
-| `--new-session` | 强制创建新会话 | — |
-| `--list-sessions` | 列出最近的会话 | — |
-| `--cwd <dir>` | 设置工作目录 | `~/.hrids-agent/work/` |
-| `-p, --print <msg>` | 非交互模式，执行后退出 | — |
-| `--max-chars <n>` | 非交互模式输出字符上限 | 不限 |
+| `-m, --model` | 模型名称 | `qwen-plus-2025-07-28` |
+| `--provider` | 显式指定提供商 | 自动识别 |
+| `--api-key` | API Key | 配置文件 |
+| `--craft` | 自主执行模式，无需确认 | — |
+| `--plan` | 计划模式，只读 | — |
+| `-p, --print` | 非交互模式，执行后退出 | — |
 | `--server` | Server 模式（NDJSON stdin） | — |
 | `--gateway` | Gateway 模式（HTTP + WS） | — |
-| `--gateway-port <port>` | Gateway 监听端口 | `3282` |
-| `--gateway-host <host>` | Gateway 监听地址 | `127.0.0.1` |
-| `--gateway-token <token>` | Gateway 鉴权 Token | — |
-| `--embedding-provider <p>` | Embedding 提供商：openai / ollama / tfidf | `tfidf` |
-| `--embedding-model <model>` | Embedding 模型名称 | — |
-| `--embedding-base-url <url>` | Embedding API 端点 | — |
+| `--gateway-port` | Gateway 端口 | `3282` |
+| `--resume` | 恢复指定会话 | 自动恢复 |
+| `--new-session` | 强制创建新会话 | — |
+| `--list-sessions` | 列出历史会话 | — |
+| `--cwd` | 设置工作目录 | `~/.hrids-agent/work/` |
 
 ---
 
-## 多提供商支持
+## 多提供商故障转移
 
-| 提供商 | 环境变量 | 模型前缀示例 |
-|--------|---------|------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4o`, `o3` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-chat` |
-| Groq | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
-| 阿里云百炼 | `DASHSCOPE_API_KEY` | `qwen-max`, `qwen-plus` |
-| 智谱 AI | `ZHIPU_API_KEY` | `glm-4` |
-| NVIDIA | `NVIDIA_API_KEY` | `--provider nvidia` |
-| Ollama（本地） | 无需 Key | `--provider ollama -m qwen2.5-coder:7b` |
-| 自定义端点 | `CUSTOM_API_KEY` | `--provider custom --base-url <url>` |
+同平台内按 models 顺序重试，全部失败后自动切换下一平台：
 
-### 多模型故障转移
-
-在 `.env` 中配置多平台故障转移，按优先级依次 fallback：
-
-```env
-# 格式: provider:平台名,models:模型1,模型2,...
-LLM_FALLBACK_1=provider:aliyun,models:qwen3.5-flash,qwen3.5-plus
-LLM_FALLBACK_2=provider:deepseek,models:deepseek-chat
-LLM_FALLBACK_3=provider:anthropic,models:claude-3-5-haiku-20241022
+```json
+{
+  "llm": {
+    "fallbacks": [
+      {
+        "provider": "aliyun",
+        "apiKey": "sk-xxx",
+        "models": ["qwen3.5-flash", "qwen3.5-plus"]
+      },
+      {
+        "provider": "deepseek",
+        "apiKey": "sk-xxx",
+        "models": ["deepseek-chat"]
+      },
+      {
+        "provider": "anthropic",
+        "apiKey": "sk-ant-xxx",
+        "models": ["claude-3-5-haiku-20241022"]
+      }
+    ]
+  }
+}
 ```
 
 ---
 
 ## 斜杠命令
-
-在交互模式下，输入 `/` 开头的命令：
 
 ### 系统命令
 
@@ -142,171 +190,109 @@ LLM_FALLBACK_3=provider:anthropic,models:claude-3-5-haiku-20241022
 |------|------|
 | `/help` | 显示所有可用命令 |
 | `/clear` | 清空对话历史 |
-| `/compact` | 压缩对话历史为摘要，释放上下文空间 |
-| `/cost` | 查看当前会话的 token 用量和费用 |
+| `/compact` | 压缩对话历史为摘要 |
+| `/cost` | 查看 token 用量和费用 |
 | `/model [名称]` | 查看或切换模型 |
-| `/plan` | 切换计划模式（写操作需手动确认） |
+| `/plan` | 切换计划模式 |
 | `/session` | 显示当前会话 ID |
+| `/sessions` | 列出历史会话 |
+| `/resume <id>` | 切换到指定会话 |
+| `/history [序号]` | 查看压缩归档历史 |
 | `/exit` | 退出程序 |
 
-### 通用工作者 Skills
+### 代码开发
 
 | 命令 | 说明 |
 |------|------|
-| `/research <主题>` | 对指定主题进行深度调研，输出结构化报告 |
-| `/plan <目标>` | 为复杂目标制定详细的执行计划 |
-| `/report [主题]` | 将工作成果整理成结构化报告文档 |
-| `/monitor <目标>` | 设置对某个指标或状态的持续监控 |
-| `/summarize <内容>` | 对文档、网页或长文本进行摘要提炼 |
+| `/commit` | 分析 git diff 生成规范 commit 并提交 |
+| `/review` | 对 git diff 进行代码审查 |
+| `/fix [错误]` | 分析并修复 bug |
+| `/scaffold <描述>` | 生成项目骨架代码 |
+| `/refactor <文件>` | 重构代码 |
+| `/test <文件>` | 生成单元测试 |
+| `/docs <文件>` | 生成文档注释 |
 
-### 代码开发 Skills
+### 通用技能
 
 | 命令 | 说明 |
 |------|------|
-| `/commit` | 分析 git diff，生成规范的 commit 信息并提交 |
-| `/review` | 对当前 git diff 进行代码审查 |
-| `/explain <文件>` | 深入解释代码工作原理 |
-| `/fix [错误信息]` | 分析并修复 bug |
-| `/scaffold <描述>` | 生成项目或模块骨架代码 |
-| `/refactor <文件>` | 对代码进行重构 |
-| `/test <文件>` | 为代码生成单元测试 |
-| `/docs <文件>` | 生成文档注释或 README |
+| `/research <主题>` | 深度调研，输出结构化报告 |
+| `/plan <目标>` | 为复杂目标制定执行计划 |
+| `/report [主题]` | 整理工作成果为报告文档 |
+| `/summarize <内容>` | 对长文本进行摘要提炼 |
 
 ---
 
 ## 工具列表
 
 ### 信息获取
+`web_search` · `web_fetch` · `file_read` · `grep` · `glob`
 
-| 工具 | 说明 |
-|------|------|
-| `web_search` | 搜索网络信息 |
-| `web_fetch` | 获取指定网页内容，智能提取正文 |
-| `file_read` | 读取文件，支持行范围，默认显示行号 |
-| `grep` | 跨平台递归文本搜索 |
-| `glob` | 文件路径搜索 |
+### 文件操作
+`file_write` · `file_edit`
 
-### 任务执行
+### 执行命令
+`bash` (Linux/macOS) / `powershell` (Windows)
 
-| 工具 | 说明 |
-|------|------|
-| `bash` | 执行 shell 命令，跨平台（Windows PowerShell 兼容） |
-| `file_write` | 创建或覆盖文件 |
-| `file_edit` | 精准字符串替换（要求 oldStr 唯一） |
-| `todo_write` | 任务列表管理（pending / in_progress / completed） |
-| `todo_read` | 读取当前任务列表 |
+### 任务管理
+`todo_write` · `todo_update` · `todo_append` · `todo_reset` · `todo_read`
 
 ### 人机交互
+`ask_user` · `request_decision`
 
-| 工具 | 说明 |
-|------|------|
-| `ask_user` | 向用户提问，支持预设选项 |
-| `request_decision` | 结构化决策上报 |
+### 协作
+`agent` · `team_create` · `agent_spawn` · `team_status` · `team_wait` · `send_message`
 
 ### 定时调度
+`schedule_cron` (create / list / delete / toggle)
 
-| 工具 | 说明 |
-|------|------|
-| `schedule_cron` | 管理定时任务（create / list / delete / toggle） |
-
-### Skill 管理
-
-| 工具 | 说明 |
-|------|------|
-| `skill` | 调用已注册的 skill（内置或自定义） |
-| `skill_list` | 列出所有可用 skill |
-| `skill_save` | 将当前工作流沉淀为可复用 skill |
-
-### 多智能体协调
-
-| 工具 | 说明 |
-|------|------|
-| `agent` | 派生子工作者处理独立子任务 |
-| `team_create` | 创建智能体团队 |
-| `team_delete` | 删除团队并中止所有任务 |
-| `agent_spawn` | 向团队派生子工作者 |
-| `team_status` | 查看团队所有工作者的运行状态 |
-| `team_wait` | 等待团队所有工作者完成 |
-| `send_message` | 向其他工作者发送消息 |
-| `receive_message` | 接收其他工作者的消息 |
+### 技能管理
+`skill` · `skill_list` · `skill_save` · `skillhub_search` · `skillhub_install`
 
 ### 长期记忆
+`memory_add` · `memory_search` · `memory_recall` · `memory_fact` · `memory_status`
 
-| 工具 | 说明 |
-|------|------|
-| `memory_add` | 写入长期记忆（6 种类型） |
-| `memory_search` | 语义搜索记忆 |
-| `memory_recall` | 按分类列出记忆 |
-| `memory_fact` | 向知识图谱写入三元组 |
-| `memory_status` | 查看记忆系统统计 |
-
----
-
-## 决策上报机制
-
-工作者遇到以下情况时，会暂停执行并通过 `request_decision` 工具向你上报：
-
-- 操作不可逆（删除数据、发布内容、提交到主分支）
-- 多个方案各有权衡，没有明显最优解
-- 发现与原始目标的重大偏差
-- 超出授权范围（涉及费用、生产环境）
-
----
-
-## 定时任务
-
-工作者可以设置定时任务，在指定时间自动触发执行。
-
-```
-# cron 表达式格式（5位：分 时 日 月 周）
-0 9 * * 1-5    工作日早 9 点
-0 18 * * *     每天下午 6 点
-*/30 * * * *   每 30 分钟
-```
-
-任务保存在 `~/.hrids-agent/crons.json`，进程重启后自动恢复。
+### MCP 扩展
+`mcp__<server>__<tool>` （动态加载）
 
 ---
 
 ## 权限控制
 
-| 模式 | 说明 |
-|------|------|
-| `ask`（默认） | 写操作前询问用户 |
-| `auto` | 自动允许所有操作（`--auto`） |
-| `readonly` | 只允许只读操作（`--readonly`） |
-| `plan` | 只读，写操作需手动确认（`--plan`） |
+| 模式 | CLI 标志 | 行为 |
+|------|---------|------|
+| `ask` | 默认 | 写操作前询问用户 |
+| `craft` | `--craft` | 自主执行，无需确认，无轮次上限 |
+| `plan` | `--plan` | 只读模式，写操作一律拒绝 |
 
-权限规则持久化在 `~/.hrids-agent/permission-rules.json`：
+权限规则持久化在 `~/.hrids-agent/permission-rules.json`，支持细粒度控制：
 
 ```json
 {
-  "alwaysAllow": ["bash"],
-  "alwaysDeny": [],
+  "alwaysAllow": ["bash(git *)", "bash(npm test)"],
+  "alwaysDeny": ["bash(rm *)"],
   "alwaysAsk": ["file_write"],
   "allowedPaths": ["/home/user/projects/myapp/src"],
   "deniedPaths": [".env", "secrets/"]
 }
 ```
 
-`deniedPaths` 优先级高于 `allowedPaths`，高于工具级规则，高于模式默认值。
-
 ---
 
 ## 长期记忆系统
 
-工作者拥有跨会话的长期记忆，分为 4 层：
+4 层架构，跨会话积累知识：
 
 ```
-L0 身份层     (~100 tokens)      固定身份定义，每次注入 system prompt
-L1 核心摘要   (~500-800 tokens)  按重要性排序的记忆摘要
-L2 按需检索   (~200-500 tokens)  按分类过滤，工具调用触发
-L3 语义搜索   (按需)             sqlite-vec KNN 向量搜索 / TF-IDF 降级
+L0 身份层  (~100 tokens)       固定身份 → 每次注入 system prompt
+L1 摘要层  (~500-800 tokens)   按重要性排序 → 每次注入
+L2 按需层  (~200-500 tokens)   按分类过滤 → 工具调用触发
+L3 搜索层  (按需)              sqlite-vec 向量 / TF-IDF 降级 → 语义搜索
 ```
 
-记忆类型：`decision`（决策）/ `preference`（偏好）/ `milestone`（里程碑）/ `problem`（问题）/ `fact`（事实）/ `emotional`（情感）
+记忆类型：`decision` / `preference` / `milestone` / `problem` / `fact` / `emotional`
 
-会话结束后自动从对话中提取记忆（由 `MEMORY_CONDENSE=true` 控制是否用 LLM 精炼）。
+知识图谱：`subject → [predicate] → object`，带时间戳和置信度。
 
 ### Embedding 配置
 
@@ -314,60 +300,55 @@ L3 语义搜索   (按需)             sqlite-vec KNN 向量搜索 / TF-IDF 降�
 # OpenAI Embedding
 npm run dev -- --embedding-provider openai --embedding-model text-embedding-3-small
 
-# Ollama 本地 Embedding
-npm run dev -- --embedding-provider ollama --embedding-model nomic-embed-text --embedding-base-url http://localhost:11434
+# Ollama 本地
+npm run dev -- --embedding-provider ollama --embedding-model nomic-embed-text
 
-# 默认：TF-IDF（无需额外配置）
+# TF-IDF（默认，无需配置）
 ```
 
 ---
 
-## Skill 自动沉淀
+## Skill 系统
 
-会话结束后，若工具调用次数 >= 5 次，工作者会自动判断本次工作流是否值得沉淀为可复用 skill，并写入 `~/.hrids-agent/skills/`。
+### 自定义 Skill
 
-也可以手动触发：
-
-```
-你：把刚才的工作流保存为 skill
-```
-
----
-
-## 自定义 Skills
-
-在以下目录创建 `SKILL.md` 文件即可添加自定义 skill：
-
-```
-~/.hrids-agent/skills/<skill-name>/SKILL.md    # 用户级（全局生效）
-<项目目录>/.agent/skills/<skill-name>/SKILL.md  # 项目级（仅当前项目）
-```
-
-`SKILL.md` 格式：
+创建 `SKILL.md` 文件：
 
 ```markdown
 ---
-description: 这个 skill 的简短描述
-when-to-use: 什么情况下使用
-argument-hint: <参数提示>
+description: 代码审查专家
+when-to-use: 需要 review 代码时
+argument-hint: <文件路径>
+allowed-tools: [file_read, bash]
 ---
 
-# Skill 内容
+# 代码审查 Skill
 
-这里写注入给工作者的 prompt 内容...
+你是一个资深代码审查者。请检查以下代码...
 
-## 用户补充说明
-
+## 用户输入
 {{args}}
 ```
 
-优先级：项目级 > 用户级 > 内置。
+存放位置（优先级从高到低）：
+
+```
+{项目}/.agent/skills/<name>/SKILL.md    # 项目级
+~/.hrids-agent/skills/<name>/SKILL.md   # 用户级
+src/skills/bundled/                      # 内置
+```
+
+### 自动沉淀
+
+会话结束后，工具调用 ≥ 5 次时自动判断是否值得沉淀为可复用 Skill。
 
 ---
 
 ## MCP 工具扩展
 
-在 `~/.hrids-agent/config.json` 中配置 MCP 服务器：
+支持两种配置方式：
+
+**方式一：config.json**
 
 ```json
 {
@@ -375,25 +356,71 @@ argument-hint: <参数提示>
     {
       "name": "filesystem",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
-    },
-    {
-      "name": "github",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": { "GITHUB_TOKEN": "ghp_..." }
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     }
   ]
 }
 ```
 
-MCP 工具以 `mcp__<服务器名>__<工具名>` 格式注册，工作者可以直接调用。
+**方式二：mcp.json（兼容 Claude Desktop）**
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}
+```
+
+工具自动以 `mcp__<server>__<tool>` 命名注册。
+
+---
+
+## Gateway 服务
+
+### 启动
+
+```bash
+npm run gateway
+# → HTTP  http://127.0.0.1:3282
+# → WS    ws://127.0.0.1:3282/sessions/:id/stream
+```
+
+### 鉴权模式
+
+| 模式 | 配置 | 说明 |
+|------|------|------|
+| 无鉴权 | 不配置 users 和 token | 适合本地 |
+| Token | `gateway.token: "xxx"` | Bearer Token |
+| 登录 | `gateway.users: [{...}]` | 用户名/密码 → JWT |
+
+### 主要 API
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/login` | 登录获取 Token |
+| `GET /health` | 健康检查 |
+| `GET/POST /sessions` | 会话列表 / 创建 |
+| `GET/DELETE /sessions/:id` | 会话状态 / 销毁 |
+| `GET /sessions/:id/messages` | 历史消息 |
+| `WS /sessions/:id/stream` | 实时流式通道 |
+| `GET/POST /crons` | 定时任务管理 |
+| `GET/PUT /mcp` | MCP 配置 |
+| `GET /skills` | 技能列表 |
+| `GET/PUT /im/platforms/config` | IM 平台管理 |
+
+### 内嵌 Web UI
+
+Gateway 模式自动托管前端（React + Vite），浏览器打开 `http://127.0.0.1:3282` 即可使用。
 
 ---
 
 ## 项目记忆文件
 
-在项目根目录创建 `AGENT.md` 或 `CLAUDE.md`，工作者启动时自动读取并注入上下文：
+在项目根目录创建 `AGENT.md`，智能体启动时自动读取：
 
 ```markdown
 # 项目说明
@@ -406,64 +433,93 @@ MCP 工具以 `mcp__<服务器名>__<工具名>` 格式注册，工作者可以�
 - 提交信息遵循 Conventional Commits
 ```
 
----
-
-## 配置文件
-
-配置保存在 `~/.hrids-agent/config.json`：
-
-```json
-{
-  "model": "claude-sonnet-4-5",
-  "provider": "anthropic",
-  "permissionMode": "ask",
-  "maxTokens": 8096,
-  "maxTurns": 50,
-  "maxBudgetUsd": 5.0,
-  "autoCompactThreshold": 60000,
-  "agentCwd": "/home/user/workspace",
-  "mcpServers": []
-}
-```
-
-| 字段 | 说明 | 默认值 |
-|------|------|--------|
-| `model` | 默认模型 | `claude-sonnet-4-5` |
-| `permissionMode` | 权限模式 | `ask` |
-| `maxTokens` | 单次响应最大 token | `8096` |
-| `maxTurns` | 单次会话最大轮次 | `50` |
-| `maxBudgetUsd` | 单次会话成本上限（USD） | 不限 |
-| `autoCompactThreshold` | 自动压缩触发阈值（token 估算） | `60000` |
-| `agentCwd` | 持久化工作目录 | `~/.hrids-agent/work/` |
+支持三个位置：`{cwd}/AGENT.md` > `{cwd}/.hrids/AGENT.md` > `~/.hrids-agent/AGENT.md`
 
 ---
 
-## 会话管理
-
-```bash
-# 列出最近的会话
-npm run dev -- --list-sessions
-
-# 恢复指定会话
-npm run dev -- --resume <sessionId>
-
-# 强制创建新会话（默认自动恢复上次会话）
-npm run dev -- --new-session
-```
-
-会话保存在 `~/.hrids-agent/sessions/`，格式为 JSONL。
-
----
-
-## 数据目录结构
+## 数据目录
 
 ```
 ~/.hrids-agent/
 ├── config.json            # 全局配置
+├── mcp.json               # MCP 服务器配置
 ├── permission-rules.json  # 权限规则
 ├── crons.json             # 定时任务
+├── skills-disabled.json   # 禁用技能
 ├── sessions/              # 会话历史
-├── memory/                # 长期记忆数据库（SQLite）
-├── skills/                # 用户级自定义 skills（含自动沉淀）
+├── memory/                # 长期记忆（SQLite）
+├── skills/                # 用户级自定义 Skills
+├── logs/                  # 日志
 └── work/                  # 默认工作目录
 ```
+
+---
+
+## 开发
+
+```bash
+# 安装依赖
+npm install
+
+# 开发模式
+npm run dev
+
+# 运行测试
+npm test
+
+# 构建
+npm run build
+
+# Lint
+npm run lint
+```
+
+### 技术栈
+
+| 分类 | 技术 |
+|------|------|
+| 语言 | TypeScript 5.7 (ESM) |
+| CLI | Commander + Ink (React TUI) |
+| 服务端 | Express v5 + ws |
+| AI SDK | @anthropic-ai/sdk |
+| MCP | @modelcontextprotocol/sdk |
+| 数据库 | better-sqlite3 + sqlite-vec |
+| 校验 | Zod |
+| 测试 | Vitest + fast-check |
+| 前端 | React 18 + Vite |
+
+---
+
+## 项目结构
+
+```
+src/
+├── main.ts               # 入口，CLI 定义
+├── core/                  # 核心引擎
+│   ├── QueryEngine.ts     # 执行循环（LLM → 工具 → 循环）
+│   ├── Config.ts          # 配置加载/规范化
+│   ├── Tool.ts            # 工具抽象接口
+│   ├── CommandRegistry.ts # 斜杠命令系统
+│   ├── ContextBuilder.ts  # 系统上下文构建
+│   ├── PermissionManager.ts # 权限管理
+│   ├── SessionStore.ts    # 会话持久化
+│   ├── CostTracker.ts     # Token 费用追踪
+│   ├── coordinator/       # 多智能体协调
+│   └── providers/         # LLM 提供商适配器
+├── tools/                 # 20+ 内置工具
+├── gateway/               # HTTP + WebSocket 服务
+│   └── im/                # Telegram / 微信 / Webhook
+├── memory/                # 4 层长期记忆系统
+├── skills/                # Skill 系统
+├── modes/                 # 运行模式
+├── tui/                   # Ink React TUI
+└── web/                   # Gateway 前端
+```
+
+详细架构文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+---
+
+## 许可证
+
+MIT
