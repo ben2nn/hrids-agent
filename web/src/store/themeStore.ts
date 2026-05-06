@@ -28,7 +28,7 @@ function loadTheme(): Theme {
   try {
     const saved = localStorage.getItem('theme')
     if (saved === 'light' || saved === 'dark') return saved
-  } catch {}
+  } catch { /* localStorage 不可用时使用默认值 */ }
   return 'dark'
 }
 
@@ -41,13 +41,13 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   toggle() {
     const next: Theme = get().theme === 'dark' ? 'light' : 'dark'
     applyTheme(next)
-    try { localStorage.setItem('theme', next) } catch {}
+    try { localStorage.setItem('theme', next) } catch { /* 静默忽略 */ }
     set({ theme: next })
   },
 
   setTheme(t: Theme) {
     applyTheme(t)
-    try { localStorage.setItem('theme', t) } catch {}
+    try { localStorage.setItem('theme', t) } catch { /* 静默忽略 */ }
     set({ theme: t })
   },
 }))

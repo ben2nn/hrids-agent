@@ -51,6 +51,26 @@ export function FileTreeNode({ node, sessionId, depth, onInsertText }: FileTreeN
   const textColor = isHidden ? 'text-[var(--text-muted)]' : 'text-[var(--text-secondary)]'
   const hoverTextColor = isHidden ? 'hover:text-[var(--text-secondary)]' : 'hover:text-[var(--text-primary)]'
 
+  // ── 文件点击处理（必须在条件分支之前调用，遵循 Hooks 规则） ─────────
+  // 单击：打开文件内容弹框；双击（300ms 内连续两次点击）：插入引用
+  const handleFileClick = useCallback(() => {
+    const now = Date.now()
+    const isDoubleClick = now - lastClickRef.current < 300
+    lastClickRef.current = now
+
+    if (isDoubleClick) {
+      // 双击：插入引用
+      onInsertText?.('@' + node.path)
+    } else {
+      // 单击：打开弹框（延迟 260ms，等待可能的第二次点击）
+      setTimeout(() => {
+        if (Date.now() - lastClickRef.current >= 250) {
+          setModalOpen(true)
+        }
+      }, 260)
+    }
+  }, [node.path, onInsertText])
+
   // ── 目录节点 ───────────────────────────────────────────────────────────
   if (node.type === 'dir') {
     return (
@@ -102,26 +122,6 @@ export function FileTreeNode({ node, sessionId, depth, onInsertText }: FileTreeN
       </div>
     )
   }
-
-  // ── 文件节点 ───────────────────────────────────────────────────────────
-  // 单击：打开文件内容弹框；双击（300ms 内连续两次点击）：插入引用
-  const handleFileClick = useCallback(() => {
-    const now = Date.now()
-    const isDoubleClick = now - lastClickRef.current < 300
-    lastClickRef.current = now
-
-    if (isDoubleClick) {
-      // 双击：插入引用
-      onInsertText?.('@' + node.path)
-    } else {
-      // 单击：打开弹框（延迟 250ms，等待可能的第二次点击）
-      setTimeout(() => {
-        if (Date.now() - lastClickRef.current >= 250) {
-          setModalOpen(true)
-        }
-      }, 260)
-    }
-  }, [node.path, onInsertText])
 
   return (
     <>

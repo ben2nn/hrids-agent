@@ -20,7 +20,7 @@ function loadLocale(): Locale {
   try {
     const saved = localStorage.getItem('locale')
     if (saved === 'zh-CN' || saved === 'en-US') return saved
-  } catch {}
+  } catch { /* localStorage 不可用时使用默认值 */ }
   return 'zh-CN'
 }
 
@@ -31,7 +31,7 @@ export const useI18nStore = create<I18nState>((set) => ({
   t: LOCALES[initialLocale],
 
   setLocale(locale: Locale) {
-    try { localStorage.setItem('locale', locale) } catch {}
+    try { localStorage.setItem('locale', locale) } catch { /* 静默忽略 */ }
     set({ locale, t: LOCALES[locale] })
   },
 }))

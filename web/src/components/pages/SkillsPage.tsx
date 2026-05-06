@@ -64,7 +64,7 @@ function getSkillIconBg(name: string): string {
 }
 
 function getSkillInitials(name: string): string {
-  const words = name.trim().split(/[\s_\-]+/)
+  const words = name.trim().split(/[\s_-]+/)
   if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
   return name.slice(0, 2).toUpperCase()
 }
@@ -803,6 +803,7 @@ function MarketPanel() {
       const slugs = new Set(skills.filter(s => s.source === 'user').map(s => s.name))
       setInstalledSlugs(slugs)
     }).catch(() => { /* 忽略，不影响主流程 */ })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 分类切换：重置到第 1 次加载

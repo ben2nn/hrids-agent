@@ -182,7 +182,6 @@ function UserMenuCollapsed({ wsStatus }: UserMenuCollapsedProps) {
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
   return (
     <div ref={menuRef} className="relative flex flex-col items-center">
