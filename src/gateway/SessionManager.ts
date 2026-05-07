@@ -10,7 +10,7 @@ import { createAgentTool } from '../tools/AgentTool.js'
 import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js'
-import { getCoordinatorSystemPrompt } from '../core/coordinator/coordinatorPrompt.js'
+import { getCoordinatorSystemPrompt, classifyTask } from '../core/coordinator/coordinatorPrompt.js'
 import { loadSession, loadSessionMeta, saveSession, generateSessionId, archiveSession } from '../core/SessionStore.js'
 import { loadConfig } from '../core/Config.js'
 import { runWithCwd } from '../core/cwd.js'
@@ -734,6 +734,9 @@ export class SessionManager {
       return
     }
     // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
+    const types = classifyTask(content)
+    session.engine.setChatMode(types.includes('chat'))
+
     const allTools = session.engine.getTools()
     const coordinatorPrompt = getCoordinatorSystemPrompt(content, allTools)
 

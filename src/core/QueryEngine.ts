@@ -7,6 +7,7 @@ import { auditLog } from './audit.js'
 import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
+import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
 
 const log = logger.child({ component: 'query-engine' })
 
@@ -497,31 +498,6 @@ ${contentToSummarize}
     return result
   }
 
-  // 检测用户消息是否为查询/回忆类意图（只需回答，不应触发 continuation 自动执行）
-  private isQueryIntent(message: string): boolean {
-    const QUERY_PATTERNS = [
-      // 询问上一次/之前的内容
-      /上(一次|次|回|个)(的)?(问题|任务|内容|对话|消息|指令|操作|工作|结果)/,
-      /之前(的)?(问题|任务|内容|对话|消息|指令|操作|工作|结果)/,
-      /前(一次|次|回)(的)?(问题|任务|内容|对话)/,
-      /刚才(说|问|做|讲)(了|的)?(什么|啥)/,
-      // 询问历史/记录
-      /历史(记录|消息|对话|内容)/,
-      /对话(记录|历史)/,
-      // 你记得/还记得
-      /你(还)?记得/,
-      /(还)?记得(吗|么|不)/,
-      // 我之前说/问/做
-      /我(之前|刚才|上次)(说|问|做|讲)(了|的)?(什么|啥)?/,
-      // 回顾/总结类
-      /回顾(一下|下)?/,
-      /总结(一下|下)?(之前|上次|刚才)/,
-      // 是什么/是啥 结尾的简短问句（配合上下文）
-      /^(上|之前|刚才).{0,20}(是什么|是啥|是哪|怎么|如何)\??$/,
-    ]
-    return QUERY_PATTERNS.some(p => p.test(message))
-  }
-
   // ── 流式调用 LLM，yield StreamEvent，最后 yield 一个内部结果对象 ──────────────
   // 返回类型用 type 字段区分，避免 _internal 字段的类型推断问题
   private async *streamOneTurn(
@@ -535,14 +511,16 @@ ${contentToSummarize}
     // plan 模式下对写工具 description 追加不可用标注，
     // 让 LLM 在工具选择阶段就知道这些工具当前不可用，避免盲目调用。
     const isPlanMode = this.config.permissions.getMode() === 'plan'
-    const toolsForLLM = isPlanMode
-      ? this.config.tools.map(t =>
-          t.readonly ? t : {
-            ...t,
-            description: t.description + '\n[Plan 模式：此工具当前不可用，调用将被拒绝]',
-          }
-        )
-      : this.config.tools
+    const toolsForLLM = this.chatMode
+      ? []  // chat 模式：不传任何工具，模型只能直接回复
+      : isPlanMode
+        ? this.config.tools.map(t =>
+            t.readonly ? t : {
+              ...t,
+              description: t.description + '\n[Plan 模式：此工具当前不可用，调用将被拒绝]',
+            }
+          )
+        : this.config.tools
 
     log.debug('调用 LLM stream', { model: this.config.provider.model, turn: turns })
 
@@ -934,8 +912,6 @@ ${contentToSummarize}
     }
     
     // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行（复用上方已提取的 msgText）
-    const isQueryMode = this.isQueryIntent(msgText)
-
     // 任务快照预热：每次 send 开始时，如果快照为 null（本会话尚未调用过 todo 工具），
     // 主动读取一次磁盘，确保磁盘上已有任务时能立即注入到 system prompt。
     // 这解决了"会话恢复后任务状态不注入"和"首轮消息无法感知已有任务"的问题。
@@ -958,7 +934,7 @@ ${contentToSummarize}
     const isCraftMode = this.config.permissions.getMode() === 'craft'
     const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? 50)
 
-    log.debug('send 开始', { historyLength: this.history.length, isQueryMode, estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
+    log.debug('send 开始', { historyLength: this.history.length, estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
     // 历史存原始文本版本（不含 base64），避免历史膨胀
     this.history.push(userMsg)
     // 第一轮 LLM 调用前，把历史最后一条替换为含 image block 的版本
@@ -1108,9 +1084,9 @@ ${contentToSummarize}
         }
         // 注意：无 DSML 标记时 fullText 已在 streamOneTurn 中全部流式发出，无需补发
 
-        // 没有工具调用：检查是否需要 continuation 或直接结束
+        // ── 无工具调用：心跳协议判定 ─────────────────────────────────
         if (toolCalls.length === 0) {
-          log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length, isQueryMode })
+          log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length })
 
           // 输出被截断时注入继续指令，让 LLM 从中断处接着写，最多重试3次
           if (hitMaxOutputTokens && maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
@@ -1123,75 +1099,36 @@ ${contentToSummarize}
             continue
           }
 
-          // 查询/回忆类意图：直接结束，不触发 continuation 检测
-          if (isQueryMode) break
+          // 心跳协议检测
+          const hasContinue = fullText.includes(HEARTBEAT_CONTINUE)
+          const hasDone = fullText.includes(HEARTBEAT_DONE)
 
-          const mode = this.config.permissions.getMode()
-
-          // craft 模式：默认注入继续指令，让 LLM 自己判断是否完成
-          // 如果 LLM 真的完成了，它会回复确认信息，不会再调用工具，下一轮会再次进入这里并停止
-          if (mode === 'craft') {
-            // 检测是否是明确的完成信号（避免无限循环）
-            const COMPLETION_PATTERNS = [
-              /任务(已|已经|全部|完全)?(已完成|完成了|结束了|执行完毕)/,
-              /所有(工作|任务|操作)(已|已经)(完成|结束)/,
-              /^(完成|好的|OK|Done)[。！!.]*$/i,
-              /(已|已经)按(要求|照|您的要求)(完成|执行完毕)/,
-              /没有(其他|更多|额外)(工作|任务|操作)需要(执行|完成|处理)/,
-              /task (is )?(completed|finished|done)/i,
-              /all (tasks?|work) (is |are )?(completed|finished|done)/i,
-              // todo_update 所有任务完成时的返回信号
-              /所有任务均已完成/,
-              /🎉/,
-            ]
-            const isCompleted = COMPLETION_PATTERNS.some(p => p.test(fullText))
-            if (isCompleted) {
-              log.debug('检测到完成信号，停止执行', { turn: turns })
-              break
-            }
-
-            // 快照非 null 且所有任务已完成：任务系统明确告知完成，直接结束
-            // 注意：快照为 null 表示本次未使用任务系统，不能用它判断是否完成，
-            //       此时仍依赖上方的 COMPLETION_PATTERNS 文本检测。
-            const allTasksDone = this.activeTodoSnapshot !== null &&
-              this.activeTodoSnapshot.length > 0 &&
-              this.activeTodoSnapshot.every(t => t.status === 'completed')
-            if (allTasksDone) {
-              log.debug('craft 模式：任务系统确认全部完成，停止执行', { turn: turns })
-              break
-            }
-
-            // 未检测到完成信号：注入继续指令
-            log.debug('craft 模式：注入继续指令', { turn: turns })
-            this.history.push({ role: 'user', content: '[系统内部] 请继续执行，不要停下。直接调用工具完成任务，不要再解释计划。如果任务已完成，请明确回复"任务已完成"。' })
-            continue
-          }
-
-          // ask/plan 模式：检测是否需要 continuation
-          const CONTINUATION_PATTERNS = [
-            /接下来(将|我会|会|要)/,
-            /然后(我会|将|要)/,
-            /下一步/,
-            /第(一|二|三|四|五|六|七|八|九|十)[步个]/,
-            /继续(读取|分析|处理|执行|爬取|抓取|获取|修复|创建|编写|改进|优化)/,
-            /让我(继续|读取|分析|查看|创建|编写|修复|改进|尝试|搜索|获取|爬取)/,
-            /我(将|会)(读取|分析|处理|继续|创建|编写|修复|改进|尝试|搜索|获取|爬取)/,
-            /发现(了|一个)(小|一个)?(bug|问题|错误|issue)/i,
-            /需要(修复|处理|解决|改进|优化|分析|测试|验证|检查|调试|实现|完成|执行)/,
-            /让我(来)?(创建|改进|修改|更新|重写|优化)/,
-            /现在(开始|来|我来)(执行|处理|创建|编写|修复)/,
-            /马上(开始|执行|处理|创建)/,
-            /并(完成|继续|执行|进行|实现|测试|验证|分析|处理)(测试|任务|操作|工作|验证|分析)/,
-            /let me (create|fix|update|improve|continue|check|read|write|analyze|test)/i,
-            /next[,，]? (I will|I'll|we)/i,
-            /I (need to|should|will|must) (analyze|test|verify|check|fix|implement|continue)/i,
-          ]
-          const shouldContinue = CONTINUATION_PATTERNS.some(p => p.test(fullText))
-          if (shouldContinue && turns < maxTurns) {
-            // 非自动模式（ask/plan）：通知 UI 询问用户是否继续
-            yield { type: 'continuation_needed' }
+          // DONE 标记：立即结束
+          if (hasDone) {
+            log.debug('心跳协议：DONE，停止执行', { turn: turns })
             break
           }
+
+          // 任务系统确认全部完成：结束
+          const allTasksDone = this.activeTodoSnapshot !== null &&
+            this.activeTodoSnapshot.length > 0 &&
+            this.activeTodoSnapshot.every(t => t.status === 'completed')
+          if (allTasksDone) {
+            log.debug('任务系统确认全部完成，停止执行', { turn: turns })
+            break
+          }
+
+          // CONTINUE 标记但无工具调用：允许最多 2 次（LLM 可能在思考下一步）
+          if (hasContinue) {
+            if (turns < maxTurns) {
+              log.debug('心跳协议：CONTINUE（无工具调用），继续', { turn: turns })
+              continue
+            }
+            log.debug('心跳协议：CONTINUE 但已达轮次上限，停止', { turn: turns })
+          }
+
+          // 无标记、无工具调用：自然结束（chat/简单问答/任务完成）
+          log.debug('无工具调用无心跳标记，自然结束', { turn: turns })
           break
         }
 
@@ -1258,6 +1195,8 @@ ${contentToSummarize}
   }
   getHistory(): readonly Message[] { return this.history }
   setHistory(messages: Message[]) { this.history = [...messages] }
+  private chatMode = false
+  setChatMode(on: boolean) { this.chatMode = on }
   setSystemPrompt(prompt: string[]) { this.config.systemPrompt = prompt }
   setProvider(provider: LLMProvider) { this.config.provider = provider }
   getTools(): readonly ToolDef[] { return this.config.tools }

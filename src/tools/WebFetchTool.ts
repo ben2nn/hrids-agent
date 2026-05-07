@@ -46,7 +46,9 @@ function extractTextFromHtml(html: string): string {
 
 export const WebFetchTool: ToolDef<typeof inputSchema> = {
   name: 'web_fetch',
-  description: '获取网页内容，自动提取正文文本（去除 HTML 标签和脚本）',
+  description: `获取指定 URL 的网页内容，自动提取正文。
+适用场景：读取已知 URL 的文章/文档/数据
+不适用场景：搜索未知信息 → 用 web_search | 本地文件 → 用 file_read`,
   inputSchema,
   readonly: true,
 

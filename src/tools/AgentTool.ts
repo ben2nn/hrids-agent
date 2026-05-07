@@ -53,7 +53,9 @@ const SUB_AGENT_SYSTEM_PROMPT = `你是一个专注的子智能体，负责完�
 export function createAgentTool(_apiKey: string, _model: string): ToolDef<typeof inputSchema> {
   return {
     name: 'agent',
-    description: '派生一个子智能体来执行独立的子任务。适合需要多步骤操作的复杂任务。',
+    description: `派生一个子智能体来执行独立的子任务。
+适用场景：可独立执行的子任务（5+ 次工具调用）、需要并行处理多个独立工作
+不适用场景：单次工具调用 → 直接调用 | 问候/闲聊 | 需要用户交互的任务`,
     inputSchema,
     readonly: false,
 

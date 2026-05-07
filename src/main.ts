@@ -7,7 +7,7 @@ import { QueryEngine } from './core/QueryEngine.js'
 import { PermissionManager } from './core/PermissionManager.js'
 import { listSessions, pruneOldSessions } from './core/SessionStore.js'
 import { buildSystemContext } from './core/ContextBuilder.js'
-import { getCoordinatorSystemPrompt } from './core/coordinator/coordinatorPrompt.js'
+import { getCoordinatorSystemPrompt, classifyTask } from './core/coordinator/coordinatorPrompt.js'
 import { initProfileLoader, listProfiles } from './core/coordinator/ProfileLoader.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { getGlobalCwd } from './core/cwd.js'
@@ -282,6 +282,9 @@ async function main() {
 
       // 根据用户消息动态更新 systemPrompt（按任务类型注入扩展块）
       const buildPromptForMessage = async (msg: string): Promise<void> => {
+        const types = classifyTask(msg)
+        engine.setChatMode(types.includes('chat'))
+
         const taskPrompt = getCoordinatorSystemPrompt(msg, tools, undefined, availableProfiles)
         const fullPrompt = await buildSystemContext(taskPrompt, getGlobalCwd())
         engine.setSystemPrompt(fullPrompt)

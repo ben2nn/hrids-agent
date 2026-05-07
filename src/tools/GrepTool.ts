@@ -82,7 +82,9 @@ function searchFiles(
 
 export const GrepTool: ToolDef<typeof inputSchema> = {
   name: 'grep',
-  description: '在文件中搜索文本模式，返回匹配行及行号（跨平台，无需系统 grep）',
+  description: `在文件中搜索文本模式，返回匹配行及行号。
+适用场景：在代码库中查找函数定义、配置项、错误信息等文本内容
+不适用场景：查找文件路径 → 用 glob | 读取整个文件 → 用 file_read`,
   inputSchema,
   readonly: true,
 

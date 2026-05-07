@@ -22,8 +22,10 @@ export type { ProviderDef, CustomProviderConfig } from './registry.js'
 
 // ── ProviderOptions ───────────────────────────────────────────
 
+const DEFAULT_MODEL = 'qwen3.5-122b-a10b'
+
 export interface ProviderOptions {
-  model: string
+  model?: string
   apiKey?: string
   baseUrl?: string
   modelType?: ModelType
@@ -42,7 +44,7 @@ export interface ProviderOptions {
 // ── 单一提供商创建 ────────────────────────────────────────────
 
 export function createProvider(opts: ProviderOptions): LLMProvider {
-  const { model, baseUrl, customProviders = [] } = opts
+  const { model = DEFAULT_MODEL, baseUrl, customProviders = [] } = opts
 
   // 1. 显式指定提供商
   if (opts.provider) {
@@ -84,7 +86,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
 // ── 内部：从 ProviderDef 构建 LLMProvider ─────────────────────
 
 function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
-  const { model, modelType, toolMode = 'native' } = opts
+  const { model = DEFAULT_MODEL, modelType, toolMode = 'native' } = opts
   const baseUrl = opts.baseUrl ?? def.defaultBaseUrl
   const apiKey = opts.apiKey
 
@@ -190,7 +192,7 @@ export function createTypedProvider(ctx: TypedProviderContext): LLMProvider | nu
  * 优先级：config.llm.fallbacks > config.llm.model > config.model
  */
 export function createProviderFromConfig(config: {
-  model: string
+  model?: string
   provider?: string
   apiKey?: string
   baseUrl?: string

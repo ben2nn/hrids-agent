@@ -23,13 +23,16 @@ const addSchema = z.object({
 
 export const MemoryAddTool: ToolDef<typeof addSchema> = {
   name: 'memory_add',
-  description: `将重要信息写入长期记忆。以下情况必须主动调用：
-- 用户表达偏好（"以后都用X"、"不要用Y"、"我喜欢X风格"）→ type=preference
-- 做出技术决策（"用X替代Y"、"选择了X方案"、"因为X所以用Y"）→ type=decision
-- 完成重要任务（"搞定了"、"上线了"、"终于解决了"）→ type=milestone
+  description: `将重要信息写入长期记忆，跨会话持久化。
+适用场景：
+- 用户明确纠正或要求记住（"以后不要用X"、"记住这个"）→ type=preference
+- 做出有影响的技术决策（"我们决定用X替代Y"）→ type=decision
+- 完成重要里程碑（"上线了"、"搞定了"）→ type=milestone
 - 发现 bug 根因或解决方案 → type=problem
-- 用户提到项目名、技术栈、团队信息等事实 → type=fact
-不要等到会话结束，发现值得记住的内容时立即调用。`,
+不适用场景：
+- 问候/闲聊/简单对话 → 不需要记录
+- 明显的事实（Python 是编程语言）→ 没有必要记录
+- 任务中间状态 → 用 todo 管理，不要用 memory`,
   inputSchema: addSchema,
   readonly: false,
 
@@ -62,7 +65,9 @@ const searchSchema = z.object({
 
 export const MemorySearchTool: ToolDef<typeof searchSchema> = {
   name: 'memory_search',
-  description: '在长期记忆中搜索相关内容。当需要回忆之前的决策、偏好或事实时调用。',
+  description: `在长期记忆中搜索相关内容。
+适用场景：开始新任务前检查是否有相关历史 | 用户提到之前讨论过的话题
+不适用场景：问候/闲聊 | 用户没有提到需要回忆的内容`,
   inputSchema: searchSchema,
   readonly: true,
 
@@ -92,7 +97,9 @@ const recallSchema = z.object({
 
 export const MemoryRecallTool: ToolDef<typeof recallSchema> = {
   name: 'memory_recall',
-  description: '列出记忆条目（按重要性排序）。',
+  description: `列出已保存的记忆条目（按重要性排序）。
+适用场景：用户要求查看记忆、需要回顾之前保存的偏好和决策
+不适用场景：每次对话开始时自动调用 | 问候/闲聊`,
   inputSchema: recallSchema,
   readonly: true,
 
@@ -157,11 +164,9 @@ const updateSchema = z.object({
 
 export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
   name: 'memory_update',
-  description: `更新一条已有记忆（标记旧记忆失效，写入新版本）。以下情况必须调用而不是 memory_add：
-- 用户改变了之前的决策（"不用X了，改用Y"）
-- 用户修正了之前的偏好（"其实我更喜欢Y"）
-- 之前记录的事实已经过时（版本升级、项目重命名等）
-先用 memory_search 找到旧记忆的 ID，再调用此工具替换。`,
+  description: `更新已有记忆（标记旧记忆失效，写入新版本）。
+适用场景：用户改变之前的决策/偏好、之前记录的事实已过时
+不适用场景：新增记忆 → 用 memory_add | 闲聊中无意提到的信息`,
   inputSchema: updateSchema,
   readonly: false,
 

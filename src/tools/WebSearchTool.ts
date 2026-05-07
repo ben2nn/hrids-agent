@@ -148,7 +148,9 @@ function parseNetworkError(err: unknown): string {
 
 export const WebSearchTool: ToolDef<typeof inputSchema> = {
   name: 'web_search',
-  description: '在互联网上搜索最新信息。适合查询实时数据、文档、新闻等。有 ANTHROPIC_API_KEY 时使用 Anthropic 原生搜索，否则自动降级到 DuckDuckGo。',
+  description: `在互联网上搜索最新信息。
+适用场景：查询实时数据（天气、股价、新闻）、搜索技术文档、查找 API 用法
+不适用场景：查询已有知识能回答的问题 → 直接回答 | 问候/闲聊`,
   inputSchema,
   readonly: true,
 

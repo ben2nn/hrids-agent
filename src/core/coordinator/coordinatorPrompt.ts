@@ -31,15 +31,16 @@ const SECTION_INTRO = `你是一个通用自主工作者（hrids-agent）。用�
 
 const SECTION_EXECUTION = `# 执行原则
 
-**以下情况直接回复，不调用任何工具，不建立任务计划**：
-- 问候、闲聊、感谢、确认（"你好"、"谢谢"、"好的"、"明白了"）
-- 纯知识问答：凭已有知识直接回答
-- 用户只是在表达情绪或反馈
-- **用户对 \`[定时任务触发]\` 消息的确认回复**（"知了"、"好的"、"收到"等）：这类消息是系统自动触发的提醒，用户确认后无需执行任何操作，**绝对不能重新创建定时任务**
+你的每条回复应该是以下之一：
+(a) 调用工具推进任务执行——调用前用一句话（≤10字）说明意图，找到数据后立即继续处理
+(b) 直接向用户交付最终结果——包括问候回复、知识问答、确认回复、情绪反馈
 
-**其他所有情况**：调用工具前用一句话（≤10字）说明意图，然后立即调用，不要长篇解释。找到数据后立即继续处理，不能停在"找到了"这一步。**只要任务尚未完成，必须调用工具继续执行，不能只输出文字描述后停下。**
+不要输出"我将做X"然后停止——说了就立即做。
+无工具调用时，用心跳协议标记意图（详见 HEARTBEAT.md）。
+用户对 \`[定时任务触发]\` 消息的确认回复（"知了"、"收到"等）：属于 (b)，直接文字回复。
 
-遇到错误先分析根因，再决定修复方案。同一错误不要尝试超过 2 次相同修复方式，第 3 次必须换思路。报告结果要如实：测试失败就说失败，未验证就说未验证。`
+遇到错误先分析根因再修复。同一错误不超过 2 次相同方式，第 3 次必须换思路。
+报告结果要如实：测试失败就说失败，未验证就说未验证。`
 
 const SECTION_ACTIONS = `# 谨慎操作
 
@@ -120,6 +121,23 @@ const SECTION_COREFERENCE = `# 指代解析规则
  - 用户说"为什么这个图不是 AI 生成的"，即使当前消息没有附图，也应回溯历史找最近的图片
  - 用户说"继续" / "接着做" → 继续最近一次未完成的任务，不要询问继续什么
  - 用户说"改一下" / "优化一下" → 对最近一次输出的内容进行修改`
+
+const SECTION_HEARTBEAT = `# 心跳协议
+
+每条回复末尾用以下标记声明意图（不要输出在代码块内）：
+
+ - \`[HEARTBEAT:CONTINUE]\` — 还有未完成的工作，请求继续执行
+ - \`[HEARTBEAT:DONE]\` — 任务已完成，或本轮无需继续
+
+规则：
+ - 有工具调用时：工具执行后自然进入下一轮，不需要标记
+ - 无工具调用时：必须输出 DONE 或 CONTINUE
+ - 简单问答/问候：直接回复，不需要标记（系统自动识别为完成）
+ - CONTINUE 不要连续输出超过 2 次无工具调用的续接请求`
+
+// 导出标记常量，供 QueryEngine 检测使用
+export const HEARTBEAT_CONTINUE = '[HEARTBEAT:CONTINUE]'
+export const HEARTBEAT_DONE = '[HEARTBEAT:DONE]'
 
 // ─────────────────────────────────────────────
 // 文件加载静态层 + 默认值导出（在 EXT_* 定义之后）
@@ -361,13 +379,12 @@ const EXT_MEMORY: PromptExtension = {
   id: 'memory',
   content: `# 记忆管理
 
-遇到以下情况立即调用 memory_add，不要等到会话结束：
+仅在以下场景调用 memory_add（不要在问候/闲聊时调用）：
 
- - 用户偏好："以后都用X"、"不要用Y" → type=preference
- - 技术决策："选择X方案"、"用X替代Y" → type=decision
- - 重要里程碑："搞定了"、"上线了" → type=milestone
+ - 用户明确要求记住或纠正（"以后不要用X"、"记住这个"）→ type=preference
+ - 有影响的技术决策（"我们决定用X替代Y"）→ type=decision
+ - 重要里程碑（"上线了"、"搞定了"）→ type=milestone
  - bug 根因或解决方案 → type=problem
- - 项目名、技术栈等事实 → type=fact
 
 若新信息与已有记忆矛盾，先 memory_search 找旧记忆 ID，再 memory_update 替换。`,
 }
@@ -389,7 +406,7 @@ SkillHub 收录 3.4 万个 AI 技能（https://skillhub.cloud.tencent.com）。�
 // 任务分类：关键词匹配 → 扩展块 ID 列表
 // ─────────────────────────────────────────────
 
-export type TaskType = 'task' | 'script' | 'crawl' | 'code' | 'agent' | 'file' | 'memory' | 'skillhub'
+export type TaskType = 'task' | 'script' | 'crawl' | 'code' | 'agent' | 'file' | 'memory' | 'skillhub' | 'chat'
 
 interface ClassifyRule {
   type: TaskType
@@ -397,6 +414,14 @@ interface ClassifyRule {
 }
 
 const CLASSIFY_RULES: ClassifyRule[] = [
+  // chat：问候/闲聊/简单确认，不触发任何工具
+  {
+    type: 'chat',
+    keywords: [
+      /^(你好|hi|hello|hey|嗨|哈喽|早|晚安|早上好|下午好|晚上好|在吗|在不在|怎么样|最近怎么样|谢谢|感谢|thx|thanks|ok|好的|收到|知了|嗯)\s*[!！。.？?]*$/i,
+      /^(哈+|嘿+|噢+|哦+|啊+|嗯+|呵+)\s*$/i,
+    ],
+  },
   // task：多步骤任务，需要建立任务计划
   {
     type: 'task',
@@ -467,11 +492,14 @@ const CLASSIFY_RULES: ClassifyRule[] = [
 
 export function classifyTask(message: string): TaskType[] {
   const matched = new Set<TaskType>()
+  const trimmed = message.trim()
   for (const rule of CLASSIFY_RULES) {
-    if (rule.keywords.some(re => re.test(message))) {
+    if (rule.keywords.some(re => re.test(trimmed))) {
       matched.add(rule.type)
     }
   }
+  // chat 是排他类型：匹配到 chat 就直接返回，不注入任何扩展和工具
+  if (matched.has('chat')) return ['chat']
   // crawl 隐含 script；code/crawl/script 隐含 task（多步骤任务）
   if (matched.has('crawl')) matched.add('script')
   if (matched.has('crawl') || matched.has('script') || matched.has('code')) {
@@ -489,6 +517,7 @@ const EXTENSIONS: Record<TaskType, PromptExtension> = {
   file: EXT_FILE,
   memory: EXT_MEMORY,
   skillhub: EXT_SKILLHUB,
+  chat: { id: 'chat', content: '' },  // chat 无扩展内容，纯占位
 }
 
 // ─────────────────────────────────────────────
@@ -504,7 +533,7 @@ export const DEFAULT_MAIN_AGENT_FILES: Record<string, string> = {
   USER: [SECTION_DECISION, SECTION_OUTPUT, SECTION_COREFERENCE].join('\n\n'),
   AGENTS: EXT_AGENT.content,
   MEMORY: EXT_MEMORY.content,
-  HEARTBEAT: '# 心跳 / 续接\n\n（预留，后续完善）',
+  HEARTBEAT: SECTION_HEARTBEAT,
 }
 
 /**
@@ -564,12 +593,26 @@ export function getCoordinatorSystemPrompt(
   forceExtensions?: TaskType[],
   profiles?: Array<{ name: string; description: string; tags?: string[]; model?: string; autoSelectable?: boolean }>,
 ): string[] {
+  const types = forceExtensions ?? (message ? classifyTask(message) : [])
+  const isChat = types.includes('chat')
+
+  if (isChat) {
+    // chat 模式：只保留核心身份和输出规范，排除所有工具相关内容
+    const staticSections = loadStaticSections()
+    const chatSections = staticSections.filter((_, i) => i !== 3)  // 排除 TOOLS.md（第 4 个）
+    // 追加聊天模式专用指令（替换工具速查位置）
+    chatSections.push(`# 当前模式：聊天
+
+你处于聊天模式，没有可用工具。直接用自然语言回复用户，不要输出工具调用格式。
+问候、闲聊、知识问答、情感交流——直接回复即可。`)
+    return chatSections
+  }
+
   const toolsRefSection = tools && tools.length > 0
     ? buildToolsReferenceSection(tools)
     : SECTION_TOOLS_REFERENCE_FALLBACK
 
-  const types = forceExtensions ?? (message ? classifyTask(message) : [])
-  const extensions = types.map(t => EXTENSIONS[t].content)
+  const extensions = types.filter(t => t !== 'chat').map(t => EXTENSIONS[t].content)
 
   const sections = [...loadStaticSections(), toolsRefSection, ...extensions]
 

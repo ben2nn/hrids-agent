@@ -1112,13 +1112,9 @@ const todoReadInputSchema = z.strictObject({})
  */
 export const TodoReadTool: ToolDef<typeof todoReadInputSchema> = {
   name: 'todo_read',
-  description: `读取当前任务状态（只读，不修改任何状态）。
-
-返回内容：
-- 任务整体进度（已完成 / 总数）
-- 最近 3 条已完成任务
-- 未完成任务列表（按优先级排序：high → medium → low，同优先级按 id 升序）
-- 当前执行中任务的验收标准（如有）及下一步操作指令`,
+  description: `读取当前任务列表和进度。仅在需要确认任务状态时调用。
+适用场景：确认当前任务进度、查看有哪些待完成的任务
+不适用场景：建立新计划 → 用 todo_write | 问候/闲聊 | 没有任务时自动调用`,
   inputSchema: todoReadInputSchema,
   readonly: true,
 
