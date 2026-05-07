@@ -63,7 +63,7 @@ function makeConfig(provider: LLMProvider, tools: ToolDef<never>[] = []): QueryE
     provider,
     systemPrompt: ['你是一个测试助手'],
     tools,
-    permissions: new PermissionManager('craft', async () => true),
+    permissions: new PermissionManager('ask', async () => true),
     maxTokens: 1024,
     maxTurns: 5,
   }

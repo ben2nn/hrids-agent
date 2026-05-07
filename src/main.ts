@@ -70,7 +70,7 @@ async function main() {
 
   // ── 主命令 ──────────────────────────────────────────────────
   program
-    .option('-m, --model <model>', '模型名称（自动识别提供商）', 'qwen-plus-2025-07-28')
+    .option('-m, --model <model>', '模型名称（覆盖 config.yaml，自动识别提供商）')
     .option('--provider <provider>', '显式指定提供商：anthropic | openai | deepseek | groq | aliyun | zhipu | nvidia | kimi | minimax | google | openrouter | ollama | custom')
     .option('--api-key <key>', 'API Key（覆盖 config.yaml 中的配置）')
     .option('--base-url <url>', '自定义 API 端点（Ollama / 本地代理）')

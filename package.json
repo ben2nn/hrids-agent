@@ -16,7 +16,7 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "dev": "tsx src/main.ts --auto",
+    "dev": "tsx src/main.ts --craft",
     "gateway": "npm run build:web && tsx src/main.ts --gateway",
     "build": "npm run build --prefix web && tsc",
     "build:web": "npm run build --prefix web",

@@ -1,7 +1,6 @@
 // 提供商工厂 —— 根据注册表和 config.yaml 自动选择正确的提供商
 import { AnthropicProvider } from './AnthropicProvider.js'
 import { OpenAIProvider } from './OpenAIProvider.js'
-import { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 import { FallbackProvider } from './FallbackProvider.js'
 import type { LLMProvider, ModelType, ProviderConfig } from './types.js'
 import {
@@ -17,7 +16,6 @@ import type { ModelTypeConfig } from '../Config.js'
 export type { LLMProvider, ModelType, ProviderConfig, StreamChunk, ChatMessage, EmbeddingProvider, SpeechProvider } from './types.js'
 export { AnthropicProvider } from './AnthropicProvider.js'
 export { OpenAIProvider } from './OpenAIProvider.js'
-export { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 export { FallbackProvider } from './FallbackProvider.js'
 export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel } from './registry.js'
 export type { ProviderDef, CustomProviderConfig } from './registry.js'
@@ -94,11 +92,6 @@ function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
 
   if (def.transport === 'anthropic_messages') {
     if (!apiKey) throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
-    // dsml 模式或 deepseekCompat：使用 DeepSeekAnthropicProvider
-    // 去掉 cache_control 等不兼容字段，工具调用走 DSML 文本解析
-    if (toolMode === 'dsml' || def.deepseekCompat) {
-      return new DeepSeekAnthropicProvider(config)
-    }
     return new AnthropicProvider(config)
   }
 
@@ -114,7 +107,7 @@ function resolveProviderDef(name: string, customs: CustomProviderConfig[]): Prov
   return getBuiltinProvider(name) ?? getCustomProvider(name, customs)
 }
 
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'deepseek-anthropic', 'groq', 'aliyun', 'zhipu', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'groq', 'aliyun', 'zhipu','xiaomi', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
 
 // ── 多模型 Fallback 工厂 ──────────────────────────────────────
 

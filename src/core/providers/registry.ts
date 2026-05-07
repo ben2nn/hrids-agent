@@ -20,11 +20,6 @@ export interface ProviderDef {
   isAggregator?: boolean
   /** 模型名前缀列表，用于自动识别提供商 */
   modelPrefixes?: string[]
-  /**
-   * 使用 DeepSeek 兼容模式（仅 transport=anthropic_messages 时有效）。
-   * 启用后使用 DeepSeekAnthropicProvider，去掉 cache_control 等 Anthropic 专有字段。
-   */
-  deepseekCompat?: boolean
 }
 
 // ── 内置提供商注册表 ──────────────────────────────────────────
@@ -57,19 +52,6 @@ export const BUILTIN_PROVIDERS: ProviderDef[] = [
     modelPrefixes: ['deepseek-'],
   },
   {
-    // DeepSeek 的 Anthropic Messages API 兼容端点。
-    // 使用原生 function calling，完全绕开 DSML 文本格式的不稳定问题。
-    // 配置方式：在 llm.fallbacks 中将 provider 设为 "deepseek-anthropic"
-    id: 'deepseek-anthropic',
-    name: 'DeepSeek（Anthropic 协议）',
-    transport: 'anthropic_messages',
-    deepseekCompat: true,
-    apiKeyEnvVars: ['DEEPSEEK_API_KEY'],
-    defaultBaseUrl: 'https://api.deepseek.com',
-    baseUrlEnvVar: 'DEEPSEEK_BASE_URL',
-    modelPrefixes: [],  // 不参与自动推断，必须显式指定 provider
-  },
-  {
     id: 'groq',
     name: 'Groq',
     transport: 'openai_chat',
@@ -86,6 +68,15 @@ export const BUILTIN_PROVIDERS: ProviderDef[] = [
     defaultBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     baseUrlEnvVar: 'DASHSCOPE_BASE_URL',
     modelPrefixes: ['qwen', 'qwq-', 'qvq-', 'tongyi-', 'MiniMax-'],
+  },
+  {
+    id: 'xiaomi',
+    name: 'Xiaomi MiMo',
+    transport: 'anthropic_messages',
+    apiKeyEnvVars: ['XIAOMI_API_KEY', 'MIMO_API_KEY'],
+    defaultBaseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    baseUrlEnvVar: 'XIAOMI_BASE_URL',
+    modelPrefixes: ['mimo-'],
   },
   {
     id: 'zhipu',
@@ -159,8 +150,6 @@ export const PROVIDER_ALIASES: Record<string, string> = {
   'gpt': 'openai',
   // deepseek
   'deep-seek': 'deepseek',
-  'deepseek-claude': 'deepseek-anthropic',
-  'deepseek-ant': 'deepseek-anthropic',
   // groq
   'groq-cloud': 'groq',
   // aliyun
@@ -198,11 +187,6 @@ export interface CustomProviderConfig {
   baseUrl: string
   /** 传输协议：openai_chat（默认）| anthropic_messages */
   transport?: 'openai_chat' | 'anthropic_messages'
-  /**
-   * 使用 DeepSeek 兼容模式（仅 transport=anthropic_messages 时有效）。
-   * 启用后去掉 cache_control 等 Anthropic 专有字段，兼容 DS2API 等兼容层。
-   */
-  deepseekCompat?: boolean
   /** API Key 环境变量名（可选，不填则不需要 key） */
   apiKeyEnvVar?: string
   /** 直接内联 API Key（不推荐，建议用 apiKeyEnvVar） */
@@ -236,7 +220,6 @@ export function getCustomProvider(name: string, customs: CustomProviderConfig[])
     id: toSlug(entry.name),
     name: entry.name,
     transport: entry.transport ?? 'openai_chat',
-    deepseekCompat: entry.deepseekCompat,
     apiKeyEnvVars: entry.apiKeyEnvVar ? [entry.apiKeyEnvVar] : [],
     defaultBaseUrl: entry.baseUrl,
   }

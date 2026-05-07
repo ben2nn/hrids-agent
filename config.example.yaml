@@ -1,8 +1,5 @@
 # 复制此文件到 ~/.hrids/config.yaml 并填入你的配置
 # 完整字段说明见 docs/AGENT.md，或运行 hrids-agent --help
-
-model: qwen-plus-2025-07-28
-
 # 大语言模型（主对话引擎，必须配置）
 # 同平台内按 models 顺序重试，全部失败后切换下一平台
 llm:
@@ -14,12 +11,6 @@ llm:
         - qwen3.6-flash-2026-04-16
         - qwen3.5-plus-2026-04-20
     - provider: deepseek
-      apiKey: sk-xxxxxxxx
-      models:
-        - deepseek-chat
-        - deepseek-reasoner
-    # DeepSeek Anthropic 协议：原生 function calling，工具调用更稳定
-    - provider: deepseek-anthropic
       apiKey: sk-xxxxxxxx
       models:
         - deepseek-chat
@@ -92,6 +83,7 @@ vectorStore:
 
 # Agent 运行时行为配置
 agent:
+  model: qwen3.5-35b-a3b
   permissionMode: ask
   maxTokens: 8096
   maxTurns: 50

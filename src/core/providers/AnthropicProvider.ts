@@ -13,6 +13,7 @@ export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
   readonly model: string
   readonly modelType: ModelType
+  readonly toolMode = 'native' as const
   private client: Anthropic
 
   constructor(config: ProviderConfig) {
@@ -55,7 +56,7 @@ export class AnthropicProvider implements LLMProvider {
         model: this.model,
         max_tokens: maxTokens,
         system: systemBlocks,
-        tools: tools.map(toAnthropicTool) as Anthropic.Tool[],
+        tools: tools.length > 0 ? tools.map(toAnthropicTool) as Anthropic.Tool[] : undefined,
         messages: anthropicMessages,
       })),
       { maxAttempts: 3 },

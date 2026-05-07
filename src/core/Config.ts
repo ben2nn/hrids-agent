@@ -82,6 +82,8 @@ export interface VectorStoreConfig {
 // ── Agent 行为配置 ────────────────────────────────────────────
 
 export interface AgentBehaviorConfig {
+  /** 默认模型（无 llm.fallbacks 时使用，可被 -m 覆盖） */
+  model?: string
   /** 权限模式：ask（每次确认）| craft（自主执行）| plan（只读计划） */
   permissionMode?: 'ask' | 'craft' | 'plan'
   /** 单次回复最大 token 数 */
@@ -184,8 +186,8 @@ export interface ToolPermissionPolicy {
 
 export interface AgentConfig {
   // ── 基础 ──────────────────────────────────────────────────
-  /** 默认模型（无 llm.fallbacks 时使用） */
-  model: string
+  /** @deprecated 请使用 agent.model */
+  model?: string
   /** 显式指定提供商（支持内置 ID、别名、customProviders 中的名称） */
   provider?: string
   /** 直接内联 API Key（不推荐，建议在 fallbacks 中按提供商配置） */
@@ -263,6 +265,7 @@ export interface ResolvedConfig extends AgentConfig {
 const DEFAULTS = {
   model: 'qwen3.5-122b-a10b',
   agent: {
+    model: 'qwen3.5-122b-a10b',
     permissionMode: 'ask' as const,
     maxTokens: 8096,
     maxTurns: 50,
@@ -351,6 +354,7 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
 
   // 合并 agent 分组（新格式优先，旧字段兜底）
   const agent: Required<AgentBehaviorConfig> = {
+    model:          clean.agent?.model           ?? clean.model           ?? DEFAULTS.agent.model,
     permissionMode: clean.agent?.permissionMode ?? clean.permissionMode ?? DEFAULTS.agent.permissionMode,
     maxTokens:      clean.agent?.maxTokens      ?? clean.maxTokens      ?? DEFAULTS.agent.maxTokens,
     maxTurns:       clean.agent?.maxTurns        ?? clean.maxTurns        ?? DEFAULTS.agent.maxTurns,
@@ -395,8 +399,8 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
   }
 
   return {
-    // 基础字段
-    model:    clean.model    ?? DEFAULTS.model,
+    // 基础字段（model 新规范位置为 agent.model，顶层 model 向后兼容）
+    model:    agent.model,
     provider: clean.provider,
     apiKey:   clean.apiKey,
     baseUrl:  clean.baseUrl,
