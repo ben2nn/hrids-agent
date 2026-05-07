@@ -1,5 +1,5 @@
-// 记忆提取器 —— 从对话文本中识别 5 种记忆类型
-// 借鉴 mempalace 的 general_extractor.py，用纯正则实现，无需 LLM
+// 记忆提取器 —— 从对话文本中识别记忆类型
+// 用纯正则实现，无需 LLM
 import type { MemoryType } from './types.js'
 
 // ── 各类型的关键词模式 ────────────────────────────────────────
@@ -55,20 +55,11 @@ const PROBLEM_PATTERNS = [
   /\bthe fix (is|was)\b/i,
 ]
 
-const EMOTIONAL_PATTERNS = [
-  /\b(喜欢|爱|害怕|担心|高兴|难过|感谢|抱歉)\b/,
-  /\b(感觉|感受|情绪)\b/,
-  /\bi (love|hate|feel|miss|need|wish)\b/i,
-  /\b(scared|afraid|proud|happy|sad|grateful|angry|worried|lonely)\b/i,
-  /\*[^*]+\*/,  // *情感标记*
-]
-
 const ALL_PATTERNS: Record<MemoryType, RegExp[]> = {
   decision: DECISION_PATTERNS,
   preference: PREFERENCE_PATTERNS,
   milestone: MILESTONE_PATTERNS,
   problem: PROBLEM_PATTERNS,
-  emotional: EMOTIONAL_PATTERNS,
   fact: [],
 }
 
@@ -110,14 +101,11 @@ function hasResolution(text: string): boolean {
 
 // 消歧：已解决的问题 → milestone
 function disambiguate(type: MemoryType, text: string, scores: Record<string, number>): MemoryType {
-  const sentiment = getSentiment(text)
   if (type === 'problem' && hasResolution(text)) {
-    if ((scores.emotional ?? 0) > 0 && sentiment === 'positive') return 'emotional'
     return 'milestone'
   }
-  if (type === 'problem' && sentiment === 'positive') {
+  if (type === 'problem' && getSentiment(text) === 'positive') {
     if ((scores.milestone ?? 0) > 0) return 'milestone'
-    if ((scores.emotional ?? 0) > 0) return 'emotional'
   }
   return type
 }
@@ -129,7 +117,6 @@ const TYPE_BASE_SCORE: Record<MemoryType, number> = {
   problem: 3,
   preference: 3,
   fact: 2,
-  emotional: 2,
 }
 
 // 动态重要性评分（1-5）

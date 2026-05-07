@@ -1,4 +1,4 @@
-// 提供商工厂 —— 根据注册表和 config.json 自动选择正确的提供商
+// 提供商工厂 —— 根据注册表和 config.yaml 自动选择正确的提供商
 import { AnthropicProvider } from './AnthropicProvider.js'
 import { OpenAIProvider } from './OpenAIProvider.js'
 import { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
@@ -31,7 +31,7 @@ export interface ProviderOptions {
   modelType?: ModelType
   /** 显式指定提供商（支持内置 ID、别名、自定义提供商名称） */
   provider?: string
-  /** 用户自定义提供商列表（来自 config.json 的 customProviders） */
+  /** 用户自定义提供商列表（来自 config.yaml 的 customProviders） */
   customProviders?: CustomProviderConfig[]
   /**
    * 工具调用模式（默认 "native"）：
@@ -53,7 +53,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
       throw new Error(
         `未知提供商: "${opts.provider}"。\n` +
         `内置提供商: ${BUILTIN_PROVIDER_IDS.join(', ')}\n` +
-        `如需自定义提供商，请在 config.json 的 customProviders 中添加。`
+        `如需自定义提供商，请在 config.yaml 的 customProviders 中添加。`
       )
     }
     return buildFromDef(def, opts)
@@ -78,7 +78,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
 
   throw new Error(
     `无法自动识别模型 "${model}" 的提供商。\n` +
-    `请在 config.json 中设置 provider 字段，或在 llm.fallbacks 中指定 provider。\n` +
+    `请在 config.yaml 中设置 provider 字段，或在 llm.fallbacks 中指定 provider。\n` +
     `内置提供商: ${BUILTIN_PROVIDER_IDS.join(', ')}`
   )
 }
@@ -149,7 +149,7 @@ interface TypedProviderContext {
 }
 
 /**
- * 从 ModelTypeConfig（config.json 中的 llm / vision / multimodal / speech）
+ * 从 ModelTypeConfig（config.yaml 中的 llm / vision / multimodal / speech）
  * 创建对应的 LLMProvider，支持多平台 Fallback。
  * API Key 直接从各 fallback 条目的 apiKey 字段读取。
  */

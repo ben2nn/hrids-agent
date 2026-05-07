@@ -5,6 +5,7 @@ import { promisify } from 'util'
 import { homedir } from 'os'
 import { join } from 'path'
 import { getGlobalCwd } from './cwd.js'
+import { getConfigDir } from './Config.js'
 
 const execAsync = promisify(exec)
 
@@ -16,23 +17,23 @@ export interface ContextInfo {
   date: string
 }
 
-// 默认工作目录：~/.hrids-agent/work/（共享目录，不绑定会话）
+// 默认工作目录：~/.hrids/work/（共享目录，不绑定会话）
 export function getDefaultAgentCwd(): string {
-  const dir = join(homedir(), '.hrids-agent', 'work')
+  const dir = join(getConfigDir(), 'work')
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }
   return dir
 }
 
-// 为指定会话创建独立工作目录：~/.hrids-agent/work/<YYYYMMDD-HHmmss>-<sessionId>/
+// 为指定会话创建独立工作目录：~/.hrids/work/<YYYYMMDD-HHmmss>-<sessionId>/
 export function getSessionWorkDir(sessionId: string): string {
   const now = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
   const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   const dirName = `${datePart}-${timePart}-${sessionId}`
-  const dir = join(homedir(), '.hrids-agent', 'work', dirName)
+  const dir = join(getConfigDir(), 'work', dirName)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
     // 初始化 git 仓库，使差异功能可用
@@ -101,7 +102,7 @@ async function _fetchGitContext(cwd?: string): Promise<string | null> {
 // 搜索顺序：
 //   1. {cwd}/AGENT.md          —— 项目级记忆（随代码库存放）
 //   2. {cwd}/.hrids/AGENT.md   —— 项目级记忆（隐藏目录，适合不想提交到 git 的场景）
-//   3. ~/.hrids-agent/AGENT.md —— 用户级全局记忆（跨项目通用规则）
+//   3. ~/.hrids/AGENT.md —— 用户级全局记忆（跨项目通用规则）
 //
 // 结果按 cwd 分桶缓存 30 秒，避免每条消息都重复读磁盘
 const _memFilesCacheMap = new Map<string, { result: string[]; ts: number }>()
@@ -132,7 +133,7 @@ function _fetchMemoryFiles(cwd: string): string[] {
   const candidates = [
     join(cwd, 'AGENT.md'),
     join(cwd, '.hrids', 'AGENT.md'),
-    join(homedir(), '.hrids-agent', 'AGENT.md'),
+    join(getConfigDir(), 'AGENT.md'),
   ]
 
   const contents: string[] = []
@@ -151,7 +152,7 @@ function _fetchMemoryFiles(cwd: string): string[] {
 
 // 构建完整的系统上下文，注入动态内容（记忆、环境信息）
 // 接受 string[]，追加动态 section 后返回 string[]
-// cwd 参数可选，不传则使用 ~/.hrids-agent/work/（仅用于记忆文件查找）
+// cwd 参数可选，不传则使用 ~/.hrids/work/（仅用于记忆文件查找）
 // sessionId 参数可选，传入时注入会话级记忆（Gateway 多会话隔离），否则注入全局记忆
 export async function buildSystemContext(basePrompt: string[], cwd?: string, sessionId?: string): Promise<string[]> {
   const resolvedCwd = cwd ?? getDefaultAgentCwd()
@@ -168,16 +169,16 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
     dynamicSections.push('## 项目记忆\n' + memFiles.join('\n\n'))
   }
 
-  // 注入长期记忆（L0 身份 + L1 核心摘要）
+  // 注入长期记忆
   // Gateway 多会话模式：使用会话级记忆（按 sessionId 隔离，防止跨用户泄漏）
   // CLI 单会话模式：使用全局记忆（跨会话积累知识）
   try {
     const { getMemoryStackForSession, getMemoryStack } = await import('../memory/index.js')
     const stack = sessionId ? getMemoryStackForSession(sessionId) : getMemoryStack()
-    const { l0Identity, l1Essential, totalTokens } = stack.wakeUp()
+    const { summary, totalTokens } = stack.wakeUp()
     const stats = await stack.status()
     if (stats.totalMemories > 0) {
-      dynamicSections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${l0Identity}\n\n${l1Essential}`)
+      dynamicSections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${summary}`)
     }
   } catch {
     // 记忆系统不可用时静默跳过

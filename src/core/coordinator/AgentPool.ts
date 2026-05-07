@@ -7,6 +7,36 @@ import { runWithSession } from '../sessionContext.js'
 import { runWithCwd, getGlobalCwd } from '../cwd.js'
 import type { LLMProvider } from '../providers/index.js'
 import type { ToolDef } from '../Tool.js'
+import type { AgentProfile } from '../Config.js'
+import { loadConfig } from '../Config.js'
+
+// 默认排除的子智能体工具（可被配置覆盖）
+const DEFAULT_SUB_AGENT_EXCLUDED_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset'])
+
+/** 从配置或默认值获取工具排除列表 */
+function getDeniedTools(): Set<string> {
+  try {
+    const config = loadConfig()
+    if (config.toolPermissions?.defaultDenyList) {
+      return new Set(config.toolPermissions.defaultDenyList)
+    }
+  } catch { /* 配置不可用，使用默认 */ }
+  return DEFAULT_SUB_AGENT_EXCLUDED_TOOLS
+}
+
+/** 获取允许的工具列表 */
+function filterToolsForAgent(
+  baseTools: ToolDef[],
+  allowedTools?: string[],
+  deniedTools?: Set<string>,
+): ToolDef[] {
+  // 显式传入 allowedTools 时以它为准（最高优先级）
+  if (allowedTools) {
+    return baseTools.filter(t => allowedTools.includes(t.name))
+  }
+  const denied = deniedTools ?? getDeniedTools()
+  return baseTools.filter(t => !denied.has(t.name))
+}
 
 // 信号量：替代忙等待轮询，用 Promise 队列实现无 CPU 消耗的并发控制
 class Semaphore {
@@ -78,23 +108,19 @@ export class AgentPool {
     systemPrompt: string[],
     allowedTools?: string[],
     parentSessionId?: string,
+    profile?: AgentProfile,
   ): string {
-    const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    const id = `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
-    // 子智能体默认排除 todo 写工具，防止子任务修改共享任务计划文件后
-    // 父 QueryEngine 的 activeTodoSnapshot 不刷新，导致双真相问题。
-    // todo_read 保留：只读操作，子智能体可以查看任务状态。
-    // 显式传入 allowedTools 时不受此限制（高级场景可按需开放）。
-    const SUB_AGENT_EXCLUDED_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset'])
-    const tools = allowedTools
-      ? this.baseTools.filter(t => allowedTools.includes(t.name))
-      : this.baseTools.filter(t => !SUB_AGENT_EXCLUDED_TOOLS.has(t.name))
+    // 工具权限：显式传入 allowedTools > profile.allowedTools > 配置 denyList
+    const effectiveAllowed = allowedTools ?? profile?.allowedTools
+    const tools = filterToolsForAgent(this.baseTools, effectiveAllowed)
 
     const task: AgentTask = { id, name, description, prompt, status: 'pending' }
     this.tasks.set(id, task)
     this.bus.register(name)
 
-    this.runTask(task, tools, systemPrompt, parentSessionId).catch(err => {
+    this.runTask(task, tools, systemPrompt, parentSessionId, profile).catch(err => {
       if (task.status === 'pending') {
         task.status = 'failed'
         task.error = String(err)
@@ -173,7 +199,7 @@ export class AgentPool {
     }
   }
 
-  private async runTask(task: AgentTask, tools: ToolDef[], systemPrompt: string[], parentSessionId?: string) {
+  private async runTask(task: AgentTask, tools: ToolDef[], systemPrompt: string[], parentSessionId?: string, profile?: AgentProfile) {
     let acquired = false
     try {
       await this.semaphore.acquire()
@@ -189,7 +215,7 @@ export class AgentPool {
     task.status = 'running'
     task.startedAt = Date.now()
 
-    // 注入记忆快照（L0+L1）：优先使用父会话的会话级记忆，降级到全局记忆
+    // 注入记忆快照：优先使用父会话的会话级记忆，降级到全局记忆
     // 这样 Gateway 多会话场景下，子智能体继承的是正确的父会话记忆，而非其他用户的数据
     let finalSystemPrompt: string[] = [...systemPrompt]
     try {
@@ -199,21 +225,22 @@ export class AgentPool {
         : getMemoryStack()
       const stats = await stack.status()
       if (stats.totalMemories > 0) {
-        const { l0Identity, l1Essential } = stack.wakeUp()
+        const { summary } = stack.wakeUp()
         finalSystemPrompt = [
           ...systemPrompt,
-          `## 继承自父智能体的记忆上下文\n\n${l0Identity}\n\n${l1Essential}`,
+          `## 继承自父智能体的记忆上下文\n\n${summary}`,
         ]
       }
     } catch { /* 记忆系统不可用时静默跳过 */ }
 
     const permissions = new PermissionManager('craft', async () => true)
+    const maxTurns = profile?.maxTurns ?? loadConfig().multiAgent?.defaultMaxTurns ?? 30
     const engine = new QueryEngine({
       provider: this.provider,
       systemPrompt: finalSystemPrompt,
       tools,
       permissions,
-      maxTurns: 30,
+      maxTurns,
     })
     task.engine = engine
 

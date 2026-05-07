@@ -271,7 +271,7 @@ export class SeekDbStore implements VectorStore {
   async close(): Promise<void> { /* HTTP 无需关闭 */ }
 }
 
-// ── 工厂函数：根据 config.json 创建对应后端 ──────────────────────────
+// ── 工厂函数：根据 config.yaml 创建对应后端 ──────────────────────────
 
 import { createRequire } from 'module'
 const _require = createRequire(import.meta.url)

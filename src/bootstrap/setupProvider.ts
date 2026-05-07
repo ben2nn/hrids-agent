@@ -1,4 +1,4 @@
-// Provider 初始化 —— 从 config.json 创建 LLM 提供商
+// Provider 初始化 —— 从 config.yaml 创建 LLM 提供商
 import { createProvider, createProviderFromConfig, normalizeProvider } from '../core/providers/index.js'
 import type { LLMProvider } from '../core/providers/index.js'
 import type { AgentConfig } from '../core/Config.js'
@@ -31,6 +31,6 @@ export function setupProvider(opts: ProviderOpts): LLMProvider {
     })
   }
 
-  // 无 CLI 覆盖 → 走 config.json 的完整配置（含 llm.fallbacks）
+  // 无 CLI 覆盖 → 走 config.yaml 的完整配置（含 llm.fallbacks）
   return createProviderFromConfig(config)
 }

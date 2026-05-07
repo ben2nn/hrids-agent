@@ -99,7 +99,7 @@ export class SessionManager {
 
     // 创建 LLM 提供商
     // 若请求显式指定了 model/provider/apiKey，则用 createProvider 精确创建；
-    // 否则走 config.json 的 llm.fallbacks / model 多模型 fallback 配置
+    // 否则走 config.yaml 的 llm.fallbacks / model 多模型 fallback 配置
     const provider = (req.model || req.provider || req.apiKey)
       ? createProvider({
           model,
@@ -630,7 +630,7 @@ export class SessionManager {
         session.engine.setProvider(visionProvider)
         this.broadcast(session, { type: 'model_switched', requestId, model: visionProvider.model, reason: 'vision_content' })
       } else {
-        log.warn('检测到图片/PDF，但未配置视觉模型（config.json 的 vision 字段），使用当前模型', { sessionId })
+        log.warn('检测到图片/PDF，但未配置视觉模型（config.yaml 的 vision 字段），使用当前模型', { sessionId })
       }
     }
 

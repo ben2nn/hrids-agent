@@ -17,7 +17,7 @@ export interface LogEntry {
   [key: string]: unknown
 }
 
-const LOG_DIR = join(homedir(), '.hrids-agent', 'logs')
+const LOG_DIR = join(homedir(), '.hrids', 'logs')
 const LOG_FILE = join(LOG_DIR, 'agent.log')
 // 单个日志文件上限 10MB，超出后轮转
 const MAX_LOG_BYTES = 10 * 1024 * 1024
@@ -40,7 +40,7 @@ class Logger {
   private get serverMode() { return !!process.env.AGENT_SERVER_MODE }
 
   constructor() {
-    // 优先从 config.json 读取，其次环境变量（兼容旧用法），最后默认 info
+    // 优先从 config.yaml 读取，其次环境变量（兼容旧用法），最后默认 info
     let level: LogLevel = 'info'
     try {
       // 延迟 import 避免循环依赖，且 logger 在 config 加载前就可能被使用

@@ -1,8 +1,8 @@
 // 权限管理器 —— 控制工具调用是否需要用户确认
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
-import { homedir } from 'os'
 import { join, resolve } from 'path'
+import { getConfigDir } from './Config.js'
 
 export type PermissionMode =
   | 'ask'      // 每次都询问用户
@@ -22,7 +22,7 @@ export interface PermissionRequest {
 
 export type PermissionCallback = (req: PermissionRequest) => Promise<boolean>
 
-const RULES_FILE = join(homedir(), '.hrids-agent', 'permission-rules.json')
+const RULES_FILE = join(getConfigDir(), 'permission-rules.json')
 
 // 持久化的权限规则
 // 规则格式：
@@ -144,7 +144,7 @@ function loadRules(): PersistedRules {
 }
 
 function saveRules(rules: PersistedRules) {
-  const dir = join(homedir(), '.hrids-agent')
+  const dir = getConfigDir()
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   // 原子写入：防止并发写入时规则文件损坏
   const tmp = RULES_FILE + '.tmp'

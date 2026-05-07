@@ -5,10 +5,10 @@
 import { AsyncLocalStorage } from 'async_hooks'
 import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
+import { getConfigDir } from './Config.js'
 
 function initDefaultCwd(): string {
-  const dir = join(homedir(), '.hrids-agent', 'work')
+  const dir = join(getConfigDir(), 'work')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   return dir
 }

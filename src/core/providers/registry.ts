@@ -189,7 +189,7 @@ export const PROVIDER_ALIASES: Record<string, string> = {
 }
 
 // ── 用户自定义提供商 ──────────────────────────────────────────
-// 对应 config.json 中的 customProviders 字段
+// 对应 config.yaml 中的 customProviders 字段
 
 export interface CustomProviderConfig {
   /** 显示名称，同时作为 ID 使用（slug 化后） */

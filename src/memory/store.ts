@@ -1,62 +1,68 @@
-// 记忆存储 —— SQLite 元数据 + 可插拔向量后端
-// 向量后端通过 VECTOR_STORE 环境变量切换：sqlite（默认）| pgvector | seekdb
+// 记忆存储 —— JSONL 桶文件 + SQLite 向量索引/知识图谱
+// 每个智能体独立存储：~/.hrids/agents/{agent}/memory/
+//   facts.jsonl / preferences.jsonl / decisions.jsonl — 记忆数据
+//   index.db — 向量索引 + 知识图谱三元组
 import Database from 'better-sqlite3'
 import { createHash, randomUUID } from 'crypto'
-import { existsSync, mkdirSync } from 'fs'
-import { homedir } from 'os'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, copyFileSync } from 'fs'
 import { join } from 'path'
+import { getConfigDir } from '../core/Config.js'
 import type { Memory, MemoryType, Triple, MemorySearchResult } from './types.js'
 import { getEmbeddingProvider } from './embedding.js'
 import { createVectorStore, type VectorStore } from './vectorStore.js'
 
-const STORE_DIR = join(homedir(), '.hrids-agent', 'memory')
-const DB_PATH = join(STORE_DIR, 'palace.db')
+const AGENTS_DIR = join(getConfigDir(), 'agents')
+
+function getAgentMemoryDir(agent: string): string {
+  return join(AGENTS_DIR, agent, 'memory')
+}
+
+type BucketName = 'facts' | 'preferences' | 'decisions'
+
+function typeToBucket(type: MemoryType): BucketName {
+  switch (type) {
+    case 'fact': return 'facts'
+    case 'preference': return 'preferences'
+    case 'decision': return 'decisions'
+    case 'milestone': return 'facts'
+    case 'problem': return 'facts'
+  }
+}
+
+const BUCKET_NAMES: BucketName[] = ['facts', 'preferences', 'decisions']
 
 export class MemoryStore {
+  private dir: string
   private db: Database.Database
   private vec: VectorStore
-  // embedding 维度，首次写入时确定，之后不可变
   private _dim: number | null = null
 
-  constructor(dbPath = DB_PATH) {
-    if (!existsSync(STORE_DIR)) mkdirSync(STORE_DIR, { recursive: true })
+  constructor(agent = 'main') {
+    this.dir = getAgentMemoryDir(agent)
+    if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true })
+
+    // 确保 JSONL 桶文件存在
+    for (const bucket of BUCKET_NAMES) {
+      const p = this._bucketPath(bucket)
+      if (!existsSync(p)) writeFileSync(p, '', 'utf-8')
+    }
+
+    // SQLite 仅用于向量索引 + 知识图谱
+    const dbPath = join(this.dir, 'index.db')
     this.db = new Database(dbPath)
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
-    this.vec = createVectorStore(this.db)
-    this._initSchema()
-    this._migrate()
-    this._restoreDim()
-  }
 
-  // ── Schema ────────────────────────────────────────────────────
-
-  private _initSchema() {
+    // 为向量后端保留最小 memories 表（仅 rowid + id 映射，不存内容）
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
-        rowid         INTEGER PRIMARY KEY AUTOINCREMENT,
-        id            TEXT NOT NULL UNIQUE,
-        content       TEXT NOT NULL,
-        type          TEXT NOT NULL,
-        wing          TEXT NOT NULL DEFAULT 'general',
-        room          TEXT NOT NULL DEFAULT 'general',
-        tags          TEXT NOT NULL DEFAULT '[]',
-        importance    REAL NOT NULL DEFAULT 3,
-        created_at    TEXT NOT NULL,
-        source_session TEXT,
-        superseded_by TEXT
+        rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+        id    TEXT NOT NULL UNIQUE
       );
-
-      CREATE INDEX IF NOT EXISTS idx_mem_id   ON memories(id);
-      CREATE INDEX IF NOT EXISTS idx_mem_wing ON memories(wing);
-      CREATE INDEX IF NOT EXISTS idx_mem_room ON memories(room);
-      CREATE INDEX IF NOT EXISTS idx_mem_type ON memories(type);
-
       CREATE TABLE IF NOT EXISTS vec_config (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-
       CREATE TABLE IF NOT EXISTS triples (
         id           TEXT PRIMARY KEY,
         subject      TEXT NOT NULL,
@@ -68,19 +74,14 @@ export class MemoryStore {
         source_mem   TEXT,
         created_at   TEXT NOT NULL
       );
-
-      CREATE INDEX IF NOT EXISTS idx_tri_subject   ON triples(subject);
-      CREATE INDEX IF NOT EXISTS idx_tri_object    ON triples(object);
-      CREATE INDEX IF NOT EXISTS idx_tri_predicate ON triples(predicate);
-
-      CREATE TABLE IF NOT EXISTS identity (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
+      CREATE INDEX IF NOT EXISTS idx_tri_subject ON triples(subject);
+      CREATE INDEX IF NOT EXISTS idx_tri_object  ON triples(object);
     `)
+
+    this.vec = createVectorStore(this.db)
+    this._restoreDim()
   }
 
-  /** 从 vec_config 恢复已保存的向量维度，并初始化向量后端 */
   private _restoreDim() {
     const saved = this.db.prepare("SELECT value FROM vec_config WHERE key='dim'").get() as { value: string } | undefined
     if (saved) {
@@ -89,34 +90,65 @@ export class MemoryStore {
     }
   }
 
-  /** 迁移旧数据库：补充新增列（幂等） */
-  private _migrate() {
-    try {
-      this.db.exec(`ALTER TABLE memories ADD COLUMN superseded_by TEXT`)
-    } catch { /* 列已存在，忽略 */ }
+  private _bucketPath(bucket: BucketName): string {
+    return join(this.dir, `${bucket}.jsonl`)
   }
 
-  // ── 记忆写入 ──────────────────────────────────────────────────
+  // ── JSONL 操作 ──────────────────────────────────────────────
 
-  addMemory(mem: Omit<Memory, 'id' | 'createdAt' | 'embedding'>): Memory {
+  private _loadBucket(bucket: BucketName): Memory[] {
+    const content = readFileSync(this._bucketPath(bucket), 'utf-8')
+    if (!content.trim()) return []
+    return content.split('\n').filter(Boolean).map(l => JSON.parse(l) as Memory)
+  }
+
+  private _saveBucket(bucket: BucketName, memories: Memory[]) {
+    const lines = memories.map(m => JSON.stringify(m))
+    writeFileSync(this._bucketPath(bucket), lines.join('\n') + (lines.length > 0 ? '\n' : ''), 'utf-8')
+  }
+
+  private _appendBucket(bucket: BucketName, mem: Memory) {
+    appendFileSync(this._bucketPath(bucket), JSON.stringify(mem) + '\n', 'utf-8')
+  }
+
+  /** 在桶文件内定位记忆并替换 */
+  private _updateInBucket(bucket: BucketName, id: string, updater: (m: Memory) => Memory): boolean {
+    const mems = this._loadBucket(bucket)
+    const idx = mems.findIndex(m => m.id === id)
+    if (idx === -1) return false
+    mems[idx] = updater(mems[idx])
+    this._saveBucket(bucket, mems)
+    return true
+  }
+
+  /** 在所有桶中查找记忆 */
+  private _findInAllBuckets(id: string): Memory | null {
+    for (const bucket of BUCKET_NAMES) {
+      const mems = this._loadBucket(bucket)
+      const found = mems.find(m => m.id === id)
+      if (found) return found
+    }
+    return null
+  }
+
+  // ── 记忆写入 ──────────────────────────────────────────────
+
+  addMemory(mem: Omit<Memory, 'id' | 'createdAt' | 'updatedAt'>): Memory {
     const id = `mem_${randomUUID().replace(/-/g, '').slice(0, 16)}`
-    const createdAt = new Date().toISOString()
+    const now = new Date().toISOString()
+    const full: Memory = { ...mem, id, createdAt: now, updatedAt: now }
+    const bucket = typeToBucket(mem.type)
 
-    // 写入 memories 表
-    this.db.prepare(`
-      INSERT INTO memories (id, content, type, wing, room, tags, importance, created_at, source_session)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id, mem.content, mem.type,
-      mem.wing ?? 'general', mem.room ?? 'general',
-      JSON.stringify(mem.tags ?? []),
-      mem.importance ?? 3,
-      createdAt,
-      mem.sourceSession ?? null,
-    )
+    // 写入 JSONL 桶
+    this._appendBucket(bucket, full)
 
-    void this._embedAndInsertVec(id, mem.content)
-    return { ...mem, id, createdAt }
+    // 向量映射（最小 rowid）
+    this.db.prepare('INSERT INTO memories (id) VALUES (?)').run(id)
+
+    // 异步生成向量
+    void this._embedAndInsertVec(id, full.content)
+
+    return full
   }
 
   private async _embedAndInsertVec(id: string, content: string): Promise<void> {
@@ -125,7 +157,6 @@ export class MemoryStore {
       const vec = await provider.embed(content)
       const dim = vec.length
 
-      // 首次写入时确定维度，初始化向量后端
       if (this._dim === null) {
         this._dim = dim
         this.db.prepare("INSERT OR REPLACE INTO vec_config (key, value) VALUES ('dim', ?)").run(String(dim))
@@ -133,7 +164,6 @@ export class MemoryStore {
       }
 
       if (dim !== this._dim) {
-        // 维度不匹配：记录到 audit log，不静默丢失
         const { auditLog } = await import('../core/audit.js')
         auditLog({ action: 'memory_embed_skip', resource: id, result: 'error', details: { reason: 'dim_mismatch', expected: this._dim, actual: dim } })
         return
@@ -141,18 +171,15 @@ export class MemoryStore {
 
       await this.vec.upsert(id, vec)
     } catch (err) {
-      // embedding 失败：记录到 audit log，向量索引可能不完整
       try {
         const { auditLog } = await import('../core/audit.js')
         auditLog({ action: 'memory_embed_error', resource: id, result: 'error', details: { error: String(err) } })
-      } catch { /* audit 本身失败时静默 */ }
+      } catch { /* 忽略 */ }
     }
   }
 
-  /**
-   * 向量去重：查找与给定文本相似度超过阈值的记忆
-   * 用于写入前判断是否已有重复内容
-   */
+  // ── 向量去重 ──────────────────────────────────────────────
+
   async findSimilar(content: string, threshold = 0.85, topK = 3): Promise<MemorySearchResult[]> {
     if (this._dim === null) return []
     try {
@@ -169,30 +196,25 @@ export class MemoryStore {
     }
   }
 
-  /**
-   * 更新记忆：将旧记忆标记为 superseded，写入新内容
-   * 返回新记忆，旧记忆保留但 superseded_by 指向新 id
-   */
-  updateMemory(
-    oldId: string,
-    patch: Partial<Pick<Memory, 'content' | 'type' | 'wing' | 'room' | 'importance' | 'tags'>>,
-  ): Memory | null {
+  // ── 更新/删除 ──────────────────────────────────────────────
+
+  updateMemory(oldId: string, patch: Partial<Pick<Memory, 'content' | 'type' | 'importance'>>): Memory | null {
     const old = this.getMemory(oldId)
     if (!old) return null
 
     const newMem = this.addMemory({
       content: patch.content ?? old.content,
       type: patch.type ?? old.type,
-      wing: patch.wing ?? old.wing,
-      room: patch.room ?? old.room,
+      agent: old.agent,
       importance: patch.importance ?? old.importance,
-      tags: patch.tags ?? old.tags,
       sourceSession: old.sourceSession,
     })
 
-    // 标记旧记忆为已失效
-    this.db.prepare('UPDATE memories SET superseded_by = ? WHERE id = ?').run(newMem.id, oldId)
-    // 同步删除旧向量（避免搜索时命中过时内容）
+    // 标记旧记忆为已失效（在对应桶中更新）
+    const oldBucket = typeToBucket(old.type)
+    this._updateInBucket(oldBucket, oldId, m => ({ ...m, supersededBy: newMem.id, updatedAt: new Date().toISOString() }))
+
+    // 同步删除旧向量
     void this.vec.delete(oldId)
 
     return newMem
@@ -200,42 +222,44 @@ export class MemoryStore {
 
   deleteMemory(id: string): boolean {
     void this.vec.delete(id)
-    const r = this.db.prepare('DELETE FROM memories WHERE id = ?').run(id)
-    return r.changes > 0
+    for (const bucket of BUCKET_NAMES) {
+      const mems = this._loadBucket(bucket)
+      const idx = mems.findIndex(m => m.id === id)
+      if (idx !== -1) {
+        mems.splice(idx, 1)
+        this._saveBucket(bucket, mems)
+        return true
+      }
+    }
+    return false
   }
 
   getMemory(id: string): Memory | null {
-    const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined
-    return row ? this._rowToMemory(row) : null
+    return this._findInAllBuckets(id)
   }
 
-  // ── 记忆检索 ──────────────────────────────────────────────────
+  // ── 记忆检索 ──────────────────────────────────────────────
 
-  listMemories(opts: {
-    wing?: string; room?: string; type?: MemoryType; limit?: number; includeSuperseded?: boolean
-  } = {}): Memory[] {
-    let sql = 'SELECT * FROM memories WHERE 1=1'
-    const params: unknown[] = []
-    if (!opts.includeSuperseded) { sql += ' AND superseded_by IS NULL' }
-    if (opts.wing) { sql += ' AND wing = ?'; params.push(opts.wing) }
-    if (opts.room) { sql += ' AND room = ?'; params.push(opts.room) }
-    if (opts.type) { sql += ' AND type = ?'; params.push(opts.type) }
-    sql += ' ORDER BY importance DESC, created_at DESC LIMIT ?'
-    params.push(opts.limit ?? 50)
-    return (this.db.prepare(sql).all(...params) as Record<string, unknown>[]).map(r => this._rowToMemory(r))
+  /** 获取所有活跃记忆（未被取代） */
+  getActiveMemories(agent?: string): Memory[] {
+    const all: Memory[] = []
+    for (const bucket of BUCKET_NAMES) {
+      all.push(...this._loadBucket(bucket).filter(m => !m.supersededBy))
+    }
+    if (agent) return all.filter(m => m.agent === agent)
+    return all
   }
 
-  /**
-   * L3 语义搜索 —— 使用 sqlite-vec 的 KNN MATCH 查询
-   * 有向量索引时：O(log n) HNSW 近似最近邻
-   * 无向量索引时（embedding 未就绪）：关键词匹配降级
-   */
-  async search(query: string, opts: {
-    wing?: string; room?: string; topK?: number
-  } = {}): Promise<MemorySearchResult[]> {
+  listMemories(opts: { agent?: string; type?: MemoryType; limit?: number } = {}): Memory[] {
+    let mems = this.getActiveMemories(opts.agent)
+    if (opts.type) mems = mems.filter(m => m.type === opts.type)
+    mems.sort((a, b) => b.importance - a.importance || b.createdAt.localeCompare(a.createdAt))
+    return mems.slice(0, opts.limit ?? 50)
+  }
+
+  async search(query: string, opts: { topK?: number } = {}): Promise<MemorySearchResult[]> {
     const topK = opts.topK ?? 5
 
-    // 尝试向量搜索
     if (this._dim !== null) {
       try {
         const provider = getEmbeddingProvider()
@@ -245,9 +269,7 @@ export class MemoryStore {
           const results: MemorySearchResult[] = []
           for (const { id, score } of hits) {
             const mem = this.getMemory(id)
-            if (!mem) continue
-            if (opts.wing && mem.wing !== opts.wing) continue
-            if (opts.room && mem.room !== opts.room) continue
+            if (!mem || mem.supersededBy) continue
             results.push({ memory: mem, score })
             if (results.length >= topK) break
           }
@@ -256,24 +278,16 @@ export class MemoryStore {
       } catch { /* 降级 */ }
     }
 
-    // 降级：关键词匹配
-    return this._keywordSearch(query, opts.wing, opts.room, topK)
+    return this._keywordSearch(query, topK)
   }
 
-  /** 关键词匹配降级（无向量时使用） */
-  private _keywordSearch(
-    query: string, wing?: string, room?: string, topK = 5
-  ): MemorySearchResult[] {
-    const candidates = this.listMemories({ wing, room, limit: 200 })
-    const queryWords = new Set(
-      query.toLowerCase().split(/\s+/).filter(w => w.length > 1)
-    )
+  private _keywordSearch(query: string, topK = 5): MemorySearchResult[] {
+    const candidates = this.getActiveMemories()
+    const queryWords = new Set(query.toLowerCase().split(/\s+/).filter(w => w.length > 1))
 
     return candidates
       .map(mem => {
-        const contentWords = new Set(
-          mem.content.toLowerCase().split(/\s+/).filter(w => w.length > 1)
-        )
+        const contentWords = new Set(mem.content.toLowerCase().split(/\s+/).filter(w => w.length > 1))
         const intersection = [...queryWords].filter(w => contentWords.has(w)).length
         const score = intersection / Math.max(queryWords.size, 1) * 0.5
         return { memory: mem, score }
@@ -283,34 +297,33 @@ export class MemoryStore {
       .slice(0, topK)
   }
 
-  /** L1 核心摘要：按时间衰减重要性排序，过滤已失效记忆 */
-  getEssentialStory(wing?: string, maxItems = 15, maxChars = 3200): string {
-    const mems = this.listMemories({ wing, limit: 100 }) // 已自动过滤 superseded
+  // ── 核心摘要 ──────────────────────────────────────────────
 
-    if (mems.length === 0) return '## L1 — 暂无记忆。'
+  getEssentialStory(agent?: string, maxItems = 15, maxChars = 3200): string {
+    const mems = this.getActiveMemories(agent)
+    if (mems.length === 0) return '暂无记忆。'
 
-    // 时间衰减：90天半衰期，近期记忆权重更高
     const now = Date.now()
     const scored = mems.map(m => {
-      const ageDays = (now - new Date(m.createdAt).getTime()) / 86_400_000
+      const ageDays = (now - new Date(m.updatedAt || m.createdAt).getTime()) / 86_400_000
       const decayed = m.importance * Math.exp(-ageDays / 90)
       return { m, decayed }
     }).sort((a, b) => b.decayed - a.decayed).slice(0, maxItems)
 
-    const byRoom = new Map<string, Memory[]>()
+    const byType = new Map<string, Memory[]>()
     for (const { m } of scored) {
-      const list = byRoom.get(m.room) ?? []
+      const list = byType.get(m.type) ?? []
       list.push(m)
-      byRoom.set(m.room, list)
+      byType.set(m.type, list)
     }
 
-    const lines = ['## L1 — 核心记忆']
+    const lines = ['## 核心记忆']
     let total = 0
-    for (const [room, items] of byRoom) {
-      lines.push(`\n[${room}]`)
+    for (const [type, items] of byType) {
+      lines.push(`\n[${type}]`)
       for (const m of items) {
         const snippet = m.content.replace(/\n/g, ' ').slice(0, 200)
-        const entry = `  - [${m.type}] ${snippet}`
+        const entry = `  - ${snippet}`
         if (total + entry.length > maxChars) {
           lines.push('  ... (更多记忆可通过搜索获取)')
           return lines.join('\n')
@@ -322,7 +335,7 @@ export class MemoryStore {
     return lines.join('\n')
   }
 
-  // ── 知识图谱 ──────────────────────────────────────────────────
+  // ── 知识图谱 ──────────────────────────────────────────────
 
   addTriple(
     subject: string, predicate: string, object: string,
@@ -386,66 +399,40 @@ export class MemoryStore {
     return row ? this._rowToTriple(row) : null
   }
 
-  // ── 身份（L0）────────────────────────────────────────────────
-
-  setIdentity(key: string, value: string) {
-    this.db.prepare('INSERT OR REPLACE INTO identity (key, value) VALUES (?, ?)').run(key, value)
-  }
-
-  getIdentity(key: string): string | null {
-    const row = this.db.prepare('SELECT value FROM identity WHERE key=?').get(key) as { value: string } | undefined
-    return row?.value ?? null
-  }
-
-  getIdentityText(): string {
-    const rows = this.db.prepare('SELECT key, value FROM identity ORDER BY key').all() as { key: string; value: string }[]
-    if (rows.length === 0) return '## L0 — 身份\n尚未配置身份信息。'
-    const lines = ['## L0 — 身份']
-    for (const { key, value } of rows) lines.push(`${key}: ${value}`)
-    return lines.join('\n')
-  }
-
-  // ── 统计 ─────────────────────────────────────────────────────
+  // ── 统计 ──────────────────────────────────────────────────
 
   async stats() {
-    const total = (this.db.prepare('SELECT COUNT(*) as c FROM memories').get() as { c: number }).c
-    const byType = this.db.prepare('SELECT type, COUNT(*) as c FROM memories GROUP BY type').all() as { type: string; c: number }[]
-    const triples = (this.db.prepare('SELECT COUNT(*) as c FROM triples WHERE valid_to IS NULL').get() as { c: number }).c
-    const wings = this.db.prepare('SELECT DISTINCT wing FROM memories').all() as { wing: string }[]
+    let total = 0
+    for (const bucket of BUCKET_NAMES) {
+      total += this._loadBucket(bucket).length
+    }
 
     let vecCount = 0
     if (this._dim !== null) {
       vecCount = await this.vec.count()
     }
 
+    const byType: Record<string, number> = {}
+    for (const bucket of BUCKET_NAMES) {
+      for (const m of this._loadBucket(bucket)) {
+        byType[m.type] = (byType[m.type] ?? 0) + 1
+      }
+    }
+
+    const triples = (this.db.prepare('SELECT COUNT(*) as c FROM triples WHERE valid_to IS NULL').get() as { c: number }).c
+
     return {
       totalMemories: total,
       indexedVectors: vecCount,
-      byType: Object.fromEntries(byType.map(r => [r.type, r.c])),
+      byType,
       activeTriples: triples,
-      wings: wings.map(r => r.wing),
       embeddingDim: this._dim,
     }
   }
 
   close() { this.db.close() }
 
-  // ── 私有转换 ─────────────────────────────────────────────────
-
-  private _rowToMemory(row: Record<string, unknown>): Memory {
-    return {
-      id: row.id as string,
-      content: row.content as string,
-      type: row.type as MemoryType,
-      wing: row.wing as string,
-      room: row.room as string,
-      tags: JSON.parse(row.tags as string ?? '[]'),
-      importance: row.importance as number,
-      createdAt: row.created_at as string,
-      sourceSession: row.source_session as string | undefined,
-      supersededBy: row.superseded_by as string | undefined,
-    }
-  }
+  // ── 私有辅助 ──────────────────────────────────────────────
 
   private _rowToTriple(row: Record<string, unknown>): Triple {
     return {
@@ -462,33 +449,87 @@ export class MemoryStore {
   }
 }
 
-// 全局单例（CLI 模式 / 默认路径）
+// ── 单例管理 ──────────────────────────────────────────────────
+
 let _store: MemoryStore | null = null
 export function getMemoryStore(): MemoryStore {
-  if (!_store) _store = new MemoryStore()
+  if (!_store) _store = new MemoryStore('main')
   return _store
 }
 
-// 会话级实例注册表（Gateway 多会话模式）
 const _sessionStores = new Map<string, MemoryStore>()
 
-/** Gateway 模式：为指定会话创建独立的 MemoryStore（独立 SQLite 文件） */
 export function getMemoryStoreForSession(sessionId: string): MemoryStore {
   let store = _sessionStores.get(sessionId)
   if (!store) {
-    const sessionDir = join(STORE_DIR, 'sessions', sessionId)
-    if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
-    store = new MemoryStore(join(sessionDir, 'palace.db'))
+    store = new MemoryStore('main')
     _sessionStores.set(sessionId, store)
   }
   return store
 }
 
-/** Gateway 模式：销毁会话的 MemoryStore，释放 SQLite 连接 */
 export function destroyMemoryStoreForSession(sessionId: string): void {
   const store = _sessionStores.get(sessionId)
   if (store) {
-    try { store.close() } catch { /* 忽略关闭错误 */ }
+    try { store.close() } catch { /* 忽略 */ }
     _sessionStores.delete(sessionId)
+  }
+}
+
+// ── 旧数据库迁移 ──────────────────────────────────────────────
+
+export function migrateOldMemoryStore(): boolean {
+  const oldDbPath = join(getConfigDir(), 'memory', 'palace.db')
+  const newDir = getAgentMemoryDir('main')
+
+  if (!existsSync(oldDbPath)) return false
+  if (existsSync(join(newDir, 'index.db'))) return false
+
+  if (!existsSync(newDir)) mkdirSync(newDir, { recursive: true })
+
+  try {
+    // 读取旧数据库中的记忆，转换为新格式并写入 JSONL
+    const oldDb = new Database(oldDbPath, { readonly: true })
+    const rows = oldDb.prepare('SELECT * FROM memories WHERE superseded_by IS NULL').all() as Record<string, unknown>[]
+
+    const bucketMap: Record<string, Memory[]> = { facts: [], preferences: [], decisions: [] }
+
+    for (const row of rows) {
+      const type = row.type as string
+      let bucket: BucketName
+      if (type === 'preference') bucket = 'preferences'
+      else if (type === 'decision') bucket = 'decisions'
+      else bucket = 'facts'
+
+      const mem: Memory = {
+        id: row.id as string,
+        content: row.content as string,
+        type: type as MemoryType,
+        agent: 'main',
+        importance: row.importance as number,
+        createdAt: row.created_at as string,
+        updatedAt: row.created_at as string,
+        sourceSession: row.source_session as string | undefined,
+      }
+      bucketMap[bucket].push(mem)
+    }
+
+    for (const [bucket, mems] of Object.entries(bucketMap)) {
+      if (mems.length > 0) {
+        const lines = mems.map(m => JSON.stringify(m))
+        writeFileSync(join(newDir, `${bucket}.jsonl`), lines.join('\n') + '\n', 'utf-8')
+      }
+    }
+
+    oldDb.close()
+
+    // 复制旧数据库为 index.db（保留向量和三元组）
+    copyFileSync(oldDbPath, join(newDir, 'index.db'))
+
+    console.log('[memory] 已从旧格式迁移记忆数据到 JSONL + index.db')
+    return true
+  } catch (err) {
+    console.error('[memory] 迁移失败:', err)
+    return false
   }
 }

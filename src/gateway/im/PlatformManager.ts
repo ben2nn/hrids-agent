@@ -24,7 +24,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { join, resolve } from 'path'
-import { homedir } from 'os'
+import { getConfigDir } from '../../core/Config.js'
 import { logger } from '../../core/logger.js'
 import type { SessionManager } from '../SessionManager.js'
 import { BasePlatformAdapter, buildIMSessionKey } from './BasePlatformAdapter.js'
@@ -47,9 +47,9 @@ import type {
 const log = logger.child({ component: 'im-platform-manager' })
 
 // IM 会话 key → agent session ID 的持久化映射文件
-const IM_SESSIONS_FILE = join(homedir(), '.hrids-agent', 'im-sessions.json')
+const IM_SESSIONS_FILE = join(getConfigDir(), 'im-sessions.json')
 // IM 平台配置文件
-const IM_CONFIG_FILE = join(homedir(), '.hrids-agent', 'im-platforms.json')
+const IM_CONFIG_FILE = join(getConfigDir(), 'im-platforms.json')
 
 // ── 流式输出缓冲器（每个 IM 会话独立）────────────────────────────────────────
 interface StreamBuffer {
@@ -121,7 +121,7 @@ export class PlatformManager {
   }
 
   static saveConfig(config: IMGatewayConfig): void {
-    const dir = join(homedir(), '.hrids-agent')
+    const dir = getConfigDir()
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     const tmp = IM_CONFIG_FILE + '.tmp'
     writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf-8')
@@ -844,7 +844,7 @@ export class PlatformManager {
    * 与 server.ts 的 GET /config/zhile-session 端点读取同一文件。
    */
   private getZhileSessionId(): string | null {
-    const file = join(homedir(), '.hrids-agent', 'zhile-session.json')
+    const file = join(getConfigDir(), 'zhile-session.json')
     if (!existsSync(file)) return null
     try {
       const data = JSON.parse(readFileSync(file, 'utf-8')) as { sessionId?: string }
@@ -936,7 +936,7 @@ export class PlatformManager {
 
   private saveIMSessions(): void {
     try {
-      const dir = join(homedir(), '.hrids-agent')
+      const dir = getConfigDir()
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
       const data = Object.fromEntries(this.imSessionMap)
       const tmp = IM_SESSIONS_FILE + '.tmp'

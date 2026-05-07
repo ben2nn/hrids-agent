@@ -4,12 +4,10 @@ import type { ToolDef } from '../core/Tool.js'
 import { getMemoryStack } from './layers.js'
 import { getMemoryStore } from './store.js'
 
-/** 获取全局 MemoryStack（记忆跨会话共享，会话 ID 仅作来源标记） */
 function resolveStack() {
   return getMemoryStack()
 }
 
-/** 获取全局 MemoryStore（记忆跨会话共享，会话 ID 仅作来源标记） */
 function resolveStore() {
   return getMemoryStore()
 }
@@ -18,12 +16,9 @@ function resolveStore() {
 
 const addSchema = z.object({
   content: z.string().describe('要记住的内容（原始文本）'),
-  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'emotional', 'fact'])
-    .describe('记忆类型：decision=决策, preference=偏好, milestone=里程碑, problem=问题, emotional=情感, fact=事实'),
-  wing: z.string().optional().describe('所属项目/领域（如 my-project, coding, personal）'),
-  room: z.string().optional().describe('所属主题（如 architecture, auth, deployment）'),
+  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'fact'])
+    .describe('记忆类型：decision=决策, preference=偏好, milestone=里程碑, problem=问题, fact=事实'),
   importance: z.number().optional().describe('重要性 1-5，默认 3'),
-  tags: z.array(z.string()).optional().describe('标签列表'),
 })
 
 export const MemoryAddTool: ToolDef<typeof addSchema> = {
@@ -48,10 +43,8 @@ export const MemoryAddTool: ToolDef<typeof addSchema> = {
       const mem = store.addMemory({
         content: input.content,
         type: input.type,
-        wing: input.wing ?? 'general',
-        room: input.room ?? 'general',
+        agent: 'main',
         importance: input.importance ?? 3,
-        tags: input.tags ?? [],
       })
       return { type: 'success', output: `已记住（ID: ${mem.id}，类型: ${mem.type}）` }
     } catch (err) {
@@ -64,8 +57,6 @@ export const MemoryAddTool: ToolDef<typeof addSchema> = {
 
 const searchSchema = z.object({
   query: z.string().describe('搜索查询'),
-  wing: z.string().optional().describe('限定搜索范围的项目/领域'),
-  room: z.string().optional().describe('限定搜索范围的主题'),
   topK: z.number().optional().describe('返回结果数量，默认 5'),
 })
 
@@ -83,8 +74,6 @@ export const MemorySearchTool: ToolDef<typeof searchSchema> = {
     try {
       const stack = resolveStack()
       const text = await stack.searchText(input.query, {
-        wing: input.wing,
-        room: input.room,
         topK: input.topK ?? 5,
       })
       return { type: 'success', output: text }
@@ -97,25 +86,24 @@ export const MemorySearchTool: ToolDef<typeof searchSchema> = {
 // ── memory_recall ────────────────────────────────────────────
 
 const recallSchema = z.object({
-  wing: z.string().optional().describe('项目/领域'),
-  room: z.string().optional().describe('主题'),
+  agent: z.string().optional().describe('智能体名称'),
   limit: z.number().optional().describe('最多返回条数，默认 10'),
 })
 
 export const MemoryRecallTool: ToolDef<typeof recallSchema> = {
   name: 'memory_recall',
-  description: '列出特定项目或主题下的记忆（L2 按需检索）。',
+  description: '列出记忆条目（按重要性排序）。',
   inputSchema: recallSchema,
   readonly: true,
 
   describe(input) {
-    return `回忆: ${[input.wing, input.room].filter(Boolean).join('/') || '全部'}`
+    return `回忆: ${input.agent ?? '全部'}`
   },
 
   async execute(input) {
     try {
       const stack = resolveStack()
-      const text = stack.recall({ wing: input.wing, room: input.room, limit: input.limit })
+      const text = stack.recall({ agent: input.agent, limit: input.limit })
       return { type: 'success', output: text }
     } catch (err) {
       return { type: 'error', message: String(err) }
@@ -162,7 +150,7 @@ export const MemoryFactTool: ToolDef<typeof factSchema> = {
 const updateSchema = z.object({
   oldId: z.string().describe('要替换的旧记忆 ID（从 memory_search 或 memory_recall 结果中获取）'),
   content: z.string().describe('新的记忆内容'),
-  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'emotional', 'fact']).optional()
+  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'fact']).optional()
     .describe('新的记忆类型（不填则保持原类型）'),
   importance: z.number().optional().describe('新的重要性 1-5'),
 })
@@ -218,7 +206,6 @@ export const MemoryStatusTool: ToolDef<typeof statusSchema> = {
       const lines = [
         `记忆总数: ${stats.totalMemories}`,
         `活跃事实: ${stats.activeTriples}`,
-        `项目翼: ${stats.wings.join(', ') || '无'}`,
         '类型分布:',
         ...Object.entries(stats.byType).map(([t, c]) => `  ${t}: ${c}`),
       ]

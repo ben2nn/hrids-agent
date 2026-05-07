@@ -1,15 +1,15 @@
 // SkillHubTool —— 从 SkillHub 搜索、推荐和安装技能
 // SkillHub 是腾讯云优化的 AI Skills 社区（https://skillhub.cloud.tencent.com）
-// 技能安装后放入 ~/.hrids-agent/skills/，由 SkillRegistry 自动加载
+// 技能安装后放入 ~/.hrids/skills/，由 SkillRegistry 自动加载
 
 import { z } from 'zod'
 import { createRequire } from 'module'
 import { readFileSync, existsSync, writeFileSync, mkdirSync, cpSync, rmSync } from 'fs'
 import { resolve, join } from 'path'
-import { homedir } from 'os'
 import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { getGlobalCwd } from '../core/cwd.js'
+import { getConfigDir } from '../core/Config.js'
 
 const _require = createRequire(import.meta.url)
 
@@ -21,7 +21,7 @@ const DEFAULT_SKILLHUB_URL = 'https://skillhub.cn'
 const DEFAULT_SKILLHUB_API = 'https://api.skillhub.cn'
 
 function getUserSkillsDir(): string {
-  return join(homedir(), '.hrids-agent', 'skills')
+  return join(getConfigDir(), 'skills')
 }
 
 function getProjectSkillsDir(): string {
@@ -151,9 +151,9 @@ const configSchema = z.object({
 
 export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
   name: 'skillhub_config',
-  description: `查看或修改 SkillHub 的地址配置（写入 ~/.hrids-agent/config.json）。
+  description: `查看或修改 SkillHub 的地址配置（写入 ~/.hrids/config.yaml）。
 
-配置项（config.json 中的 skillHub 字段）：
+配置项（config.yaml 中的 skillHub 字段）：
 - url        SkillHub 前端地址（默认 https://skillhub.cn）
 - apiBase    SkillHub API 基础地址（默认 https://api.skillhub.cn）`,
   inputSchema: configSchema,
@@ -171,7 +171,7 @@ export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
       return {
         type: 'success',
         output: [
-          '当前 SkillHub 配置（来自 config.json）：',
+          '当前 SkillHub 配置（来自 config.yaml）：',
           `  url:     ${cfg.url ?? DEFAULT_SKILLHUB_URL}（${cfg.url ? '已自定义' : '默认值'}）`,
           `  apiBase: ${cfg.apiBase ?? DEFAULT_SKILLHUB_API}（${cfg.apiBase ? '已自定义' : '默认值'}）`,
           '',
@@ -190,11 +190,11 @@ export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
     if (input.skillhub_api_base) updates.apiBase = input.skillhub_api_base
 
     saveConfig({ skillHub: { ...loadConfig().skillHub, ...updates } })
-    auditLog({ action: 'skillhub_config_set', resource: 'config.json', result: 'allowed', details: updates })
+    auditLog({ action: 'skillhub_config_set', resource: 'config.yaml', result: 'allowed', details: updates })
 
     return {
       type: 'success',
-      output: `✓ SkillHub 配置已写入 config.json：\n${Object.entries(updates).map(([k, v]) => `  ${k}=${v}`).join('\n')}\n\n配置立即生效，无需重启。`,
+      output: `✓ SkillHub 配置已写入 config.yaml：\n${Object.entries(updates).map(([k, v]) => `  ${k}=${v}`).join('\n')}\n\n配置立即生效，无需重启。`,
     }
   },
 }
@@ -331,7 +331,7 @@ export const SkillHubSearchTool: ToolDef<typeof searchSchema> = {
   name: 'skillhub_search',
   description: `在 SkillHub 上搜索可用的 AI 技能（收录 3.4 万个）。
 通过 JSON API 搜索，不依赖页面渲染，网络可达即可使用。
-搜索后可用 skillhub_install 安装技能到 ~/.hrids-agent/skills/。`,
+搜索后可用 skillhub_install 安装技能到 ~/.hrids/skills/。`,
   inputSchema: searchSchema,
   readonly: true,
 
@@ -422,7 +422,7 @@ export const SkillHubSearchTool: ToolDef<typeof searchSchema> = {
 const installSchema = z.object({
   skill_id: z.string().describe('技能 ID，例如 "github"、"tencent-meeting-skill"'),
   scope: z.enum(['user', 'project']).default('user').describe(
-    'user（默认）= 安装到 ~/.hrids-agent/skills/；project = 安装到 .agent/skills/',
+    'user（默认）= 安装到 ~/.hrids/skills/；project = 安装到 .agent/skills/',
   ),
   force: z.boolean().default(false).describe('是否覆盖已存在的同名技能'),
 })
@@ -435,13 +435,13 @@ export const SkillHubInstallTool: ToolDef<typeof installSchema> = {
 安装后技能立即可用，可通过 skill <技能名> 调用。
 
 安装位置：
-- user（默认）：~/.hrids-agent/skills/<技能名>/SKILL.md
+- user（默认）：~/.hrids/skills/<技能名>/SKILL.md
 - project：.agent/skills/<技能名>/SKILL.md`,
   inputSchema: installSchema,
   readonly: false,
 
   describe(input) {
-    return `从 SkillHub 安装技能: ${input.skill_id} → ${input.scope === 'user' ? '~/.hrids-agent/skills/' : '.agent/skills/'}`
+    return `从 SkillHub 安装技能: ${input.skill_id} → ${input.scope === 'user' ? '~/.hrids/skills/' : '.agent/skills/'}`
   },
 
   async execute(input) {
@@ -718,7 +718,7 @@ async function tryInstallViaCli(
   try {
     execSync(cmd, { cwd, timeout: 60000, encoding: 'utf-8', env: { ...process.env } })
 
-    // user 级别：将 CLI 安装的文件从 .agent/skills/ 移动到 ~/.hrids-agent/skills/
+    // user 级别：将 CLI 安装的文件从 .agent/skills/ 移动到 ~/.hrids/skills/
     if (scope === 'user' && existsSync(cliDefaultDir)) {
       mkdirSync(getUserSkillsDir(), { recursive: true })
       cpSync(cliDefaultDir, targetDir, { recursive: true, force: true })
@@ -965,7 +965,7 @@ function extractUpdateManifestInfo(manifest: Record<string, unknown>): { version
 
 const listSchema = z.object({
   scope: z.enum(['user', 'project', 'all']).default('all').describe(
-    'user = ~/.hrids-agent/skills/；project = .agent/skills/；all（默认）= 两者都列出',
+    'user = ~/.hrids/skills/；project = .agent/skills/；all（默认）= 两者都列出',
   ),
 })
 
@@ -1030,7 +1030,7 @@ export const SkillHubListTool: ToolDef<typeof listSchema> = {
 const uninstallSchema = z.object({
   skill_id: z.string().describe('要卸载的技能 ID（slug），例如 "github"'),
   scope: z.enum(['user', 'project']).default('user').describe(
-    'user（默认）= 从 ~/.hrids-agent/skills/ 卸载；project = 从 .agent/skills/ 卸载',
+    'user（默认）= 从 ~/.hrids/skills/ 卸载；project = 从 .agent/skills/ 卸载',
   ),
 })
 
@@ -1107,7 +1107,7 @@ export const SkillHubUninstallTool: ToolDef<typeof uninstallSchema> = {
 const upgradeSchema = z.object({
   skill_id: z.string().optional().describe('指定要升级的技能 ID；留空则升级所有已安装技能'),
   scope: z.enum(['user', 'project']).default('user').describe(
-    'user（默认）= ~/.hrids-agent/skills/；project = .agent/skills/',
+    'user（默认）= ~/.hrids/skills/；project = .agent/skills/',
   ),
   check_only: z.boolean().default(false).describe('仅检查可用更新，不实际安装'),
 })

@@ -4,6 +4,7 @@ import { AgentPool, type AgentTask } from './AgentPool.js'
 import { MessageBus } from './MessageBus.js'
 import type { LLMProvider } from '../providers/index.js'
 import type { ToolDef } from '../Tool.js'
+import type { AgentProfile } from '../Config.js'
 
 export interface TeamConfig {
   name: string
@@ -118,6 +119,7 @@ export class TeamManager {
     prompt: string,
     systemPrompt?: string[],
     allowedTools?: string[],
+    profile?: AgentProfile,
   ): string {
     const team = this.teams.get(teamName)
     if (!team) throw new Error(`团队 "${teamName}" 不存在`)
@@ -126,7 +128,7 @@ export class TeamManager {
 专注完成分配的任务，可以通过 send_message 工具与团队其他成员通信。`]
 
     // 传入父会话 ID，子智能体将继承父会话的记忆而非全局记忆
-    const id = team.pool.submit(agentName, description, prompt, sp, allowedTools, this.sessionId)
+    const id = team.pool.submit(agentName, description, prompt, sp, allowedTools, this.sessionId, profile)
     team.agentIds.push(id)
     return id
   }

@@ -1,18 +1,23 @@
 // 通用工作者协调器 system prompt
 //
 // 分层设计：
-//   静态层（STATIC_SECTIONS）—— 内容固定，适合 API 缓存，逐元素打 cache_control
-//   工具速查层               —— 根据实际工具列表动态生成（含 MCP 工具自动分组）
-//   扩展层（EXT_*）          —— 按任务类型按需注入，追加到数组末尾（不缓存）
-//   动态层                   —— 工作目录、时间、Git 状态由 ContextBuilder 注入（不缓存）
+//   静态层（8 个 section）—— 优先从 ~/.hrids/agents/main/*.md 加载，文件不存在时回退到代码默认值
+//   工具速查层             —— 根据实际工具列表动态生成（含 MCP 工具自动分组）
+//   扩展层（EXT_*）        —— 按任务类型按需注入，追加到数组末尾（不缓存）
+//   动态层                 —— 工作目录、时间、Git 状态由 ContextBuilder 注入（不缓存）
 //
-// 重构原则：
-//   - 静态层只放"每次请求都需要"的核心规则，控制在 ~600 字以内
-//   - 任务状态机（todo 详细规则）移到 EXT_TASK，只在多步骤任务时注入
-//   - 豁免判断只在一处定义（SECTION_EXECUTION），消除重复
-//   - 工具速查动态化，避免提到用户没有的工具
+// 文件映射：
+//   IDENTITY.md   ← SECTION_INTRO
+//   SOUL.md       ← SECTION_EXECUTION + SECTION_ACTIONS + SECTION_FILE_PATH
+//   BOOTSTRAP.md  ← SECTION_TODO + EXT_TASK
+//   TOOLS.md      ← SECTION_TOOLS
+//   USER.md       ← SECTION_DECISION + SECTION_OUTPUT + SECTION_COREFERENCE
+//   AGENTS.md     ← EXT_AGENT（始终加载）
+//   MEMORY.md     ← EXT_MEMORY（始终加载）
+//   HEARTBEAT.md  ← 新增（预留）
 
 import type { ToolDef } from '../Tool.js'
+import { loadPromptFile } from './PromptLoader.js'
 
 const SHELL_TOOL_NAME = process.platform === 'win32' ? 'powershell' : 'bash'
 
@@ -116,21 +121,15 @@ const SECTION_COREFERENCE = `# 指代解析规则
  - 用户说"继续" / "接着做" → 继续最近一次未完成的任务，不要询问继续什么
  - 用户说"改一下" / "优化一下" → 对最近一次输出的内容进行修改`
 
-/** 静态层：所有固定内容，顺序固定，适合 API 逐元素缓存。 */
-const STATIC_SECTIONS: string[] = [
-  SECTION_INTRO,
-  SECTION_EXECUTION,
-  SECTION_ACTIONS,
-  SECTION_TOOLS,
-  SECTION_TODO,
-  SECTION_DECISION,
-  SECTION_FILE_PATH,
-  SECTION_OUTPUT,
-  SECTION_COREFERENCE,
-]
+// ─────────────────────────────────────────────
+// 文件加载静态层 + 默认值导出（在 EXT_* 定义之后）
+// ─────────────────────────────────────────────
+
+/** 静态 section 定义顺序：5 + 3 = 8 个 */
+const STATIC_FILE_NAMES = ['IDENTITY', 'SOUL', 'BOOTSTRAP', 'TOOLS', 'USER', 'AGENTS', 'MEMORY', 'HEARTBEAT'] as const
 
 /** 静态层元素数量，供 AnthropicProvider 判断缓存边界 */
-export const STATIC_SECTION_COUNT = STATIC_SECTIONS.length
+export const STATIC_SECTION_COUNT = STATIC_FILE_NAMES.length
 
 // ─────────────────────────────────────────────
 // 动态工具速查：根据实际工具列表生成，含 MCP 工具分组
@@ -493,6 +492,55 @@ const EXTENSIONS: Record<TaskType, PromptExtension> = {
 }
 
 // ─────────────────────────────────────────────
+// 文件加载静态层 + 默认值导出
+// ─────────────────────────────────────────────
+
+/** 文件名 → 默认内容映射。供 init 命令生成初始 .md 文件。 */
+export const DEFAULT_MAIN_AGENT_FILES: Record<string, string> = {
+  IDENTITY: SECTION_INTRO,
+  SOUL: [SECTION_EXECUTION, SECTION_ACTIONS, SECTION_FILE_PATH].join('\n\n'),
+  BOOTSTRAP: [SECTION_TODO, EXT_TASK.content].join('\n\n'),
+  TOOLS: SECTION_TOOLS,
+  USER: [SECTION_DECISION, SECTION_OUTPUT, SECTION_COREFERENCE].join('\n\n'),
+  AGENTS: EXT_AGENT.content,
+  MEMORY: EXT_MEMORY.content,
+  HEARTBEAT: '# 心跳 / 续接\n\n（预留，后续完善）',
+}
+
+/**
+ * 加载静态层 section。优先从文件加载，不存在时回退到代码默认值。
+ * 返回 8 个 section 字符串。
+ */
+function loadStaticSections(): string[] {
+  return STATIC_FILE_NAMES.map(name => loadPromptFile(name) ?? DEFAULT_MAIN_AGENT_FILES[name] ?? '')
+}
+
+// ─────────────────────────────────────────────
+// Profile 速查：向 coordinator 展示可用智能体角色
+// ─────────────────────────────────────────────
+
+/**
+ * 根据可用 profiles 列表生成 profile 速查 section。
+ * 仅展示 autoSelectable 不为 false 的 profile。
+ */
+function buildProfilesReferenceSection(
+  profiles: Array<{ name: string; description: string; tags?: string[]; model?: string; autoSelectable?: boolean }>,
+): string {
+  const selectable = profiles.filter(p => p.autoSelectable !== false)
+  if (selectable.length === 0) return ''
+
+  const lines: string[] = ['# 可用智能体角色']
+  for (const p of selectable) {
+    const modelHint = p.model ? ` (模型: ${p.model})` : ''
+    const tagsHint = p.tags && p.tags.length > 0 ? ` [${p.tags.join(', ')}]` : ''
+    lines.push(` - **${p.name}**${tagsHint}: ${p.description}${modelHint}`)
+  }
+  lines.push('')
+  lines.push('使用 agent 或 agent_spawn 工具时，传入 profile 参数指定角色。coordinator 可根据任务类型自动匹配最合适的 profile。')
+  return lines.join('\n')
+}
+
+// ─────────────────────────────────────────────
 // 公开 API
 // ─────────────────────────────────────────────
 
@@ -514,6 +562,7 @@ export function getCoordinatorSystemPrompt(
   message?: string,
   tools?: readonly ToolDef[],
   forceExtensions?: TaskType[],
+  profiles?: Array<{ name: string; description: string; tags?: string[]; model?: string; autoSelectable?: boolean }>,
 ): string[] {
   const toolsRefSection = tools && tools.length > 0
     ? buildToolsReferenceSection(tools)
@@ -522,7 +571,13 @@ export function getCoordinatorSystemPrompt(
   const types = forceExtensions ?? (message ? classifyTask(message) : [])
   const extensions = types.map(t => EXTENSIONS[t].content)
 
-  return [...STATIC_SECTIONS, toolsRefSection, ...extensions]
+  const sections = [...loadStaticSections(), toolsRefSection, ...extensions]
+
+  if (profiles && profiles.length > 0) {
+    sections.push(buildProfilesReferenceSection(profiles))
+  }
+
+  return sections
 }
 
 /**

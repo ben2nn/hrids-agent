@@ -11,8 +11,7 @@ import { logger } from '../core/logger.js'
 import type { CreateSessionRequest } from './types.js'
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, renameSync } from 'fs'
 import { resolve, join, basename, extname } from 'path'
-import { homedir } from 'os'
-import { loadConfig, saveConfig } from '../core/Config.js'
+import { loadConfig, saveConfig, getConfigDir } from '../core/Config.js'
 import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
 import { PlatformManager } from './im/PlatformManager.js'
@@ -516,7 +515,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /config/zhile-session — 读取知了专属会话 ID
   app.get('/config/zhile-session', (_req, res) => {
-    const file = join(homedir(), '.hrids-agent', 'zhile-session.json')
+    const file = join(getConfigDir(), 'zhile-session.json')
     if (!existsSync(file)) { res.json({ sessionId: null }); return }
     try {
       const data = JSON.parse(readFileSync(file, 'utf-8')) as { sessionId?: string }
@@ -528,7 +527,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // PUT /config/zhile-session — 保存知了专属会话 ID
   app.put('/config/zhile-session', (req, res) => {
-    const dir = join(homedir(), '.hrids-agent')
+    const dir = getConfigDir()
     const file = join(dir, 'zhile-session.json')
     try {
       const body = req.body as { sessionId?: string | null }
@@ -547,7 +546,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const cfg = loadConfig()
       const defaultModel = cfg.model
 
-      // 从 config.json 的 llm.fallbacks 读取模型列表
+      // 从 config.yaml 的 llm.fallbacks 读取模型列表
       for (const group of cfg.llm?.fallbacks ?? []) {
         for (const m of group.models) {
           models.push({ provider: group.provider, model: m, isDefault: m === defaultModel })
@@ -960,7 +959,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /crons — 读取定时任务列表
   app.get('/crons', (_req, res) => {
-    const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
+    const cronFile = join(getConfigDir(), 'crons.json')
     if (!existsSync(cronFile)) {
       res.json([])
       return
@@ -975,7 +974,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // PUT /crons/:id/toggle — 启用/禁用定时任务（同步更新文件和内存调度器）
   app.put('/crons/:id/toggle', async (req, res) => {
-    const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
+    const cronFile = join(getConfigDir(), 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
       return
@@ -1005,7 +1004,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // DELETE /crons/:id — 删除定时任务（同步清除内存调度器中的 timer）
   app.delete('/crons/:id', async (req, res) => {
-    const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
+    const cronFile = join(getConfigDir(), 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
       return
@@ -1033,7 +1032,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // POST /crons — 创建定时任务（前端直接创建，不经过 Agent）
   app.post('/crons', async (req, res) => {
-    const cronDir = join(homedir(), '.hrids-agent')
+    const cronDir = getConfigDir()
     const cronFile = join(cronDir, 'crons.json')
     try {
       const body = req.body as {
@@ -1118,7 +1117,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /mcp — 读取 MCP 服务器配置列表
   app.get('/mcp', (_req, res) => {
-    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    const mcpFile = join(getConfigDir(), 'mcp.json')
     if (!existsSync(mcpFile)) {
       res.json({ mcpServers: {} })
       return
@@ -1133,7 +1132,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // PUT /mcp — 保存完整 MCP 配置（覆盖写入）
   app.put('/mcp', (req, res) => {
-    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpDir = getConfigDir()
     const mcpFile = join(mcpDir, 'mcp.json')
     try {
       const body = req.body as { mcpServers?: Record<string, unknown> }
@@ -1153,7 +1152,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // POST /mcp/:name — 添加或更新单个 MCP 服务器
   app.post('/mcp/:name', (req, res) => {
-    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpDir = getConfigDir()
     const mcpFile = join(mcpDir, 'mcp.json')
     try {
       const serverName = req.params.name
@@ -1181,7 +1180,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // DELETE /mcp/:name — 删除单个 MCP 服务器
   app.delete('/mcp/:name', (req, res) => {
-    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    const mcpFile = join(getConfigDir(), 'mcp.json')
     try {
       const serverName = req.params.name
       if (!existsSync(mcpFile)) {
@@ -1204,7 +1203,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /mcp/config-path — 返回 MCP 配置文件路径（供前端展示）
   app.get('/mcp/config-path', (_req, res) => {
-    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    const mcpFile = join(getConfigDir(), 'mcp.json')
     res.json({ path: mcpFile })
   })
 
@@ -1275,12 +1274,11 @@ export function createGateway(config: GatewayConfig = {}) {
     try {
       const { writeFileSync, existsSync, readFileSync, mkdirSync } = await import('fs')
       const { join } = await import('path')
-      const { homedir } = await import('os')
 
       const skillName = decodeURIComponent(req.params.name)
       const { enabled } = req.body as { enabled: boolean }
 
-      const agentDir = join(homedir(), '.hrids-agent')
+      const agentDir = getConfigDir()
       const disabledPath = join(agentDir, 'skills-disabled.json')
 
       let disabled: string[] = []
@@ -1632,7 +1630,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /api/logs — 读取最近的日志条目
   app.get('/api/logs', (req, res) => {
-    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+    const logFile = join(getConfigDir(), 'logs', 'agent.log')
     const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000)
     const level = String(req.query.level ?? 'all')
 
@@ -1664,7 +1662,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /api/usage — 读取模型用量统计（从日志中聚合）
   app.get('/api/usage', (_req, res) => {
-    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+    const logFile = join(getConfigDir(), 'logs', 'agent.log')
 
     if (!existsSync(logFile)) {
       res.json({ sessions: [], totals: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 } })
@@ -1721,9 +1719,9 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // GET /api/config-file — 读取 config.json 原始内容
+  // GET /api/config-file — 读取 config.yaml 原始内容
   app.get('/api/config-file', (_req, res) => {
-    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    const configFile = join(getConfigDir(), 'config.yaml')
     if (!existsSync(configFile)) {
       res.json({ content: '{}', path: configFile })
       return
@@ -1736,9 +1734,9 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // PUT /api/config-file — 保存 config.json 原始内容
+  // PUT /api/config-file — 保存 config.yaml 原始内容
   app.put('/api/config-file', async (req, res) => {
-    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    const configFile = join(getConfigDir(), 'config.yaml')
     try {
       const { content } = req.body as { content?: string }
       if (typeof content !== 'string') {
@@ -1753,7 +1751,7 @@ export function createGateway(config: GatewayConfig = {}) {
       // 清除配置缓存，下次读取时重新加载
       const { _resetConfigCache } = await import('../core/Config.js')
       _resetConfigCache()
-      log.info('config.json 已通过 Web 界面更新')
+      log.info('config.yaml 已通过 Web 界面更新')
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })

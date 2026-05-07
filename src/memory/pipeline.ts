@@ -87,30 +87,15 @@ export async function runMemoryPipeline(
     store.addMemory({
       content,
       type: mem.type,
-      wing: 'session',
-      room: inferRoom(mem.type),
+      agent: 'main',
       importance: mem.importance,
-      tags: ['auto-extracted'],
       sourceSession: sessionId,
-    } as Omit<Memory, 'id' | 'createdAt' | 'embedding'>)
+    } as Omit<Memory, 'id' | 'createdAt' | 'updatedAt'>)
 
     result.saved++
   }
 
   return result
-}
-
-// 根据记忆类型推断 room 分类
-function inferRoom(type: string): string {
-  const map: Record<string, string> = {
-    decision: 'architecture',
-    preference: 'style',
-    milestone: 'progress',
-    problem: 'debugging',
-    fact: 'knowledge',
-    emotional: 'personal',
-  }
-  return map[type] ?? 'general'
 }
 
 // LLM 批量提炼：一次调用压缩多条记忆，返回与输入等长的数组

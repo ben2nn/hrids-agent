@@ -2,7 +2,7 @@
 // 对应 claude-code-main 的 SkillTool，填补"工作者无法自主触发 skill"的缺口
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
-import { buildSkillRegistry } from '../skills/registry.js'
+import { buildSkillRegistry, getUserSkillsDir } from '../skills/registry.js'
 import { registerAllBundledSkills, getBundledSkills } from '../skills/index.js'
 import { getGlobalCwd } from '../core/cwd.js'
 
@@ -121,7 +121,6 @@ export const SkillListTool: ToolDef<typeof listSchema> = {
 // agent 完成某个任务后，可主动将工作流沉淀为可复用的 skill
 import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 
 const saveSchema = z.object({
   name: z.string().describe('skill 名称（英文小写，用连字符分隔，如 deploy-check）'),
@@ -130,7 +129,7 @@ const saveSchema = z.object({
   when_to_use: z.string().optional().describe('适用场景描述，帮助 agent 判断何时调用此 skill'),
   argument_hint: z.string().optional().describe('参数提示，如 <文件路径> 或 <主题描述>'),
   scope: z.enum(['user', 'project']).default('user').describe(
-    'user = 保存到 ~/.hrids-agent/skills/（跨项目可用）；project = 保存到 .agent/skills/（仅当前项目）',
+    'user = 保存到 ~/.hrids/skills/（跨项目可用）；project = 保存到 .agent/skills/（仅当前项目）',
   ),
 })
 
@@ -148,14 +147,14 @@ export const SkillSaveTool: ToolDef<typeof saveSchema> = {
   readonly: false,
 
   describe(input) {
-    return `提炼 skill: ${input.name} → ${input.scope === 'project' ? '.agent/skills/' : '~/.hrids-agent/skills/'}`
+    return `提炼 skill: ${input.name} → ${input.scope === 'project' ? '.agent/skills/' : '~/.hrids/skills/'}`
   },
 
   async execute(input) {
     // 确定保存目录
     const baseDir = input.scope === 'project'
       ? join(getGlobalCwd(), '.agent', 'skills')
-      : join(homedir(), '.hrids-agent', 'skills')
+      : getUserSkillsDir()
 
     const skillDir = join(baseDir, input.name)
 

@@ -302,7 +302,7 @@ let _provider: AnyEmbeddingProvider | null = null
  * 3. 降级 TF-IDF（无需 API）
  */
 function createEmbeddingProviderFromEnv(): AnyEmbeddingProvider {
-  // 从 config.json 读取
+  // 从 config.yaml 读取
   const { loadConfig } = _require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
   const config = loadConfig()
   const embCfg = config.embedding

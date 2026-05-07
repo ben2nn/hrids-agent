@@ -3,6 +3,7 @@
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { join, dirname, resolve } from 'path'
 import { homedir } from 'os'
+import { getConfigDir } from '../core/Config.js'
 import type { Skill, BundledSkillDefinition, SkillFrontmatter } from './types.js'
 
 // ---- Frontmatter 解析 ----
@@ -205,9 +206,9 @@ export class SkillRegistry {
   }
 }
 
-/** 默认 skills 目录：~/.hrids-agent/skills/ */
+/** 默认 skills 目录：~/.hrids/skills/ */
 export function getUserSkillsDir(): string {
-  return join(homedir(), '.hrids-agent', 'skills')
+  return join(getConfigDir(), 'skills')
 }
 
 /** 项目级 skills 目录：<cwd>/.agent/skills/ */
@@ -215,9 +216,9 @@ export function getProjectSkillsDir(cwd: string): string {
   return join(cwd, '.agent', 'skills')
 }
 
-/** 读取用户技能禁用列表（~/.hrids-agent/skills-disabled.json） */
+/** 读取用户技能禁用列表（~/.hrids/skills-disabled.json） */
 export function getDisabledUserSkills(): Set<string> {
-  const disabledPath = join(homedir(), '.hrids-agent', 'skills-disabled.json')
+  const disabledPath = join(getConfigDir(), 'skills-disabled.json')
   if (!existsSync(disabledPath)) return new Set()
   try {
     const arr = JSON.parse(readFileSync(disabledPath, 'utf-8')) as string[]

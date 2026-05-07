@@ -1,9 +1,9 @@
 // 审计日志 —— 记录所有写操作、权限检查、bash 命令执行
 import { existsSync, mkdirSync, appendFileSync } from 'fs'
-import { homedir } from 'os'
 import { join } from 'path'
+import { getConfigDir } from './Config.js'
 
-const AUDIT_DIR = join(homedir(), '.hrids-agent', 'logs')
+const AUDIT_DIR = join(getConfigDir(), 'logs')
 const AUDIT_FILE = join(AUDIT_DIR, 'audit.log')
 
 // 开放字符串类型，新增工具无需修改此文件

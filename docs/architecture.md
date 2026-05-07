@@ -170,7 +170,7 @@ hrids-agent/
 ├── refercode/                      # 参考代码（claude-code / hermes-agent / mempalace / openclaw）
 ├── docs/                           # 文档
 ├── dist/                           # 编译输出
-├── config.example.json             # 配置文件模板
+├── config.example.json             # 配置文件模板（同时支持 YAML）
 ├── package.json                    # 依赖和脚本
 ├── tsconfig.json                   # TypeScript 配置
 └── vitest.config.ts                # 测试配置
@@ -281,7 +281,7 @@ ProviderFactory (index.ts)
 ├── createFallbackProvider()    多提供商故障转移
 ├── createGroupedFallbackProvider()  分组故障转移（同平台内重试，跨平台切换）
 ├── createTypedProvider()       按模型类型创建 (llm/vision/multimodal/speech)
-├── createProviderFromConfig()  从 config.json 完整创建
+├── createProviderFromConfig()  从 config.yaml 完整创建
 │
 ├── 提供商注册表 (registry.ts)
 │   ├── 内置提供商 13 个
@@ -649,7 +649,7 @@ main()
  │     └─ 主命令 (所有选项)
  │
  ├─ 3. loadConfig()                       配置文件加载
- │     ├─ 读取 ~/.hrids-agent/config.json
+ │     ├─ 读取 ~/.hrids-agent/config.yaml（优先）或 config.json（降级）
  │     ├─ 合并旧格式/apiKeys 迁移
  │     ├─ 读取 mcp.json
  │     └─ 规范化 → ResolvedConfig
@@ -767,27 +767,30 @@ setTimeout(下次执行时间 - now)
 ### 9.1 配置优先级
 
 ```
-CLI 参数 > config.json > 默认值
+CLI 参数 > config.yaml > 默认值
 ```
 
 ### 9.2 配置文件位置
 
 ```
 ~/.hrids-agent/
-├── config.json           # 主配置 (模型/提供商/行为/日志)
-├── mcp.json              # MCP 服务器配置 (兼容 Claude Desktop 格式)
-├── permission-rules.json # 权限规则 (持久化)
-├── crons.json            # 定时任务 (持久化)
-├── skills-disabled.json  # 禁用技能列表
-├── zhile-session.json    # 知了专属会话绑定
-├── sessions/             # 会话历史
-├── memory/               # 长期记忆 (SQLite)
-├── skills/               # 用户级 Skills
-├── logs/                 # 日志文件
-└── work/                 # 默认工作目录
+├── config.yaml            # 主配置 — YAML 格式（优先），首次启动自动生成
+├── config.json            # [兼容] 旧格式，YAML 不存在时降级读取
+├── mcp.json               # MCP 服务器配置 (兼容 Claude Desktop 格式)
+├── permission-rules.json  # 权限规则 (持久化)
+├── crons.json             # 定时任务 (持久化)
+├── skills-disabled.json   # 禁用技能列表
+├── zhile-session.json     # 知了专属会话绑定
+├── agents.d/              # Agent Profile 目录 (YAML/Markdown)
+├── roles/                 # 角色 Prompt 模板目录 (Markdown)
+├── sessions/              # 会话历史
+├── memory/                # 长期记忆 (SQLite)
+├── skills/                # 用户级 Skills
+├── logs/                  # 日志文件
+└── work/                  # 默认工作目录
 ```
 
-### 9.3 config.json 结构
+### 9.3 config.yaml 结构
 
 ```typescript
 interface AgentConfig {
@@ -810,10 +813,14 @@ interface AgentConfig {
 
 ### 9.4 向后兼容
 
-Config 系统自动迁移旧版扁平字段到新的嵌套分组：
-- `config.permissionMode` → `config.agent.permissionMode`
-- `config.apiKeys` → 注入到各 `fallbacks[].apiKey`
-- `config.mcpServers` 支持 `mcp.json` 的两种格式（对象/数组）
+Config 系统采用 YAML 优先、JSON 降级策略，同时自动迁移旧版扁平字段：
+
+- **格式**：优先读取 `config.yaml`，不存在时降级到 `config.json`
+- **扁平字段迁移**：`config.permissionMode` → `config.agent.permissionMode`
+- **API Key 迁移**：`config.apiKeys` → 注入到各 `fallbacks[].apiKey`  
+- **mcp.json 兼容**：支持对象和数组两种格式
+- **旧格式提示**：读到 JSON 时打印迁移提示，建议运行 `hrids-agent init --migrate`
+- **多智能体扩展**：支持 `multiAgent` 分组（profiles、profileDirs、工具权限策略等）
 
 ---
 
@@ -823,7 +830,7 @@ Config 系统自动迁移旧版扁平字段到新的嵌套分组：
 
 ```
 配置方式:
-1. config.json 的 mcpServers 数组
+1. config.yaml 的 mcpServers 数组
 2. mcp.json (兼容 Claude Desktop 两种格式)
 
 工具命名: mcp__<server>__<tool>
