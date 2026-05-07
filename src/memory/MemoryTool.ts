@@ -1,8 +1,11 @@
 // 记忆工具集 —— 供 agent 主动读写记忆
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import type { ToolDef, ToolContext } from '../core/Tool.js'
+import { logger } from '../core/logger.js'
 import { getMemoryStack } from './layers.js'
 import { getMemoryStore } from './store.js'
+
+const log = logger.child({ component: 'memory-tool' })
 
 function resolveStack() {
   return getMemoryStack()
@@ -10,6 +13,12 @@ function resolveStack() {
 
 function resolveStore() {
   return getMemoryStore()
+}
+
+function reportError(ctx: ToolContext | undefined, op: string, err: unknown): void {
+  const msg = `[memory] ${op} 失败: ${err instanceof Error ? err.message : String(err)}`
+  log.error(msg)
+  ctx?.onLog?.(msg)
 }
 
 // ── memory_add ───────────────────────────────────────────────
@@ -40,7 +49,7 @@ export const MemoryAddTool: ToolDef<typeof addSchema> = {
     return `记住: ${input.content.slice(0, 60)}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const store = resolveStore()
       const mem = store.addMemory({
@@ -49,9 +58,11 @@ export const MemoryAddTool: ToolDef<typeof addSchema> = {
         agent: 'main',
         importance: input.importance ?? 3,
       })
+      ctx?.onLog?.(`[memory] 已记录: ${mem.type} - ${input.content.slice(0, 80)}`)
       return { type: 'success', output: `已记住（ID: ${mem.id}，类型: ${mem.type}）` }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '记录', err)
+      return { type: 'error', message: `记录失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -75,15 +86,17 @@ export const MemorySearchTool: ToolDef<typeof searchSchema> = {
     return `搜索记忆: ${input.query}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
       const text = await stack.searchText(input.query, {
         topK: input.topK ?? 5,
       })
+      ctx?.onLog?.(`[memory] 搜索 "${input.query}" 完成`)
       return { type: 'success', output: text }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '搜索', err)
+      return { type: 'error', message: `搜索失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -107,13 +120,15 @@ export const MemoryRecallTool: ToolDef<typeof recallSchema> = {
     return `回忆: ${input.agent ?? '全部'}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
       const text = stack.recall({ agent: input.agent, limit: input.limit })
+      ctx?.onLog?.('[memory] 回忆完成')
       return { type: 'success', output: text }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '回忆', err)
+      return { type: 'error', message: `回忆失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -138,16 +153,18 @@ export const MemoryFactTool: ToolDef<typeof factSchema> = {
     return `记录事实: ${input.subject} → ${input.predicate} → ${input.object}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
       const triple = stack.addFact(input.subject, input.predicate, input.object, {
         validFrom: input.validFrom,
         confidence: input.confidence,
       })
+      ctx?.onLog?.(`[memory] 已记录事实: ${input.subject} → ${input.predicate} → ${input.object}`)
       return { type: 'success', output: `已记录事实（ID: ${triple.id}）` }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '记录事实', err)
+      return { type: 'error', message: `记录事实失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -174,7 +191,7 @@ export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
     return `更新记忆: ${input.oldId} → ${input.content.slice(0, 50)}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const store = resolveStore()
       const updated = store.updateMemory(input.oldId, {
@@ -185,9 +202,11 @@ export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
       if (!updated) {
         return { type: 'error', message: `未找到记忆 ID: ${input.oldId}` }
       }
+      ctx?.onLog?.(`[memory] 已更新: ${input.oldId} → ${updated.id}`)
       return { type: 'success', output: `已更新（旧 ID: ${input.oldId} → 新 ID: ${updated.id}）` }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '更新', err)
+      return { type: 'error', message: `更新失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -204,7 +223,7 @@ export const MemoryStatusTool: ToolDef<typeof statusSchema> = {
 
   describe() { return '查看记忆状态' },
 
-  async execute() {
+  async execute(_input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
       const stats = await stack.status()
@@ -216,7 +235,8 @@ export const MemoryStatusTool: ToolDef<typeof statusSchema> = {
       ]
       return { type: 'success', output: lines.join('\n') }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '查询状态', err)
+      return { type: 'error', message: `查询状态失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }

@@ -290,8 +290,17 @@ export function MessageList({ sessionId }: MessageListProps) {
               <div className="flex flex-col px-4 py-2 animate-fade-in">
                   {streamingShowAvatar && (
                     <div className="flex items-center gap-2 mb-2">
-                      <div className="w-8 h-8 rounded-full overflow-hidden border border-[var(--border-subtle)] shrink-0">
-                        <img src="/avatar.png" alt="知了" className="w-full h-full object-cover" />
+                      <div className="relative w-8 h-8 shrink-0">
+                        <div className="w-8 h-8 rounded-full overflow-hidden border border-[var(--border-subtle)]">
+                          <img src="/avatar.png" alt="知了" className="w-full h-full object-cover" />
+                        </div>
+                        <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-amber-400 rounded-full flex items-center justify-center shadow-sm">
+                          <div className="flex gap-[2px]">
+                            <span className="w-[3px] h-[3px] bg-white rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-[3px] h-[3px] bg-white rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-[3px] h-[3px] bg-white rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </div>
+                        </div>
                       </div>
                       <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
                     </div>
@@ -318,6 +327,18 @@ export function MessageList({ sessionId }: MessageListProps) {
             showAvatar = true
           }
 
+          // ── 判断是否正在运行 ────────────────────────────────────────
+          // 最后一个 agent-turn 如果有流式输出或工具正在执行，则为运行中
+          const isLastEntry = virtualItem.index === entries.length - 1
+          const isRunning = entry.kind === 'agent-turn' && isLastEntry && (hasStreaming || (() => {
+            // 检查是否有工具正在执行
+            const toolMsgs = entry.messages.filter(m => m.type === 'tool')
+            return toolMsgs.some(m => {
+              const card = toolCardsMap?.get(m.toolId)
+              return !card || card.status === 'pending'
+            })
+          })())
+
           return (
             <div
               key={virtualItem.key}
@@ -338,6 +359,7 @@ export function MessageList({ sessionId }: MessageListProps) {
                   sessionId={sessionId}
                   showAvatar={showAvatar}
                   cronDescription={entry.cronDescription}
+                  isRunning={isRunning}
                 />
               ) : (entry.kind === 'user' || entry.kind === 'single') ? (
                 <MessageItem

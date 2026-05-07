@@ -207,7 +207,24 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
   ]
 
   if (isWindows) {
-    envInfo.push('注意: Windows 环境，路径分隔符为 \\，使用 PowerShell 语法，例如 Get-ChildItem / Remove-Item / Copy-Item')
+    envInfo.push(
+      '注意: Windows 环境，Shell 为 PowerShell，路径分隔符为 \\' + '\n' +
+      '常用命令对照（必须用 PowerShell 语法，禁止直接使用 Linux 命令）：' + '\n' +
+      '  mkdir -p dir        → New-Item -ItemType Directory -Force -Path dir' + '\n' +
+      '  ls / ls -la         → Get-ChildItem（别名 ls / dir 也可用）' + '\n' +
+      '  cp src dst          → Copy-Item src dst' + '\n' +
+      '  mv src dst          → Move-Item src dst' + '\n' +
+      '  rm file             → Remove-Item file' + '\n' +
+      '  rm -rf dir          → Remove-Item -Recurse -Force dir' + '\n' +
+      '  cat file            → Get-Content file' + '\n' +
+      '  echo "text"         → Write-Output "text"（或 echo 也可用）' + '\n' +
+      '  grep pattern file   → Select-String -Path file -Pattern pattern' + '\n' +
+      '  find . -name "*.x"  → Get-ChildItem -Recurse -Filter "*.x"' + '\n' +
+      '  pwd                 → Get-Location（别名 pwd 也可用）' + '\n' +
+      '  export VAR=val      → $env:VAR = "val"' + '\n' +
+      '  cmd1 && cmd2        → cmd1; if ($?) { cmd2 }' + '\n' +
+      '  chmod +x script.sh  → （Windows 无需，直接运行 .ps1 / .bat）'
+    )
   } else if (isMac) {
     envInfo.push('注意: macOS 环境，使用 bash/zsh 命令')
   } else {

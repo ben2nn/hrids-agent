@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
 import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
+import { load as parseYaml } from 'js-yaml'
 import type { CreateSessionRequest } from './types.js'
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, renameSync } from 'fs'
 import { resolve, join, basename, extname } from 'path'
@@ -1743,8 +1744,8 @@ export function createGateway(config: GatewayConfig = {}) {
         res.status(400).json({ error: '缺少 content 字段' })
         return
       }
-      // 验证 JSON 格式
-      JSON.parse(content)
+      // 验证 YAML 格式
+      parseYaml(content)
       const tmp = configFile + '.tmp'
       writeFileSync(tmp, content, 'utf-8')
       renameSync(tmp, configFile)

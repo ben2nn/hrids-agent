@@ -5,12 +5,13 @@ import React, {
   useImperativeHandle,
   useRef,
   useState,
+  useMemo,
 } from 'react'
 import { useSessionStore } from '../../store/sessionStore.js'
 import { useMessageStore } from '../../store/messageStore.js'
 import { getAvailableModels, uploadFiles, isImageFile, getSkills } from '../../lib/gateway.js'
 import type { ModelEntry } from '../../lib/gateway.js'
-import type { UploadedFile, Skill } from '../../lib/types.js'
+import type { UploadedFile, Skill, ToolCardState } from '../../lib/types.js'
 
 // ─── 暴露的 ref 方法接口 ───────────────────────────────────────────────────
 
@@ -481,6 +482,51 @@ function hasWriteIntent(message: string): boolean {
   return WRITE_PATTERNS.some(p => p.test(message))
 }
 
+// ─── 工具摘要提取 ──────────────────────────────────────────────────────────
+
+/** 从工具输入中提取简短摘要 */
+function getToolSummary(toolName: string, input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const inp = input as Record<string, unknown>
+
+  switch (toolName) {
+    case 'grep':
+    case 'Grep': {
+      const pattern = inp.pattern
+      return pattern ? `搜索 "${String(pattern).slice(0, 20)}"` : ''
+    }
+    case 'read':
+    case 'Read': {
+      const path = inp.file_path ?? inp.path
+      return path ? `读取 ${String(path).split('/').pop()}` : ''
+    }
+    case 'edit':
+    case 'Edit': {
+      const path = inp.file_path ?? inp.path
+      return path ? `编辑 ${String(path).split('/').pop()}` : ''
+    }
+    case 'write':
+    case 'Write': {
+      const path = inp.file_path ?? inp.path
+      return path ? `写入 ${String(path).split('/').pop()}` : ''
+    }
+    case 'bash':
+    case 'Bash': {
+      const cmd = inp.command
+      return cmd ? `执行 ${String(cmd).slice(0, 25)}` : ''
+    }
+    case 'glob':
+    case 'Glob': {
+      const pattern = inp.pattern
+      return pattern ? `查找 ${String(pattern).slice(0, 20)}` : ''
+    }
+    default:
+      return ''
+  }
+}
+
+// ─── InputBar 主组件 ───────────────────────────────────────────────────────
+
 export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
   function InputBar({ sessionId, isBusy }, ref) {
     const [text, setText] = useState('')
@@ -497,6 +543,12 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
     // 图片本地预览 URL（objectURL），key 为文件名
     const [imagePreviews, setImagePreviews] = useState<Map<string, string>>(new Map())
 
+    // ── 工具执行状态 ──────────────────────────────────────────────────────
+    const [elapsedSeconds, setElapsedSeconds] = useState(0)
+    const [startTimestamp, setStartTimestamp] = useState<number | null>(null)
+    const [finalElapsedSeconds, setFinalElapsedSeconds] = useState<number | null>(null)
+    const toolCards = useMessageStore((s) => s.toolCards)
+
     const sessions = useSessionStore((s) => s.sessions)
     const sendMessage = useSessionStore((s) => s.sendMessage)
     const sendAbort = useSessionStore((s) => s.sendAbort)
@@ -506,6 +558,74 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
     const appendUserMessage = useMessageStore((s) => s.appendUserMessage)
     const pendingContinuation = useMessageStore((s) => s.pendingContinuation)
     const clearContinuation = useMessageStore((s) => s.clearContinuation)
+
+    // 获取当前 session 的工具卡片
+    const sessionToolCards = useMemo(() => {
+      return toolCards.get(sessionId) ?? new Map<string, ToolCardState>()
+    }, [toolCards, sessionId])
+
+    // 分离 pending 和已完成的工具
+    const { completedTools, latestPendingTool } = useMemo(() => {
+      const pending: ToolCardState[] = []
+      const completed: ToolCardState[] = []
+      for (const card of sessionToolCards.values()) {
+        if (card.status === 'pending') {
+          pending.push(card)
+        } else {
+          completed.push(card)
+        }
+      }
+      pending.sort((a, b) => a.toolId.localeCompare(b.toolId))
+      completed.sort((a, b) => a.toolId.localeCompare(b.toolId))
+      return {
+        completedTools: completed,
+        latestPendingTool: pending[pending.length - 1] ?? null,
+      }
+    }, [sessionToolCards])
+
+    // 计时器：从第一个工具开始累计计时，isBusy 结束时保存最终时间
+    useEffect(() => {
+      if (!isBusy) {
+        // 任务结束时保存最终耗时
+        if (startTimestamp !== null) {
+          setFinalElapsedSeconds(elapsedSeconds)
+        }
+        setElapsedSeconds(0)
+        setStartTimestamp(null)
+        return
+      }
+      // 记录首次开始时间
+      if (startTimestamp === null && sessionToolCards.size > 0) {
+        setStartTimestamp(Date.now())
+      }
+      const timer = setInterval(() => {
+        if (startTimestamp) {
+          setElapsedSeconds(Math.floor((Date.now() - startTimestamp) / 1000))
+        }
+      }, 1000)
+      return () => clearInterval(timer)
+    }, [isBusy, sessionToolCards.size, startTimestamp])
+
+    // 格式化秒数
+    const formatSeconds = (s: number) => {
+      if (s < 60) return `${s}s`
+      const m = Math.floor(s / 60)
+      const sec = s % 60
+      return `${m}m${sec}s`
+    }
+
+    // 工具名称去重列表（保持顺序）
+    const uniqueToolNames = useMemo(() => {
+      const seen = new Set<string>()
+      const result: string[] = []
+      for (const card of completedTools) {
+        if (!seen.has(card.toolName)) {
+          seen.add(card.toolName)
+          result.push(card.toolName)
+        }
+      }
+      return result
+    }, [completedTools])
 
     const hasContinuation = pendingContinuation.has(sessionId)
 
@@ -518,9 +638,18 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
       if (!isBusy) setHasSent(false)
     }, [isBusy])
 
-    // sessionId 切换时重置 hasSent（保活场景下组件不重建，需手动重置）
+    // sessionId 切换时重置 hasSent 和附件状态（保活场景下组件不重建，需手动重置）
     useEffect(() => {
       setHasSent(false)
+      setPendingFiles([])
+      setUploadedFiles([])
+      setIsUploading(false)
+      setUploadError(null)
+      setFinalElapsedSeconds(null)
+      setImagePreviews(prev => {
+        prev.forEach(url => URL.revokeObjectURL(url))
+        return new Map()
+      })
     }, [sessionId])
     // 自动扩展 textarea 高度，最小保持 MIN_ROWS 行
     useEffect(() => {
@@ -600,7 +729,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
     const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(e.target.files ?? [])
-      if (files.length === 0) return
+      if (files.length === 0 || !sessionId) return
 
       // 重置 input，允许重复选择同一文件
       e.target.value = ''
@@ -622,12 +751,14 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
       try {
         const result = await uploadFiles(sessionId, files)
-        // 标记图片文件
-        const enriched = result.files.map(f => ({ ...f, isImage: isImageFile(f.name) }))
+        // 后端返回的 name 带 .cache/ 前缀（如 .cache/photo.jpg），提取原始文件名用于匹配
+        const getBaseName = (name: string) => name.split('/').pop() ?? name
+        const enriched = result.files.map(f => ({ ...f, isImage: isImageFile(getBaseName(f.name)) }))
         setUploadedFiles(prev => [...prev, ...enriched])
+        // 用原始文件名匹配 pendingFiles（后端返回的 name 有 .cache/ 前缀，pendingFiles 用原始名）
         setPendingFiles(prev => {
-          const uploadedNames = new Set(result.files.map(f => f.name))
-          return prev.filter(f => !uploadedNames.has(f.name))
+          const uploadedBaseNames = new Set(result.files.map(f => getBaseName(f.name)))
+          return prev.filter(f => !uploadedBaseNames.has(f.name))
         })
       } catch (err) {
         setUploadError(`上传失败: ${String(err)}`)
@@ -786,16 +917,59 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
         <div className="px-4 py-3">
           <div className="input-container">
 
-            {/* 执行中提示行（发送后才显示） */}
-            {isBusy && hasSent && (
-              <div className="flex items-center gap-2 px-3.5 pt-2.5 text-xs text-[var(--text-secondary)]">
-                <span className="relative flex shrink-0">
-                  <span className="absolute w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping opacity-75" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
-                </span>
-                <span>运行中...</span>
+            {/* 执行状态提示行 */}
+            {(isBusy && hasSent) || (!isBusy && completedTools.length > 0) ? (
+              <div className="px-3.5 pt-2.5">
+                {isBusy && hasSent ? (
+                  /* ── 运行中：显示最新工具信息 + 滚动计时器 ── */
+                  <>
+                    {latestPendingTool ? (
+                      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0 animate-spin text-amber-400">
+                          <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                        </svg>
+                        <span className="font-medium text-[var(--text-primary)]">{latestPendingTool.toolName}</span>
+                        {getToolSummary(latestPendingTool.toolName, latestPendingTool.input) && (
+                          <span className="text-[var(--text-muted)] truncate">
+                            {getToolSummary(latestPendingTool.toolName, latestPendingTool.input)}
+                          </span>
+                        )}
+                        <span className="shrink-0 text-[var(--text-muted)] font-mono tabular-nums">
+                          {formatSeconds(elapsedSeconds)}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <span className="relative flex shrink-0">
+                          <span className="absolute w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping opacity-75" />
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />
+                        </span>
+                        <span>运行中...</span>
+                      </div>
+                    )}
+                    {/* 运行中已完成工具汇总 */}
+                    {completedTools.length > 0 && (
+                      <div className="flex items-center gap-1.5 mt-1.5 text-[11px] text-[var(--text-muted)]">
+                        <span>执行 {completedTools.length} 次</span>
+                        <span className="truncate">{uniqueToolNames.join(', ')}</span>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  /* ── 历史数据：执行完成后显示汇总 ── */
+                  <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                    <span>执行 {completedTools.length} 次</span>
+                    <span className="truncate flex-1">{uniqueToolNames.join(', ')}</span>
+                    {finalElapsedSeconds !== null && (
+                      <span className="shrink-0 font-mono tabular-nums">{formatSeconds(finalElapsedSeconds)}</span>
+                    )}
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="shrink-0">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </div>
+                )}
               </div>
-            )}
+            ) : null}
 
             {/* 附件预览区 */}
             {(pendingFiles.length > 0 || uploadedFiles.length > 0 || uploadError) && (
@@ -836,7 +1010,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
                       {imageFiles.length > 0 && (
                         <div className="flex flex-wrap gap-2">
                           {imageFiles.map((file) => {
-                            const previewUrl = imagePreviews.get(file.name)
+                            const baseName = file.name.split('/').pop() ?? file.name
+                            const previewUrl = imagePreviews.get(baseName)
                             return (
                               <div key={file.name} className="relative group">
                                 <div className="w-16 h-16 rounded-lg overflow-hidden border border-[var(--border)] bg-[var(--bg-tertiary)]">
