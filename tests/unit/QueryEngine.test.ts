@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { QueryEngine } from '../../src/core/QueryEngine.js'
 import type { QueryEngineConfig, StreamEvent } from '../../src/core/QueryEngine.js'
 import type { LLMProvider } from '../../src/core/providers/index.js'
@@ -63,7 +63,7 @@ function makeConfig(provider: LLMProvider, tools: ToolDef<never>[] = []): QueryE
     provider,
     systemPrompt: ['你是一个测试助手'],
     tools,
-    permissions: new PermissionManager('craft', async () => true),
+    permissions: new PermissionManager('ask', async () => true),
     maxTokens: 1024,
     maxTurns: 5,
   }
@@ -176,7 +176,7 @@ describe('QueryEngine', () => {
       const gen = engine.send('task')
 
       // 启动执行
-      const firstEvent = gen.next()
+      gen.next()
 
       // 稍等一下确保已经开始运行
       await new Promise(r => setTimeout(r, 50))
@@ -200,7 +200,7 @@ describe('QueryEngine', () => {
       const mockTool: ToolDef<never> = {
         name: 'echo_tool',
         description: '回显工具',
-        inputSchema: {} as never,
+        inputSchema: { safeParse: () => ({ success: true }) } as never,
         readonly: true,
         async execute(input: { text: string }) {
           return { type: 'success', output: `echo: ${input.text}` }
