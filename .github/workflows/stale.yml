@@ -1,0 +1,94 @@
+name: Stale
+
+on:
+  schedule:
+    # 每天 UTC 03:17 运行（北京时间 11:17）
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          # Issue 配置
+          days-before-issue-stale: 14
+          days-before-issue-close: 7
+          stale-issue-label: stale
+          stale-issue-message: |
+            这个 Issue 因为长时间没有活动已被标记为过期。
+            请添加评论或更新信息，否则将在 7 天后自动关闭。
+          close-issue-message: |
+            由于长时间没有活动，此 Issue 已被自动关闭。
+            如果问题仍然存在，请重新打开或创建新的 Issue。
+          # PR 配置
+          days-before-pr-stale: 7
+          days-before-pr-close: 3
+          stale-pr-label: stale
+          stale-pr-message: |
+            这个 PR 因为长时间没有活动已被标记为过期。
+            请添加评论、提交更新或关闭此 PR。
+          close-pr-message: |
+            由于长时间没有活动，此 PR 已被自动关闭。
+            如需继续，请重新打开或创建新的 PR。
+          # 豁免标签
+          exempt-issue-labels: "pinned,security,enhancement,roadmap"
+          exempt-pr-labels: "pinned,security,do-not-close"
+          # 豁免分配的 Issue/PR
+          exempt-all-assignees: true
+          # 每次运行处理的上限
+          operations-per-run: 100
+          # 升序处理（从旧到新）
+          ascending: true
+          # 更新时移除 stale 标签
+          remove-stale-when-updated: true
+
+  lock-closed:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Lock closed issues after 30 days
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const daysBeforeLock = 30;
+            const lockReason = 'resolved';
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - daysBeforeLock);
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'closed',
+              sort: 'updated',
+              direction: 'asc',
+              per_page: 100,
+            });
+
+            let locked = 0;
+            for (const issue of issues) {
+              // Skip pull requests
+              if (issue.pull_request) continue;
+              // Skip already locked
+              if (issue.locked) continue;
+              // Skip if updated recently
+              if (new Date(issue.updated_at) > cutoff) continue;
+
+              await github.rest.issues.lock({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                lock_reason: lockReason,
+              });
+              locked++;
+            }
+
+            console.log(`Locked ${locked} issues`);

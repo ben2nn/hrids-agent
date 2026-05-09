@@ -9,6 +9,7 @@
   <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-green" alt="node">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
   <img src="https://img.shields.io/badge/type-module-black" alt="module">
+  <img src="https://img.shields.io/badge/docker-ready-blue?logo=docker&logoColor=white" alt="docker">
 </p>
 
 ---
@@ -34,12 +35,64 @@ hrids-agent 是一个 TypeScript 编写的通用自主工作者 CLI 工具。借
 
 ## 快速开始
 
-### 安装
+### 方式一：npm 安装
 
 ```bash
 git clone <repo-url> && cd hrids-agent
 npm install
 ```
+
+### 方式二：Docker 部署
+
+#### 使用 Docker Compose（推荐）
+
+```bash
+# 克隆项目
+git clone <repo-url> && cd hrids-agent
+
+# 创建配置文件
+cp config.example.yaml config.yaml
+# 编辑 config.yaml 填入你的 API Key
+
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+```
+
+#### 使用 Docker 命令
+
+```bash
+# 构建镜像
+docker build -t hrids-agent .
+
+# 运行交互模式
+docker run -it --rm \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v hrids-data:/app/data \
+  hrids-agent
+
+# 运行 Gateway 模式
+docker run -d \
+  --name hrids-agent \
+  -p 3000:3000 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v hrids-data:/app/data \
+  hrids-agent --gateway
+```
+
+#### 环境变量配置
+
+Docker 部署支持以下环境变量：
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `NODE_ENV` | 运行环境 | `production` |
+| `HRIDS_DATA_DIR` | 数据目录 | `/app/data` |
 
 ### 配置
 

@@ -1,0 +1,39 @@
+# Dependencies
+node_modules
+web/node_modules
+
+# Build output
+dist
+web/dist
+
+# Development files
+.git
+.github
+.vscode
+.kiro
+.hrids
+.claude
+
+# Test files
+tests
+coverage
+*.test.ts
+*.spec.ts
+
+# Config files (keep example)
+config.yaml
+config.local.yaml
+
+# IDE files
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs
+*.md
+!README.md
