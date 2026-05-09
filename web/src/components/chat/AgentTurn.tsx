@@ -1,28 +1,19 @@
-import { useState, useEffect, useMemo } from 'react'
-import type { DisplayMessage, ToolCardState } from '../../lib/types.js'
+import { useState, useEffect } from 'react'
+import type { DisplayMessage, ToolCardState, AgentTurnData } from '../../lib/types.js'
 import { MarkdownRenderer } from '../../lib/markdown.js'
 import { ToolCard } from './ToolCard.js'
 
-// ─── Props 接口 ────────────────────────────────────────────────────────────
+// ─── Props ─────────────────────────────────────────────────────────────────
 
 interface AgentTurnProps {
-  /** 本回合包含的消息（tool* + 可选 assistant） */
-  messages: DisplayMessage[]
-  /** 工具卡片状态 Map */
+  data: AgentTurnData
   toolCardsMap: Map<string, ToolCardState> | null
-  /** 所属会话 ID */
   sessionId: string
-  /** 是否显示头像（回合第一条才显示） */
   showAvatar: boolean
-  /** 流式消息的 id，匹配时在文字末尾显示光标 */
-  streamingMessageId?: string
-  /** 定时任务描述（有值时表示本回合由定时任务触发） */
-  cronDescription?: string
-  /** 是否正在运行中 */
-  isRunning?: boolean
+  streamingText?: string
 }
 
-// ─── 头像组件（带思考动画） ────────────────────────────────────────────────
+// ─── 头像 ──────────────────────────────────────────────────────────────────
 
 function AgentAvatar({ thinking }: { thinking?: boolean }) {
   return (
@@ -43,43 +34,37 @@ function AgentAvatar({ thinking }: { thinking?: boolean }) {
   )
 }
 
-// ─── 执行时间计时器 ──────────────────────────────────────────────────────────
+// ─── 执行计时器 ────────────────────────────────────────────────────────────
+// 完成时：显示 endTime - startTime 的实际耗时
+// 运行中：从 0 开始每秒 +1（避免历史消息 startTime 导致初始值偏大）
 
 function ExecutionTimer({ startTime, endTime }: { startTime: number; endTime?: number }) {
-  const [elapsed, setElapsed] = useState(() => {
-    if (endTime) return Math.floor((endTime - startTime) / 1000)
-    return Math.floor((Date.now() - startTime) / 1000)
-  })
-
-  useEffect(() => {
-    if (endTime) return // 历史数据不需要更新
-    const interval = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startTime) / 1000))
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [startTime, endTime])
-
-  return (
-    <span className="text-[11px] text-[var(--text-muted)] font-mono tabular-nums">
-      {elapsed}s
-    </span>
+  const [elapsed, setElapsed] = useState(() =>
+    endTime ? Math.floor((endTime - startTime) / 1000) : 0,
   )
+  useEffect(() => {
+    if (endTime) {
+      setElapsed(Math.floor((endTime - startTime) / 1000))
+      return
+    }
+    setElapsed(0)
+    const id = setInterval(() => setElapsed(s => s + 1), 1000)
+    return () => clearInterval(id)
+  }, [startTime, endTime])
+  return <span className="text-[11px] text-[var(--text-muted)] font-mono tabular-nums">{elapsed}s</span>
 }
 
 // ─── 流式光标 ──────────────────────────────────────────────────────────────
 
 function StreamingCursor() {
   return (
-    <span
-      className="inline-block w-[2px] h-[1em] bg-[var(--text-primary)] align-middle animate-pulse ml-0.5"
-      aria-hidden="true"
-    >
+    <span className="inline-block w-[2px] h-[1em] bg-[var(--text-primary)] align-middle animate-pulse ml-0.5" aria-hidden="true">
       ▋
     </span>
   )
 }
 
-// ─── 工具名称映射（与 ToolCard 保持一致） ───────────────────────────────────
+// ─── 工具名称映射 ──────────────────────────────────────────────────────────
 
 const TOOL_LABEL_MAP: Record<string, string> = {
   file_read: '读取文件', file_write: '写入文件', file_edit: '编辑文件',
@@ -90,62 +75,132 @@ const TOOL_LABEL_MAP: Record<string, string> = {
   skill: '调用技能', skill_list: '列出技能', skill_save: '保存技能',
   skillhub_search: '搜索技能库', skillhub_install: '安装技能',
   schedule_cron: '定时任务', agent: '子智能体', agent_spawn: '派生智能体',
-  memory_add: '记住内容', memory_update: '更新记忆', memory_search: '搜索记忆', memory_recall: '回忆内容', memory_fact: '记录事实', memory_status: '记忆状态',
+  memory_add: '记住内容', memory_update: '更新记忆', memory_search: '搜索记忆',
+  memory_recall: '回忆内容', memory_fact: '记录事实', memory_status: '记忆状态',
 }
 
-// ─── 获取工具状态 ──────────────────────────────────────────────────────────
-
-function getToolStatus(msg: DisplayMessage, toolCardsMap: Map<string, ToolCardState> | null): 'pending' | 'success' | 'error' | 'denied' {
-  if (msg.type !== 'tool') return 'pending'
-  const card = toolCardsMap?.get(msg.toolId)
-  if (!card) return 'pending'
-  return card.status
+function getToolLabel(toolName: string): string {
+  return TOOL_LABEL_MAP[toolName] ?? toolName
 }
 
-// ─── 获取工具显示名称 ──────────────────────────────────────────────────────
+function getToolSummary(toolName: string, input: unknown, result?: unknown): string {
+  // todo_read 不依赖 input，优先处理
+  if (toolName === 'todo_read') {
+    if (result && typeof result === 'string') {
+      const m = result.match(/（(\d+)\/(\d+)\s*已完成）/)
+      if (m) return `共 ${m[2]} 项任务，${m[1]} 已完成`
+    }
+    return '查看任务列表'
+  }
 
-function getToolDisplayName(msg: DisplayMessage, toolCardsMap: Map<string, ToolCardState> | null): string {
-  if (msg.type !== 'tool') return ''
-  const card = toolCardsMap?.get(msg.toolId)
-  return TOOL_LABEL_MAP[card?.toolName ?? msg.toolName] ?? card?.toolName ?? msg.toolName ?? ''
-}
-
-// ─── 获取工具输入摘要 ──────────────────────────────────────────────────────
-
-function getToolSummary(toolName: string, input: unknown): string {
   if (!input || typeof input !== 'object') return ''
   const inp = input as Record<string, unknown>
   switch (toolName) {
-    case 'file_read':
-    case 'file_write':
-    case 'file_edit':   return String(inp.path ?? '')
+    case 'file_read': case 'file_write': case 'file_edit': return String(inp.path ?? '')
     case 'glob':        return String(inp.pattern ?? '')
     case 'grep':        return String(inp.pattern ?? '')
     case 'web_search':  return String(inp.query ?? '')
     case 'web_fetch':   return String(inp.url ?? '')
-    case 'bash':
-    case 'powershell': {
+    case 'bash': case 'powershell': {
       const cmd = String(inp.command ?? inp.cmd ?? '')
       return cmd.length > 40 ? cmd.slice(0, 40) + '…' : cmd
     }
-    case 'ask_user':    return String(inp.question ?? '')
-    case 'memory_add':  return String(inp.content ?? '').slice(0, 30)
+    case 'ask_user':      return String(inp.question ?? '')
+    case 'memory_add': {
+      const content = String(inp.content ?? '')
+      const type = String(inp.type ?? '')
+      const typeLabel: Record<string, string> = { decision: '决策', preference: '偏好', milestone: '里程碑', problem: '问题', emotional: '情感', fact: '事实' }
+      const prefix = typeLabel[type] ? `[${typeLabel[type]}] ` : ''
+      const text = content.length > 40 ? content.slice(0, 40) + '…' : content
+      return prefix + text
+    }
+    case 'memory_update': {
+      const content = String(inp.content ?? '')
+      return content.length > 40 ? content.slice(0, 40) + '…' : content
+    }
     case 'memory_search': return String(inp.query ?? '')
-    default:            return ''
+    case 'memory_recall': {
+      const parts = [inp.wing, inp.room].filter(Boolean).map(String)
+      return parts.length > 0 ? parts.join(' / ') : '全部记忆'
+    }
+    case 'memory_fact': {
+      const parts = [inp.subject, inp.predicate, inp.object].filter(Boolean).map(String)
+      return parts.length > 0 ? parts.join(' → ') : '记录事实'
+    }
+    case 'memory_status': return '记忆状态'
+    case 'todo_write': {
+      const todos = Array.isArray(inp.todos) ? inp.todos as Array<Record<string, unknown>> : []
+      return todos.length > 0 ? `共 ${todos.length} 项` : '创建任务计划'
+    }
+    case 'todo_update': {
+      const id = inp.id ? `#${inp.id}` : ''
+      const statusMap: Record<string, string> = { pending: '待处理', in_progress: '进行中', completed: '已完成' }
+      const status = inp.status ? (statusMap[String(inp.status)] ?? String(inp.status)) : ''
+      return [id, status].filter(Boolean).join(' → ')
+    }
+    case 'todo_append': {
+      const todos = Array.isArray(inp.todos) ? inp.todos as Array<Record<string, unknown>> : []
+      return todos.length > 0 ? `追加 ${todos.length} 项` : '追加任务'
+    }
+    case 'todo_reset': return '重置任务计划'
+    case 'skill':      return String(inp.skill_name ?? '')
+    case 'skill_list': return '列出所有技能'
+    case 'skill_save': {
+      const scope = inp.scope === 'project' ? '项目级' : '用户级'
+      return `${inp.name ?? ''} (${scope})`
+    }
+    case 'skillhub_search':    return String(inp.query ?? '')
+    case 'skillhub_install':   return String(inp.skill_id ?? '')
+    case 'skillhub_uninstall': return String(inp.skill_id ?? '')
+    case 'skillhub_upgrade':   return String(inp.skill_id ?? '')
+    case 'skillhub_list':      return '已安装技能'
+    case 'skillhub_recommend': {
+      const task = String(inp.task ?? '')
+      return task.length > 40 ? task.slice(0, 40) + '…' : task
+    }
+    case 'schedule_cron': {
+      if (inp.action === 'create') return String(inp.description ?? '')
+      if (inp.action === 'delete') return `删除 ${inp.id ?? ''}`
+      if (inp.action === 'toggle') return `${inp.enabled ? '启用' : '禁用'} ${inp.id ?? ''}`
+      return '查看列表'
+    }
+    case 'agent':       return String(inp.description ?? '')
+    case 'agent_spawn': {
+      const parts = [inp.team, inp.name].filter(Boolean).map(String)
+      return parts.length > 0 ? parts.join(' / ') : '派生智能体'
+    }
+    case 'team_create': return String(inp.name ?? '')
+    case 'team_delete': return String(inp.name ?? '')
+    case 'team_status': return String(inp.team ?? '')
+    case 'team_wait':   return String(inp.team ?? '')
+    case 'send_message': {
+      const to = String(inp.to ?? '')
+      const content = String(inp.content ?? '')
+      return `→ ${to}: ${content.length > 40 ? content.slice(0, 40) + '…' : content}`
+    }
+    case 'receive_message': return '等待接收消息'
+    case 'request_decision': {
+      const title = String(inp.title ?? '')
+      return title.length > 40 ? title.slice(0, 40) + '…' : title
+    }
+    default: return ''
   }
 }
 
-// ─── 执行过程摘要（堆叠显示，只显示最新的） ────────────────────────────────
+// ─── ProcessPanel：运行过程折叠卡片 ───────────────────────────────────────
+//
+// 折叠时：最新工具名 + 摘要 + 计时器
+// 展开时：按原始顺序渲染过程消息（工具卡片 + 中间说明文字）
 
-function ExecutionSummary({
-  toolMsgs,
+function ProcessPanel({
+  processMessages,
   toolCardsMap,
   sessionId,
   isRunning,
   startTime,
   endTime,
 }: {
-  toolMsgs: DisplayMessage[]
+  processMessages: DisplayMessage[]
   toolCardsMap: Map<string, ToolCardState> | null
   sessionId: string
   isRunning: boolean
@@ -155,93 +210,107 @@ function ExecutionSummary({
   const [expanded, setExpanded] = useState(false)
   const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set())
 
-  const toggleCard = (toolId: string) => {
+  const toggleCard = (toolId: string) =>
     setExpandedCards(prev => {
       const next = new Set(prev)
-      if (next.has(toolId)) {
-        next.delete(toolId)
-      } else {
-        next.add(toolId)
-      }
+      next.has(toolId) ? next.delete(toolId) : next.add(toolId)
       return next
     })
-  }
 
-  // 工具名称摘要（去重）
-  const uniqueNames = [...new Set(toolMsgs.map(m => getToolDisplayName(m, toolCardsMap)).filter(Boolean))]
+  const toolMsgs = processMessages.filter((m): m is DisplayMessage & { type: 'tool' } => m.type === 'tool')
+  const latestTool = toolMsgs[toolMsgs.length - 1]
+  const latestCard = latestTool ? toolCardsMap?.get(latestTool.toolId) : null
+  const latestLabel = latestTool ? getToolLabel(latestCard?.toolName ?? latestTool.toolName) : ''
+  const latestSummary = latestCard
+    ? getToolSummary(latestCard.toolName, latestCard.input, latestCard.result)
+    : latestTool
+      ? getToolSummary(latestTool.toolName, undefined, undefined)
+      : ''
 
-  // 获取最新的工具消息（确保是 tool 类型）
-  const latestToolMsg = toolMsgs[toolMsgs.length - 1]
-  const latestToolId = latestToolMsg?.type === 'tool' ? latestToolMsg.toolId : undefined
-  const latestToolCard = latestToolId ? toolCardsMap?.get(latestToolId) : null
-  const latestToolName = latestToolMsg?.type === 'tool' ? latestToolMsg.toolName : ''
-  const latestToolLabel = latestToolName ? getToolDisplayName(latestToolMsg!, toolCardsMap) : ''
-
-  // 获取最新工具的摘要信息
-  const latestToolSummary = latestToolCard ? getToolSummary(latestToolCard.toolName, latestToolCard.input) : ''
-
-  // 运行中：显示最新调用信息 + 滚动计时
+  // 运行中：单行状态条
   if (isRunning) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2 rounded-md" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)' }}>
-        {/* 加载动画 */}
-        <svg className="animate-spin shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" style={{ color: 'var(--text-muted)' }}>
+      <div
+        className="flex items-center gap-2 px-3 py-2 rounded-md"
+        style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)' }}
+      >
+        <svg className="animate-spin shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" style={{ color: 'var(--text-muted)' }}>
           <path d="M21 12a9 9 0 1 1-6.219-8.56" />
         </svg>
-
-        {/* 工具名称 */}
         <span className="text-[12px] font-medium shrink-0" style={{ color: 'var(--text-secondary)' }}>
-          {latestToolLabel || '执行中'}
+          {latestLabel || '执行中'}
         </span>
-
-        {/* 摘要信息 */}
-        {latestToolSummary && (
+        {latestSummary && (
           <span className="text-[11px] font-mono truncate flex-1 min-w-0" style={{ color: 'var(--text-muted)' }}>
-            {latestToolSummary}
+            {latestSummary}
           </span>
         )}
-
-        {/* 滚动计时 */}
         <ExecutionTimer startTime={startTime} />
       </div>
     )
   }
 
-  // 历史数据：摘要行 + 可展开
+  // 完成：可折叠卡片（带堆叠层次感）
   return (
-    <div className="rounded-lg overflow-hidden" style={{
-      background: 'var(--bg-secondary)',
-      border: '1px solid var(--border-subtle)',
-    }}>
-      {/* 摘要标题行 */}
+    <div className="relative">
+      {/* 堆叠层 2（最底层，偏移最大） */}
+      {!expanded && (
+        <div
+          className="absolute inset-x-0 bottom-0 rounded-lg"
+          style={{
+            height: '100%',
+            transform: 'translateY(5px) scaleX(0.92)',
+            transformOrigin: 'bottom center',
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--border-subtle)',
+            opacity: 0.4,
+            zIndex: 0,
+          }}
+        />
+      )}
+      {/* 堆叠层 1（中间层） */}
+      {!expanded && (
+        <div
+          className="absolute inset-x-0 bottom-0 rounded-lg"
+          style={{
+            height: '100%',
+            transform: 'translateY(3px) scaleX(0.96)',
+            transformOrigin: 'bottom center',
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--border-subtle)',
+            opacity: 0.65,
+            zIndex: 1,
+          }}
+        />
+      )}
+      {/* 主卡片 */}
+      <div className="relative rounded-lg overflow-hidden" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', zIndex: 2 }}>
+      {/* 折叠行 */}
       <div
         className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-white/[0.025] transition-colors select-none"
         onClick={() => setExpanded(v => !v)}
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v) } }}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v) } }}
       >
-        {/* 执行次数 */}
-        <span className="text-[12px] font-medium shrink-0" style={{ color: 'var(--text-secondary)' }}>
-          执行 {toolMsgs.length} 次
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          strokeLinecap="round" className="shrink-0 text-[var(--success)]">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+        <span className="text-[12px] font-medium shrink-0" style={{ color: 'var(--text-primary)' }}>
+          {latestLabel || '执行完成'}
         </span>
-
-        {/* 工具名称摘要 */}
-        <span className="text-[11px] font-mono truncate flex-1 min-w-0" style={{ color: 'var(--text-muted)' }}>
-          {uniqueNames.join(', ')}
-        </span>
-
-        {/* 执行时间 */}
+        {latestSummary && (
+          <span className="text-[11px] font-mono truncate flex-1 min-w-0" style={{ color: 'var(--text-muted)' }}>
+            {latestSummary}
+          </span>
+        )}
         <ExecutionTimer startTime={startTime} endTime={endTime} />
-
-        {/* 展开箭头 > */}
         <span
           className="shrink-0 transition-transform duration-200"
-          style={{
-            color: 'var(--text-muted)',
-            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-          }}
+          style={{ color: 'var(--text-muted)', transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
         >
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="9 18 15 12 9 6" />
@@ -249,150 +318,102 @@ function ExecutionSummary({
         </span>
       </div>
 
-      {/* 展开后显示所有工具卡片 */}
+      {/* 展开内容：按原始顺序渲染工具卡片 + 中间说明文字 */}
       {expanded && (
         <div className="flex flex-col gap-1.5 px-2.5 pb-2.5" style={{ borderTop: '1px solid var(--border-subtle)' }}>
-          {toolMsgs.map((msg) => {
-            if (msg.type !== 'tool') return null
-            const toolCard = toolCardsMap?.get(msg.toolId)
-            if (!toolCard) {
-              return (
-                <div key={msg.id} className="px-3 py-2 mt-1.5 rounded-md" style={{ background: 'var(--bg-tertiary, rgba(0,0,0,0.06))' }}>
-                  <div className="flex items-center gap-2">
-                    <svg className="animate-spin text-amber-400 shrink-0" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>
-                    <span className="text-xs text-[var(--text-secondary)]">{msg.toolName}</span>
+          {processMessages.map(msg => {
+            if (msg.type === 'tool') {
+              const card = toolCardsMap?.get(msg.toolId)
+              if (!card) {
+                return (
+                  <div key={msg.id} className="px-3 py-2 mt-1.5 rounded-md" style={{ background: 'var(--bg-tertiary, rgba(0,0,0,0.06))' }}>
+                    <div className="flex items-center gap-2">
+                      <svg className="animate-spin text-amber-400 shrink-0" width="11" height="11" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                      </svg>
+                      <span className="text-xs text-[var(--text-secondary)]">{msg.toolName}</span>
+                    </div>
                   </div>
+                )
+              }
+              return (
+                <div key={msg.id} className="mt-1.5">
+                  <ToolCard
+                    toolName={card.toolName}
+                    input={card.input}
+                    status={card.status}
+                    logs={card.logs}
+                    result={card.result}
+                    isExpanded={expandedCards.has(msg.toolId)}
+                    sessionId={sessionId}
+                    onToggle={() => toggleCard(msg.toolId)}
+                  />
                 </div>
               )
             }
-            return (
-              <div key={msg.id} className="mt-1.5">
-                <ToolCard
-                  toolName={toolCard.toolName}
-                  input={toolCard.input}
-                  status={toolCard.status}
-                  logs={toolCard.logs}
-                  result={toolCard.result}
-                  isExpanded={expandedCards.has(msg.toolId)}
-                  sessionId={sessionId}
-                  onToggle={() => toggleCard(msg.toolId)}
-                />
-              </div>
-            )
+            if (msg.type === 'assistant') {
+              const content = (msg as { content: string }).content
+              if (!content?.trim()) return null
+              return (
+                <div key={msg.id} className="px-3 py-2 mt-1.5 text-[13px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                  <MarkdownRenderer content={content} />
+                </div>
+              )
+            }
+            return null
           })}
         </div>
       )}
     </div>
+    </div>
   )
 }
 
-// ─── AgentTurn 组件 ────────────────────────────────────────────────────────
-// 将一个 Agent 回合（若干工具调用 + 可选说明文字）合并渲染在同一个容器内，
-// 说明文字在上，工具卡片在下，视觉上与 Kiro 保持一致。
+// ─── AgentTurn 主组件 ──────────────────────────────────────────────────────
+//
+// 渲染完全由 AgentTurnData 驱动，三种形态：
+//   1. 定时任务回合  → 定时任务卡片
+//   2. 纯文字回合    → 头像 + 文字气泡（无工具调用的简单回复）
+//   3. 普通回合      → 头像 + ProcessPanel（折叠）+ 最终报告气泡
 
-export function AgentTurn({ messages, toolCardsMap, sessionId, showAvatar, streamingMessageId, cronDescription, isRunning = false }: AgentTurnProps) {
-  const hasTools = messages.some((m) => m.type === 'tool')
-  const assistantMsgs = messages.filter((m) => m.type === 'assistant')
-  const hasText = assistantMsgs.some((m) => (m as { content: string }).content?.trim().length > 0)
+export function AgentTurn({ data, toolCardsMap, sessionId, showAvatar, streamingText }: AgentTurnProps) {
+  const { processMessages, finalMessage, isRunning, startTime, endTime, cronDescription } = data
 
-  // 计算执行时间（从第一条消息的时间戳开始）
-  const startTime = useMemo(() => {
-    const firstMsg = messages[0]
-    if (!firstMsg) return Date.now()
-    return (firstMsg as { timestamp?: number }).timestamp ?? Date.now()
-  }, [messages])
+  const hasProcess = processMessages.length > 0
+  const hasFinal = !!finalMessage
+  const finalContent = (finalMessage as { content?: string } | null)?.content ?? ''
 
-  // 结束时间（如果所有工具都完成了）
-  const endTime = useMemo(() => {
-    if (isRunning) return undefined
-    const toolMsgs = messages.filter(m => m.type === 'tool')
-    if (toolMsgs.length === 0) return undefined
-    // 检查是否所有工具都完成了
-    const allCompleted = toolMsgs.every(m => {
-      const status = getToolStatus(m, toolCardsMap)
-      return status === 'success' || status === 'error'
-    })
-    if (!allCompleted) return undefined
-    // 返回最后一条消息的时间戳
-    const lastMsg = messages[messages.length - 1]
-    return (lastMsg as { timestamp?: number }).timestamp ?? Date.now()
-  }, [messages, toolCardsMap, isRunning])
-
-  // ── 定时任务触发的消息：独立卡片样式 ──────────────────────────────────
+  // ── 1. 定时任务回合 ───────────────────────────────────────────────────
   if (cronDescription) {
-    const assistantMsg = assistantMsgs[0]
-    const content = (assistantMsg as { content?: string } | undefined)?.content ?? ''
-    const isStreaming = streamingMessageId && assistantMsg?.id === streamingMessageId
     return (
       <div className="px-4 py-2 animate-fade-in">
         <div className="border border-[var(--accent)]/30 rounded-xl overflow-hidden bg-[var(--accent)]/5">
-          {/* 卡片头部：类别 + 任务名称 */}
           <div className="flex items-center gap-2 px-3.5 py-2 border-b border-[var(--accent)]/20 bg-[var(--accent)]/8">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[var(--accent)] shrink-0">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round" className="text-[var(--accent)] shrink-0">
               <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
             </svg>
             <span className="text-[11px] font-semibold text-[var(--accent)] tracking-wide uppercase">定时任务</span>
             <span className="text-[11px] text-[var(--text-muted)] opacity-60">·</span>
             <span className="text-[11px] text-[var(--text-secondary)] truncate">{cronDescription}</span>
           </div>
-          {/* 卡片内容：提醒文字 */}
-          <div className="px-3.5 py-3">
-            {content.trim() ? (
-              isStreaming ? (
-                <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
-                  {content}
-                  <StreamingCursor />
-                </span>
-              ) : (
-                <MarkdownRenderer content={content} />
-              )
-            ) : null}
-            {/* 工具调用（定时任务触发时通常没有，但保留兼容） */}
-            {hasTools && (() => {
-              const toolMsgs = messages.filter((m): m is DisplayMessage & { type: 'tool' } => m.type === 'tool')
-              return (
-                <div className="mt-2">
-                  <ExecutionSummary
-                    toolMsgs={toolMsgs}
-                    toolCardsMap={toolCardsMap}
-                    sessionId={sessionId}
-                    isRunning={isRunning}
-                    startTime={startTime}
-                    endTime={endTime}
-                  />
-                </div>
-              )
-            })()}
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // 纯说明文字（无工具调用，且只有一条 assistant 消息）
-  if (!hasTools && assistantMsgs.length === 1 && hasText) {
-    const assistantMsg = assistantMsgs[0]
-    const content = (assistantMsg as { content: string }).content
-    const isStreaming = !!(streamingMessageId && assistantMsg?.id === streamingMessageId)
-    return (
-      <div className="flex flex-col px-4 py-2 animate-fade-in">
-        {showAvatar && (
-          <div className="flex items-center gap-2 mb-2">
-            <AgentAvatar thinking={isStreaming} />
-            <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
-          </div>
-        )}
-        <div className="ml-10 mr-6">
-          <div className="agent-bubble px-4 py-3.5">
-            {isStreaming ? (
+          <div className="px-3.5 py-3 flex flex-col gap-2">
+            {hasProcess && (
+              <ProcessPanel
+                processMessages={processMessages}
+                toolCardsMap={toolCardsMap}
+                sessionId={sessionId}
+                isRunning={isRunning}
+                startTime={startTime}
+                endTime={endTime}
+              />
+            )}
+            {hasFinal && <MarkdownRenderer content={finalContent} />}
+            {streamingText && (
               <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
-                {content}
-                <StreamingCursor />
+                {streamingText}<StreamingCursor />
               </span>
-            ) : (
-              <MarkdownRenderer content={content} />
             )}
           </div>
         </div>
@@ -400,82 +421,61 @@ export function AgentTurn({ messages, toolCardsMap, sessionId, showAvatar, strea
     )
   }
 
-  // 工具调用（含或不含说明文字），或多条 assistant 消息交错的情况
-  // 按消息原始顺序渲染：assistant 文字气泡 + tool 卡片交错显示
-  // 多个连续工具调用合并为一个可展开的摘要卡片
-
-  // 将消息流分段：连续的 tool 消息归为一组，assistant 消息各自独立
-  type Segment =
-    | { kind: 'assistant'; msg: DisplayMessage }
-    | { kind: 'tools'; msgs: DisplayMessage[] }
-  const segments: Segment[] = []
-  let toolBuf: DisplayMessage[] = []
-  const flushToolBuf = () => {
-    if (toolBuf.length > 0) {
-      segments.push({ kind: 'tools', msgs: toolBuf })
-      toolBuf = []
-    }
+  // ── 2. 纯文字回合（无工具调用，只有最终消息） ─────────────────────────
+  if (!hasProcess && hasFinal && !streamingText) {
+    return (
+      <div className="flex flex-col px-4 py-2 animate-fade-in">
+        {showAvatar && (
+          <div className="flex items-center gap-2 mb-2">
+            <AgentAvatar />
+            <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
+          </div>
+        )}
+        <div className="ml-10 mr-6">
+          <div className="agent-bubble px-4 py-3.5">
+            <MarkdownRenderer content={finalContent} />
+          </div>
+        </div>
+      </div>
+    )
   }
-  for (const msg of messages) {
-    if (msg.type === 'assistant') {
-      flushToolBuf()
-      segments.push({ kind: 'assistant', msg })
-    } else if (msg.type === 'tool') {
-      toolBuf.push(msg)
-    }
-  }
-  flushToolBuf()
 
-  // 判断是否有工具正在运行
-  const hasRunningTools = messages.some(m => {
-    if (m.type !== 'tool') return false
-    const status = getToolStatus(m, toolCardsMap)
-    return status === 'pending'
-  })
-
+  // ── 3. 普通回合（有工具调用，或运行中） ──────────────────────────────
   return (
     <div className="flex flex-col px-4 py-2 animate-fade-in">
       {showAvatar && (
         <div className="flex items-center gap-2 mb-2">
-          <AgentAvatar thinking={isRunning || hasRunningTools} />
+          <AgentAvatar thinking={isRunning} />
           <span className="text-xs font-semibold text-[var(--text-secondary)] tracking-wide">知了</span>
         </div>
       )}
-      <div className="ml-10 mr-6 flex flex-col gap-1.5">
-        {segments.map((seg, idx) => {
-          if (seg.kind === 'assistant') {
-            const msg = seg.msg
-            const content = (msg as { content: string }).content
-            if (!content?.trim()) return null
-            const isStreaming = streamingMessageId && msg.id === streamingMessageId
-            return (
-              <div key={msg.id} className="agent-bubble px-4 py-3.5">
-                {isStreaming ? (
-                  <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
-                    {content}
-                    <StreamingCursor />
-                  </span>
-                ) : (
-                  <MarkdownRenderer content={content} />
-                )}
-              </div>
-            )
-          }
-
-          // tools 段：使用 ExecutionSummary 组件
-          const toolMsgs = seg.msgs
-          return (
-            <ExecutionSummary
-              key={`tools-${idx}`}
-              toolMsgs={toolMsgs}
-              toolCardsMap={toolCardsMap}
-              sessionId={sessionId}
-              isRunning={isRunning || hasRunningTools}
-              startTime={startTime}
-              endTime={endTime}
-            />
-          )
-        })}
+      <div className="ml-10 mr-6 flex flex-col gap-2">
+        {/* 运行过程：折叠卡片 */}
+        {hasProcess && (
+          <ProcessPanel
+            processMessages={processMessages}
+            toolCardsMap={toolCardsMap}
+            sessionId={sessionId}
+            isRunning={isRunning}
+            startTime={startTime}
+            endTime={endTime}
+          />
+        )}
+        {/* 最终报告：独立气泡 */}
+        {hasFinal && (
+          <div className="agent-bubble px-4 py-3.5">
+            <MarkdownRenderer content={finalContent} />
+          </div>
+        )}
+        {/* 流式文字（运行中时的实时输出） */}
+        {streamingText && (
+          <div className="agent-bubble px-4 py-3.5">
+            <span className="text-[var(--text-primary)] text-sm whitespace-pre-wrap break-words leading-relaxed">
+              {streamingText}
+            </span>
+            <StreamingCursor />
+          </div>
+        )}
       </div>
     </div>
   )

@@ -11,11 +11,14 @@ export class WsClient {
   private readonly onMessage: (msg: ServerMessage) => void
   private readonly onStatusChange?: (status: WsStatus) => void
   private readonly onMaxRetriesExceeded?: () => void
+  private readonly onUnauthorized?: () => void
 
   private ws: WebSocket | null = null
   private status: WsStatus = 'disconnected'
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /** 当前连接是否已成功握手（onopen 已触发） */
+  private opened = false
 
   /** 断线期间积压的待发消息队列 */
   private pendingQueue: ClientMessage[] = []
@@ -29,12 +32,14 @@ export class WsClient {
     onMessage: (msg: ServerMessage) => void,
     onStatusChange?: (status: WsStatus) => void,
     onMaxRetriesExceeded?: () => void,
+    onUnauthorized?: () => void,
   ) {
     this.url = url
     this.token = token
     this.onMessage = onMessage
     this.onStatusChange = onStatusChange
     this.onMaxRetriesExceeded = onMaxRetriesExceeded
+    this.onUnauthorized = onUnauthorized
     this.connect()
   }
 
@@ -79,6 +84,7 @@ export class WsClient {
 
   private connect(): void {
     if (this.closed) return
+    this.opened = false
 
     // 将 token 附加到 URL query 参数
     const wsUrl = this.token
@@ -97,6 +103,7 @@ export class WsClient {
     }
 
     this.ws.onopen = () => {
+      this.opened = true
       this.reconnectAttempt = 0
       this.setStatus('connected')
       console.debug('[WsClient] ✅ 连接已建立', { url: this.url })
@@ -121,11 +128,26 @@ export class WsClient {
 
     this.ws.onerror = (event) => {
       console.error('[WsClient] ❌ WebSocket 错误:', event)
+      // 连接从未建立就出错 → 握手被拒绝（通常是认证失败），停止重连
+      if (!this.opened) {
+        console.warn('[WsClient] 握手失败，连接从未建立，停止重连')
+        this.close()
+        this.onUnauthorized?.()
+      }
     }
 
     this.ws.onclose = (event) => {
       this.ws = null
+      console.warn(`[WsClient] 🔌 onclose 触发: code=${event.code}, reason=${event.reason || '无'}, wasClean=${event.wasClean}, this.closed=${this.closed}`)
       if (this.closed) return
+
+      // 1008 = Policy Violation，服务端用于拒绝未授权连接
+      if (event.code === 1008) {
+        console.warn(`[WsClient] 🔌 连接未授权 (code=1008)，停止重连，触发 onUnauthorized`)
+        this.close()
+        this.onUnauthorized?.()
+        return
+      }
 
       console.warn(`[WsClient] 🔌 连接断开 (code=${event.code}, reason=${event.reason || '无'})，准备重连...`)
       this.scheduleReconnect()

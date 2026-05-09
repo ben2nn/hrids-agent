@@ -82,7 +82,16 @@ function resolveToolMeta(toolName: string) {
 
 // ─── 工具描述摘要（标题行右侧的灰色文字） ─────────────────────────────────
 
-function summarizeInput(toolName: string, input: unknown): string {
+function summarizeInput(toolName: string, input: unknown, result?: unknown): string {
+  // todo_read 不依赖 input，优先从 result 提取数量
+  if (toolName === 'todo_read') {
+    if (result && typeof result === 'string') {
+      const m = result.match(/（(\d+)\/(\d+)\s*已完成）/)
+      if (m) return `共 ${m[2]} 项，${m[1]} 已完成`
+    }
+    return '查看任务列表'
+  }
+
   if (!input || typeof input !== 'object') return ''
   const inp = input as Record<string, unknown>
   switch (toolName) {
@@ -101,8 +110,7 @@ function summarizeInput(toolName: string, input: unknown): string {
     case 'ask_user':    return String(inp.question ?? '')
     case 'todo_write': {
       const todos = Array.isArray(inp.todos) ? inp.todos as Array<Record<string, unknown>> : []
-      if (todos.length === 0) return ''
-      return `共 ${todos.length} 项`
+      return todos.length > 0 ? `共 ${todos.length} 项` : '创建任务计划'
     }
     case 'todo_update': {
       const id = inp.id ? `#${inp.id}` : ''
@@ -112,11 +120,10 @@ function summarizeInput(toolName: string, input: unknown): string {
     }
     case 'todo_append': {
       const todos = Array.isArray(inp.todos) ? inp.todos as Array<Record<string, unknown>> : []
-      if (todos.length === 0) return ''
-      return `追加 ${todos.length} 项`
+      return todos.length > 0 ? `追加 ${todos.length} 项` : '追加任务'
     }
     case 'todo_reset':  return '重置任务计划'
-    case 'todo_read':   return ''
+    case 'todo_read':   return '查看任务列表'  // 已在函数顶部处理，此处不会到达
     case 'memory_add': {
       const content = String(inp.content ?? '')
       const type = String(inp.type ?? '')
@@ -133,13 +140,16 @@ function summarizeInput(toolName: string, input: unknown): string {
     case 'memory_search': return String(inp.query ?? '')
     case 'memory_recall': {
       const parts = [inp.wing, inp.room].filter(Boolean).map(String)
-      return parts.length > 0 ? parts.join(' / ') : '全部'
+      return parts.length > 0 ? parts.join(' / ') : '全部记忆'
     }
-    case 'memory_fact':   return `${inp.subject ?? ''} → ${inp.predicate ?? ''} → ${inp.object ?? ''}`
-    case 'memory_status': return ''
+    case 'memory_fact': {
+      const parts = [inp.subject, inp.predicate, inp.object].filter(Boolean).map(String)
+      return parts.length > 0 ? parts.join(' → ') : '记录事实'
+    }
+    case 'memory_status': return '记忆状态'
     // skill 工具
     case 'skill':         return String(inp.skill_name ?? '')
-    case 'skill_list':    return ''
+    case 'skill_list':    return '列出所有技能'
     case 'skill_save': {
       const scope = inp.scope === 'project' ? '项目级' : '用户级'
       return `${inp.name ?? ''} (${scope})`
@@ -149,7 +159,7 @@ function summarizeInput(toolName: string, input: unknown): string {
     case 'skillhub_install':   return String(inp.skill_id ?? '')
     case 'skillhub_uninstall': return String(inp.skill_id ?? '')
     case 'skillhub_upgrade':   return String(inp.skill_id ?? '')
-    case 'skillhub_list':      return ''
+    case 'skillhub_list':      return '已安装技能'
     case 'skillhub_recommend': {
       const task = String(inp.task ?? '')
       return task.length > 50 ? task.slice(0, 50) + '…' : task
@@ -163,7 +173,10 @@ function summarizeInput(toolName: string, input: unknown): string {
     }
     // agent / team
     case 'agent':       return String(inp.description ?? '')
-    case 'agent_spawn': return `${inp.team ?? ''} / ${inp.name ?? ''}`
+    case 'agent_spawn': {
+      const parts = [inp.team, inp.name].filter(Boolean).map(String)
+      return parts.length > 0 ? parts.join(' / ') : '派生智能体'
+    }
     case 'team_create': return String(inp.name ?? '')
     case 'team_delete': return String(inp.name ?? '')
     case 'team_status': return String(inp.team ?? '')
@@ -174,7 +187,7 @@ function summarizeInput(toolName: string, input: unknown): string {
       const content = String(inp.content ?? '')
       return `→ ${to}: ${content.length > 40 ? content.slice(0, 40) + '…' : content}`
     }
-    case 'receive_message': return ''
+    case 'receive_message': return '等待接收消息'
     // request_decision
     case 'request_decision': {
       const title = String(inp.title ?? '')
@@ -1965,7 +1978,7 @@ export function ToolCard({ toolName, input, status, logs, result, isExpanded = f
   const [fileViewerPath, setFileViewerPath] = useState<string | null>(null)
   const [diffOpen, setDiffOpen] = useState(false)
   const { label, iconName } = resolveToolMeta(toolName)
-  const summary = summarizeInput(toolName, input)
+  const summary = summarizeInput(toolName, input, result)
 
   const isAskUser = toolName === 'ask_user'
   const isInteractive = !(isAskUser && status === 'pending')

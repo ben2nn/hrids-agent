@@ -432,6 +432,9 @@ function _connectWs(sessionId: string, set: SetFn, get: GetFn): void {
       next.add(sessionId)
       return { wsMaxRetriesExceeded: next }
     })
+  }, () => {
+    // 未授权：清除 token，跳转登录页
+    useConnectionStore.getState().logout()
   })
 
   // 将新客户端加入 Map（创建新 Map 实例，触发 Zustand 更新）

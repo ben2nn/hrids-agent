@@ -208,6 +208,28 @@ export type DisplayMessage =
       timestamp: number
     }
 
+// ─── Agent 回合规范化结构 ──────────────────────────────────────────────────
+//
+// 由 groupMessages 在分组阶段生成，渲染层直接消费，不再做任何数据判断。
+//
+// 结构语义：
+//   processMessages  运行过程消息（工具调用 + 中间说明文字），折叠显示
+//   finalMessage     最终报告（最后一条有内容的 assistant 消息），独立展示
+//                    运行中时为 null（流式文字由 streamingText 单独传入）
+//   isRunning        是否正在运行
+//   startTime        回合开始时间戳（ms）
+//   endTime          回合结束时间戳（ms），运行中时为 undefined
+//   cronDescription  定时任务描述，有值时以定时任务卡片样式渲染
+
+export interface AgentTurnData {
+  processMessages: DisplayMessage[]
+  finalMessage: DisplayMessage | null
+  isRunning: boolean
+  startTime: number
+  endTime?: number
+  cronDescription?: string
+}
+
 // ─── 工具卡片状态 ──────────────────────────────────────────────────────────
 
 export interface ToolCardState {

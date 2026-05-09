@@ -8,6 +8,8 @@ import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
+import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent } from './ConversationStore.js'
+import { projectForDisplay, projectForLLM, estimateEventTokens } from './projections.js'
 
 const log = logger.child({ component: 'query-engine' })
 
@@ -109,7 +111,6 @@ export interface QueryEngineConfig {
   maxTurns?: number
   maxBudgetUsd?: number          // 成本预算上限（USD），超出后停止执行
   autoCompactThreshold?: number  // 历史消息数超过此值时自动触发压缩（默认 80）
-  initialMessages?: Message[]
   sessionCwd?: string            // 会话工作目录，用于图片预处理
 }
 export type InterruptReason = 'turn_limit' | 'budget_exceeded' | 'aborted' | 'error' | 'permission_denied'
@@ -130,54 +131,10 @@ export type StreamEvent =
   | { type: 'done' }
   | { type: 'error'; message: string }
 
-// ── Token 估算 ────────────────────────────────────────────────────────────────
-// 优化1：区分中英文字符，中文约 1.5 token/字，英文约 0.25 token/字符
-// 图片内容块不计入 token 估算，避免 base64 数据虚高触发误压缩
-function estimateTokens(messages: Message[]): number {
-  let tokens = 0
-  for (const m of messages) {
-    if (typeof m.content === 'string') {
-      tokens += estimateStringTokens(m.content)
-    } else {
-      for (const b of m.content) {
-        if (b.type === 'text') tokens += estimateStringTokens(b.text)
-        else if (b.type === 'tool_result') tokens += estimateStringTokens(b.content)
-        else if (b.type === 'image') tokens += 1000  // 图片固定计 1000 token（视觉模型实际消耗）
-        else tokens += estimateStringTokens(JSON.stringify(b))
-      }
-    }
-  }
-  return tokens
-}
-
-function estimateStringTokens(s: string): number {
-  let tokens = 0
-  for (const ch of s) {
-    const code = ch.codePointAt(0) ?? 0
-    if (code > 0x2E7F) {
-      // CJK 及其他宽字符：实际约 1.5 token/字，用 +6 再整体 /4 ≈ 1.5
-      tokens += 6
-    } else {
-      // ASCII / 拉丁字符：约 0.25 token/字符（4字符≈1token）
-      tokens += 1
-    }
-  }
-  return Math.ceil(tokens / 4)
-}
-
-// 旧工具输出超过此字符数时替换为占位符（压缩前的廉价预处理）
-const PRUNE_TOOL_RESULT_THRESHOLD = 800
-const PRUNED_PLACEHOLDER = '[旧工具输出已清除以节省上下文空间]'
-
-// tool_result 内容截断上限（写入 history 时）
-// 优化2：单条 tool_result 总量预算，防止单次大输出撑爆上下文
-const MAX_TOOL_RESULT_CHARS = 12000  // 单条上限（约 3000-6000 token）
-// 所有 tool_result 的总字符预算（超出时对最旧的结果做截断）
-const TOTAL_TOOL_RESULT_BUDGET_CHARS = 60000  // 约 15000-30000 token
-
 export class QueryEngine {
   private config: QueryEngineConfig
-  private history: Message[]
+  /** 事件溯源对话存储（单一数据源） */
+  readonly store: ConversationStore
   private abortController: AbortController
   // 防止并发执行：同一时刻只允许一个 send() 运行
   private running = false
@@ -209,9 +166,9 @@ export class QueryEngine {
    */
   private activeTodoSnapshot: Todo[] | null = null
 
-  constructor(config: QueryEngineConfig) {
+  constructor(config: QueryEngineConfig, store?: ConversationStore) {
     this.config = config
-    this.history = config.initialMessages ? [...config.initialMessages] : []
+    this.store = store ?? new ConversationStore()
     this.abortController = new AbortController()
     this.costs = new CostTracker(config.provider.model)
   }
@@ -229,139 +186,6 @@ export class QueryEngine {
   setTrigger(trigger: 'user' | 'cron', cronDescription?: string): void {
     this.currentTrigger = trigger
     this.currentCronDescription = cronDescription
-  }
-
-  // ── 优先级 2：压缩前先 prune 旧工具输出（不调用 LLM，免费降 token）──────────
-  // 保护最近 protectTailCount 条消息，对更早的 tool_result 做截断
-  private pruneOldToolResults(protectTailCount = 40): number {
-    let pruned = 0
-    const boundary = Math.max(0, this.history.length - protectTailCount)
-    for (let i = 0; i < boundary; i++) {
-      const msg = this.history[i]
-      if (msg.role !== 'user') continue
-      if (!Array.isArray(msg.content)) continue
-      let changed = false
-      const newContent = (msg.content as ContentBlock[]).map(b => {
-        if (b.type !== 'tool_result') return b
-        if (b.content === PRUNED_PLACEHOLDER) return b
-        if (b.content.length <= PRUNE_TOOL_RESULT_THRESHOLD) return b
-        pruned++
-        changed = true
-        return { ...b, content: PRUNED_PLACEHOLDER }
-      })
-      if (changed) this.history[i] = { ...msg, content: newContent }
-    }
-    return pruned
-  }
-
-  // ── 图片 block 裁剪：历史中旧的 image block 替换为占位符 ─────────────────────
-  // LLM 已经看过的图片不需要每轮都传，替换为文字占位符节省 token 和带宽。
-  // 保护最近 protectTailCount 条消息中的图片（当前轮次可能还需要引用）。
-  private pruneOldImageBlocks(protectTailCount = 4): void {
-    const boundary = Math.max(0, this.history.length - protectTailCount)
-    for (let i = 0; i < boundary; i++) {
-      const msg = this.history[i]
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-      let changed = false
-      const newContent = (msg.content as ContentBlock[]).map(b => {
-        if (b.type !== 'image') return b
-        changed = true
-        return { type: 'text' as const, text: '[图片已从上下文中移除以节省空间]' }
-      })
-      if (changed) this.history[i] = { ...msg, content: newContent }
-    }
-  }
-
-  // ── 优先级 0（最廉价）：tool_result 总量预算截断 ──────────────────────────────  // 参考 claude-code applyToolResultBudget：当所有 tool_result 总字符超出预算时，
-  // 从最旧的开始截断，保护最近 protectTailCount 条消息不被截断。
-  // 不调用 LLM，纯字符串操作，每轮都可以运行。
-  private applyToolResultBudget(protectTailCount = 20): void {
-    let total = 0
-    for (const msg of this.history) {
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-      for (const b of msg.content as ContentBlock[]) {
-        if (b.type === 'tool_result' && b.content !== PRUNED_PLACEHOLDER) {
-          total += b.content.length
-        }
-      }
-    }
-    if (total <= TOTAL_TOOL_RESULT_BUDGET_CHARS) return
-
-    // 超出预算：从最旧的 tool_result 开始截断（保护尾部）
-    const boundary = Math.max(0, this.history.length - protectTailCount)
-    for (let i = 0; i < boundary && total > TOTAL_TOOL_RESULT_BUDGET_CHARS; i++) {
-      const msg = this.history[i]
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-      let changed = false
-      const newContent = (msg.content as ContentBlock[]).map(b => {
-        if (b.type !== 'tool_result') return b
-        if (b.content === PRUNED_PLACEHOLDER) return b
-        total -= b.content.length
-        changed = true
-        return { ...b, content: PRUNED_PLACEHOLDER }
-      })
-      if (changed) this.history[i] = { ...msg, content: newContent }
-    }
-  }
-
-  // ── 修复孤立的 tool_use / tool_result 对（防止 API 报错）──────────────────────
-  // 压缩后可能出现：assistant 有 tool_use 但对应 tool_result 被删，或反过来
-  private sanitizeToolPairs(): void {
-    // 收集所有 assistant 消息中的 tool_use id
-    const survivingCallIds = new Set<string>()
-    for (const msg of this.history) {
-      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
-      for (const b of msg.content as ContentBlock[]) {
-        if (b.type === 'tool_use') survivingCallIds.add(b.id)
-      }
-    }
-
-    // 收集所有 tool_result 引用的 id
-    const resultIds = new Set<string>()
-    for (const msg of this.history) {
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-      for (const b of msg.content as ContentBlock[]) {
-        if (b.type === 'tool_result') resultIds.add(b.tool_use_id)
-      }
-    }
-
-    // 1. 删除孤立的 tool_result（找不到对应 tool_use）
-    const orphanResults = new Set([...resultIds].filter(id => !survivingCallIds.has(id)))
-    if (orphanResults.size > 0) {
-      this.history = this.history.map(msg => {
-        if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg
-        const filtered = (msg.content as ContentBlock[]).filter(
-          b => !(b.type === 'tool_result' && orphanResults.has(b.tool_use_id))
-        )
-        // 如果过滤后 content 为空，转为文本消息避免空 content
-        if (filtered.length === 0) return { ...msg, content: '[工具结果已在压缩中移除]' }
-        return { ...msg, content: filtered }
-      })
-    }
-
-    // 2. 为孤立的 tool_use（没有对应 tool_result）插入 stub result
-    const missingResults = new Set([...survivingCallIds].filter(id => !resultIds.has(id)))
-    if (missingResults.size > 0) {
-      const patched: Message[] = []
-      for (const msg of this.history) {
-        patched.push(msg)
-        if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
-        for (const b of msg.content as ContentBlock[]) {
-          if (b.type === 'tool_use' && missingResults.has(b.id)) {
-            // 在 assistant 消息后立即插入 stub tool_result
-            patched.push({
-              role: 'user',
-              content: [{
-                type: 'tool_result',
-                tool_use_id: b.id,
-                content: '[早期对话的工具结果 — 详见上方上下文摘要]',
-              }],
-            })
-          }
-        }
-      }
-      this.history = patched
-    }
   }
 
   // ── 优先级 3：结构化摘要 + 迭代更新 ─────────────────────────────────────────
@@ -394,10 +218,8 @@ export class QueryEngine {
 
   // 调用 LLM 生成对话摘要，用于自动压缩（公开方法，供 UI 层 /compact 命令调用）
   async generateCompactSummary(): Promise<string> {
-    // Phase 1: prune 旧工具输出（免费）
-    this.pruneOldToolResults()
-
-    const contentToSummarize = this.serializeForSummary(this.history)
+    // prune 已在投影层处理，此处直接用事件日志序列化
+    const contentToSummarize = this.serializeForSummary(this.projectToMessages())
 
     // Phase 2: 结构化摘要 prompt，支持迭代更新
     let summaryPrompt: string
@@ -489,10 +311,10 @@ ${contentToSummarize}
         }
       }
     } catch {
-      summary = `[对话历史摘要：共 ${this.history.length} 条消息，因摘要生成失败而截断]`
+      summary = `[对话历史摘要：共 ${this.store.getEventCount()} 条消息，因摘要生成失败而截断]`
     }
 
-    const result = summary || `[对话历史：${this.history.length} 条消息]`
+    const result = summary || `[对话历史：${this.store.getEventCount()} 条消息]`
     // 保存本次摘要，供下次迭代更新使用
     this.previousSummary = result
     return result
@@ -530,8 +352,14 @@ ${contentToSummarize}
         ? [...this.config.systemPrompt, liveTodo]
         : this.config.systemPrompt
 
+      // 从 store 事件日志投影出 LLM 所需的消息（含 prune/budget 优化）
+      const projectedMessages = projectForLLM(this.store.getEventLog(), {
+        latestPreprocessed: this.store.getLatestPreprocessed(),
+        prunedToolCallIds: this.store.isToolCallPruned('__budget__') ? undefined : undefined, // 由 applyToolResultBudget 管理
+      })
+
       const streamFn = () => this.config.provider.stream(
-        this.history as never,
+        projectedMessages as never,
         toolsForLLM,
         systemPromptForThisTurn,
         this.config.maxTokens ?? 8096,
@@ -580,7 +408,10 @@ ${contentToSummarize}
       log.error('LLM 请求失败', { turn: turns, error: errMsg })
       yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` }
       yield { type: 'error', message: errMsg }
-      this.history.push({ role: 'user', content: `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。` })
+      this.store.appendEvents(createUserMessageEvent(
+        `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。`,
+        this.currentRequestId ?? undefined,
+      ))
       return
     }
 
@@ -781,6 +612,8 @@ ${contentToSummarize}
     }
 
     const resultContent = finalResult.type === 'success' ? finalResult.output : `错误: ${finalResult.message}`
+    // tool_result 内容截上限（写入事件时），与 projections.ts 中的常量保持一致
+    const MAX_TOOL_RESULT_CHARS = 12000
     // 截断过长的工具输出，防止单条结果撑爆 history
     const truncatedContent = resultContent.length > MAX_TOOL_RESULT_CHARS
       ? resultContent.slice(0, MAX_TOOL_RESULT_CHARS)
@@ -849,7 +682,7 @@ ${contentToSummarize}
   async *send(userMessage: string | Message): AsyncGenerator<StreamEvent> {
     // 并发保护：如果已有任务在运行，拒绝新任务
     if (this.running) {
-      log.warn('并发保护触发：上一个任务仍在执行中', { historyLength: this.history.length })
+      log.warn('并发保护触发：上一个任务仍在执行中', { historyLength: this.store.getEventCount() })
       yield { type: 'error', message: '上一个任务仍在执行中，请等待完成后再发送新消息' }
       return
     }
@@ -870,8 +703,10 @@ ${contentToSummarize}
     }
 
     // 预处理用户消息：将 @filename 转换为 image block（仅用于发给 LLM）
-    // 历史里保留原始文本（含 @filename），避免 base64 数据膨胀历史
+    // 事件日志里保留原始文本（含 @filename），避免 base64 数据膨胀事件流
     let processedContent: string | ContentBlock[] = typeof userMessage === 'string' ? userMessage : (userMessage as Message).content
+    const hasImageBlocks = Array.isArray(processedContent) &&
+      (processedContent as ContentBlock[]).some(b => b.type === 'image')
     if (typeof processedContent === 'string' && this.config.sessionCwd) {
       try {
         processedContent = await this.preprocessUserMessage(processedContent)
@@ -880,46 +715,28 @@ ${contentToSummarize}
       }
     }
 
-    // 规范化用户消息为 Message 对象，并添加 requestId、trigger、timestamp
-    // historyContent：存入历史的内容（原始文本，不含 base64）
-    // sendContent：发给 LLM 的内容（含 image block）
-    // 无论来自 Web 还是 IM 渠道，图片都已落盘，历史统一存 @filename 文本
+    // 提取原始文本（不含 base64），存入事件日志
     const originalText = typeof userMessage === 'string' ? userMessage : msgText
-    const historyContent: string | ContentBlock[] = Array.isArray(processedContent)
-      ? (() => {
-          // ContentBlock 数组：把 image block 替换为 @filename 文本，保留文字部分
-          const textBlocks = (processedContent as ContentBlock[]).filter(b => b.type === 'text')
-          // 如果只有图片没有文字，用原始文本（含 @filename）
-          return textBlocks.length > 0
-            ? textBlocks.map(b => (b as { type: 'text'; text: string }).text).join('')
-            : originalText
-        })()
-      : processedContent
 
-    const userMsg: Message = {
-      role: 'user',
-      content: historyContent,   // 历史存原始文本
-      requestId: this.currentRequestId ?? undefined,
-      timestamp: Date.now(),
-      trigger: this.currentTrigger,
-      ...(this.currentCronDescription ? { cronDescription: this.currentCronDescription } : {})
+    // 如果有 image block，将预处理结果存入 store 供 LLM 投影使用
+    if (hasImageBlocks) {
+      this.store.setLatestPreprocessed(
+        Array.isArray(processedContent) ? processedContent as ContentBlock[] : null,
+      )
     }
 
-    // 发给 LLM 的消息（含 image block）
-    const userMsgForLLM: Message = {
-      ...userMsg,
-      content: processedContent,
-    }
-    
-    // 前置意图检测：查询/回忆类消息禁用 continuation 自动执行（复用上方已提取的 msgText）
-    // 任务快照预热：每次 send 开始时，如果快照为 null（本会话尚未调用过 todo 工具），
-    // 主动读取一次磁盘，确保磁盘上已有任务时能立即注入到 system prompt。
-    // 这解决了"会话恢复后任务状态不注入"和"首轮消息无法感知已有任务"的问题。
-    // 只在快照为 null 时读取（避免每轮都 IO），todo 工具执行后会继续刷新快照。
+    // 追加用户消息事件（原始文本，不含 base64）
+    this.store.appendEvents(createUserMessageEvent(
+      originalText,
+      this.currentRequestId ?? undefined,
+      this.currentTrigger,
+      this.currentCronDescription,
+    ))
+
+    // 任务快照预热
     if (this.activeTodoSnapshot === null) {
       try {
         const existing = loadTodos()
-        // 只有磁盘上确实有任务时才激活快照，空列表保持 null（避免误触发任务状态注入）
         if (existing.length > 0) {
           this.activeTodoSnapshot = existing
           log.debug('任务快照预热：从磁盘读取到已有任务', { count: existing.length })
@@ -934,16 +751,7 @@ ${contentToSummarize}
     const isCraftMode = this.config.permissions.getMode() === 'craft'
     const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? 50)
 
-    log.debug('send 开始', { historyLength: this.history.length, estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
-    // 历史存原始文本版本（不含 base64），避免历史膨胀
-    this.history.push(userMsg)
-    // 第一轮 LLM 调用前，把历史最后一条替换为含 image block 的版本
-    // 调用完成后（assistant 回复写入后）不需要恢复，因为后续轮次不再需要图片
-    const hasImageBlocks = Array.isArray(processedContent) &&
-      (processedContent as ContentBlock[]).some(b => b.type === 'image')
-    if (hasImageBlocks) {
-      this.history[this.history.length - 1] = userMsgForLLM
-    }
+    log.debug('send 开始', { eventCount: this.store.getEventCount(), estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
 
     const maxBudgetUsd = this.config.maxBudgetUsd
     // 自动压缩阈值：默认 100000 tokens（约 40-80 轮对话后才触发，参考 Kiro/Claude Code 的策略）
@@ -961,8 +769,8 @@ ${contentToSummarize}
         turns++
 
         log.debug(`第 ${turns} 轮开始`, {
-          historyLength: this.history.length,
-          estimatedTokens: estimateTokens(this.history),
+          eventCount: this.store.getEventCount(),
+          estimatedTokens: this.getEstimatedTokens(),
           lastKnownInputTokens,
           maxTurns: isCraftMode ? 'unlimited' : maxTurns,
         })
@@ -973,18 +781,15 @@ ${contentToSummarize}
           break
         }
 
-        // 每轮先做廉价的预算截断（不调用 LLM）
-        this.applyToolResultBudget()
-        this.pruneOldImageBlocks()
+        // 廉价优化（prune/budget）现在在 projectForLLM 投影时执行，无需在此处调用
 
         // autocompact 触发判断：优先用 API 返回的真实 inputTokens，其次用估算值
         const tokenCount = lastKnownInputTokens > 0
           ? lastKnownInputTokens
-          : estimateTokens(this.history)
+          : this.getEstimatedTokens()
 
-        const latestMsg = this.history[this.history.length - 1]
-        const latestHasImage = Array.isArray(latestMsg?.content) &&
-          (latestMsg.content as ContentBlock[]).some(b => b.type === 'image')
+        // 检查最新用户消息是否包含图片（图片消息不触发压缩）
+        const latestHasImage = this.store.getLatestPreprocessed() !== null
 
         if (!latestHasImage && tokenCount > autoCompactThreshold) {
           yield { type: 'compact_start' }
@@ -993,7 +798,7 @@ ${contentToSummarize}
             try { await this.onBeforeCompact(summary) } catch { /* 归档失败不阻断压缩 */ }
           }
           this.compactHistory(summary)
-          this.sanitizeToolPairs()
+          // 孤立 tool_use/tool_result 对的修复已由投影层处理
           lastKnownInputTokens = 0
           yield { type: 'compact_done', summary }
         }
@@ -1023,31 +828,21 @@ ${contentToSummarize}
         }
         if (llmError) break
 
-        // 将 assistant 回复加入历史
-        const assistantBlocks: ContentBlock[] = []
-        if (fullText) assistantBlocks.push({ type: 'text', text: fullText })
-        for (const tc of toolCalls) {
-          assistantBlocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
-        }
-        if (assistantBlocks.length > 0) {
-          this.history.push({
-            role: 'assistant',
-            content: assistantBlocks,
-            timestamp: Date.now(),
-            requestId: this.currentRequestId ?? undefined,
-            trigger: this.currentTrigger,
-            ...(this.currentCronDescription ? { cronDescription: this.currentCronDescription } : {}),
-          })
+        // 将 assistant 回复写入事件日志
+        const toolCallEvents = toolCalls.length > 0
+          ? toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input }))
+          : undefined
+        if (fullText || toolCallEvents) {
+          this.store.appendEvents(createAssistantMessageEvent(
+            fullText,
+            toolCallEvents,
+            this.currentRequestId ?? undefined,
+          ))
         }
 
-        // 第一轮 LLM 调用完成后，把历史里的 image block 替换回原始文本版本
-        // 避免 base64 数据在后续每轮请求中重复传输
+        // 第一轮 LLM 调用完成后，清除预处理状态（后续轮次不再需要图片）
         if (hasImageBlocks && turns === 1) {
-          // 找到用户消息（倒数第二条，assistant 回复是最后一条）
-          const userMsgIdx = this.history.length - 1 - (assistantBlocks.length > 0 ? 1 : 0)
-          if (userMsgIdx >= 0 && this.history[userMsgIdx].role === 'user') {
-            this.history[userMsgIdx] = userMsg  // 恢复为原始文本版本
-          }
+          this.store.setLatestPreprocessed(null)
         }
 
         // 没有工具调用：dsml 模式下尝试从文本中解析 DSML 格式工具调用
@@ -1067,15 +862,14 @@ ${contentToSummarize}
             // 补发清理后的正文 delta（之前在 streamOneTurn 中被缓冲了）
             if (dsmlResult.cleanText) yield { type: 'text_delta', delta: dsmlResult.cleanText }
 
-            // 重新构建 assistant 历史块（包含解析出的工具调用）
-            const lastAssistant = this.history[this.history.length - 1]
-            if (lastAssistant?.role === 'assistant') {
-              const blocks: ContentBlock[] = []
-              if (dsmlResult.cleanText) blocks.push({ type: 'text', text: dsmlResult.cleanText })
-              for (const tc of dsmlResult.toolCalls) {
-                blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
-              }
-              this.history[this.history.length - 1] = { ...lastAssistant, content: blocks }
+            // DSML 解析出工具调用：追加新的 assistant 事件（包含解析出的工具调用）
+            // 注意：事件日志是 append-only，之前已追加的纯文本 assistant 事件保留
+            if (dsmlResult.cleanText || dsmlResult.toolCalls.length > 0) {
+              this.store.appendEvents(createAssistantMessageEvent(
+                dsmlResult.cleanText ?? '',
+                dsmlResult.toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input })),
+                this.currentRequestId ?? undefined,
+              ))
             }
           } else {
             // 有 DSML invoke 标记但解析不出工具调用（格式不完整）：补发完整 fullText 给前端
@@ -1092,10 +886,10 @@ ${contentToSummarize}
           if (hitMaxOutputTokens && maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
             maxOutputTokensRecoveryCount++
             log.info('输出被截断，注入继续指令', { turn: turns, recovery: maxOutputTokensRecoveryCount })
-            this.history.push({
-              role: 'user',
-              content: '[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。',
-            })
+            this.store.appendEvents(createUserMessageEvent(
+              '[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。',
+              this.currentRequestId ?? undefined,
+            ))
             continue
           }
 
@@ -1133,14 +927,21 @@ ${contentToSummarize}
         }
 
         // ── 执行工具调用（串行，委托给 executeOneTool）──────────────────────
-        const toolResults: ContentBlock[] = []
         log.debug('本轮工具调用', { turn: turns, tools: toolCalls.map(tc => tc.name) })
 
         let toolAborted = false
         for (const tc of toolCalls) {
           for await (const ev of this.executeOneTool(tc)) {
             if ('type' in ev && ev.type === '__tool_result__') {
-              toolResults.push(ev.block)
+              // 将工具结果写入事件日志
+              const block = ev.block as { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+              this.store.appendEvents(createToolResultEvent(
+                block.tool_use_id,
+                tc.name,
+                block.content,
+                block.is_error === true,
+                this.currentRequestId ?? undefined,
+              ))
             } else {
               yield ev as StreamEvent
               // abort 后用标志位跳出，不能直接 return（会跳过 finally 导致 running 永久锁死）
@@ -1153,20 +954,24 @@ ${contentToSummarize}
           if (toolAborted) break
         }
         if (toolAborted) break
-
-        this.history.push({ role: 'user', content: toolResults, requestId: this.currentRequestId ?? undefined })
       }
 
       // 达到最大轮次（仅 ask/plan 模式会触发，craft 模式 maxTurns = Infinity）
       if (turns >= maxTurns) {
         yield { type: 'interrupted', reason: 'turn_limit', message: `已达到最大执行轮次 ${maxTurns}，任务可能未完成。发送"继续"可恢复执行。` }
         yield { type: 'turn_limit', turns }
-        this.history.push({ role: 'user', content: `[系统提示] 任务因达到最大轮次限制（${maxTurns} 轮）而中断，尚未完成。请继续执行剩余工作。` })
+        this.store.appendEvents(createUserMessageEvent(
+          `[系统提示] 任务因达到最大轮次限制（${maxTurns} 轮）而中断，尚未完成。请继续执行剩余工作。`,
+          this.currentRequestId ?? undefined,
+        ))
       }
       // 被用户中止
       if (this.abortController.signal.aborted) {
         yield { type: 'interrupted', reason: 'aborted', message: '任务已被中止。发送"继续"可恢复执行。' }
-        this.history.push({ role: 'user', content: '[系统提示] 任务被用户中止。如需继续，请发送指令。' })
+        this.store.appendEvents(createUserMessageEvent(
+          '[系统提示] 任务被用户中止。如需继续，请发送指令。',
+          this.currentRequestId ?? undefined,
+        ))
       }
     } finally {
       // 无论正常结束还是异常，都要释放锁并发 done
@@ -1189,26 +994,50 @@ ${contentToSummarize}
   }
 
   clearHistory() {
-    this.history = []
+    this.store.clear()
     // 清空历史时同步重置任务快照，确保新会话不会继承旧任务状态
     this.activeTodoSnapshot = null
   }
-  getHistory(): readonly Message[] { return this.history }
-  setHistory(messages: Message[]) { this.history = [...messages] }
+
+  /** 向后兼容：返回由事件投影出的 Message[] */
+  getHistory(): readonly Message[] {
+    return this.projectToMessages()
+  }
+
+  /** 返回前端展示用的 DisplayMessage[]（直接从事件投影，含工具卡片） */
+  getDisplayMessages(): import('./ConversationStore.js').DisplayMessage[] {
+    return projectForDisplay(this.store.getEventLog())
+  }
+
+  /** 向后兼容：清空并重新加载（旧调用方已迁移，此方法仅清空） */
+  setHistory(_messages: Message[]) {
+    this.store.clear()
+  }
+
   private chatMode = false
   setChatMode(on: boolean) { this.chatMode = on }
   setSystemPrompt(prompt: string[]) { this.config.systemPrompt = prompt }
   setProvider(provider: LLMProvider) { this.config.provider = provider }
   getTools(): readonly ToolDef[] { return this.config.tools }
 
+  /**
+   * 将事件日志投影为旧格式 Message[]（向后兼容）。
+   * 用于 saveSession、postRunHooks 等仍依赖 Message[] 的调用方。
+   */
+  private projectToMessages(): Message[] {
+    const displayMsgs = projectForDisplay(this.store.getEventLog())
+    return displayMsgs.map(dm => ({
+      role: dm.role as 'user' | 'assistant',
+      content: dm.content,
+      timestamp: dm.timestamp,
+      requestId: dm.requestId,
+    }))
+  }
+
   compactHistory(summary: string) {
-    this.history = [
-      { role: 'user', content: `[上下文压缩] 早期对话轮次已被压缩以节省上下文空间。以下摘要描述了已完成的工作，当前会话状态可能仍反映该工作（例如文件可能已被修改）。请基于此摘要和当前状态继续，避免重复已完成的工作：\n\n${summary}` },
-      { role: 'assistant', content: '已了解之前的对话内容，将基于摘要继续工作。' },
-    ]
-    // 压缩后历史里没有 todo 工具调用记录，重新从文件读取快照确保状态同步。
-    // 无论任务列表是否为空都保留快照（空数组 [] 表示"曾经有任务但已全部完成或重置"，
-    // 与 null 的语义"从未调用过 todo 工具"不同）。
+    // 追压缩事件到事件日志（不删除原始事件）
+    this.store.appendEvents(createCompactEvent(summary, this.currentRequestId ?? undefined))
+    // 压缩后重新从文件读取快照确保状态同步
     try {
       this.activeTodoSnapshot = loadTodos()
     } catch {
@@ -1217,6 +1046,6 @@ ${contentToSummarize}
   }
 
   getEstimatedTokens(): number {
-    return estimateTokens(this.history)
+    return estimateEventTokens(this.store.getEventLog())
   }
 }

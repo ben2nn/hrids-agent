@@ -199,7 +199,7 @@ async function main() {
       }
 
       // 初始化会话和工作目录
-      const { sessionId, initialMessages, initialCwd } = await setupSession({
+      const { sessionId, store, initialCwd } = await setupSession({
         resume: opts.resume,
         newSession: opts.newSession,
         cwd: opts.cwd,
@@ -277,8 +277,7 @@ async function main() {
         maxTurns: config.maxTurns,
         maxBudgetUsd: config.maxBudgetUsd,
         autoCompactThreshold: config.autoCompactThreshold,
-        initialMessages,
-      })
+      }, store)
 
       // 根据用户消息动态更新 systemPrompt（按任务类型注入扩展块）
       const buildPromptForMessage = async (msg: string): Promise<void> => {

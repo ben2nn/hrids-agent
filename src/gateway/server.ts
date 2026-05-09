@@ -6,7 +6,7 @@ import { execSync } from 'child_process'
 import { randomBytes } from 'crypto'
 import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
+import { listSessions as listDiskSessions, loadSessionEvents, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
 import { load as parseYaml } from 'js-yaml'
 import type { CreateSessionRequest } from './types.js'
@@ -17,6 +17,7 @@ import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
 import { PlatformManager } from './im/PlatformManager.js'
 import type { IMGatewayConfig, IMPlatform, PlatformConfig } from './im/types.js'
+import { projectForDisplay } from '../core/projections.js'
 
 const log = logger.child({ component: 'gateway-server' })
 
@@ -54,165 +55,61 @@ const IMAGE_PATTERN = /@([^\s@]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/
  * @param rawMessages 原始消息列表
  * @param idPrefix    消息 ID 前缀，用于区分来源（'' 或 'arc-'）
  */
-function formatMessagesForDisplay(
-  rawMessages: readonly import('../core/QueryEngine.js').Message[],
+/**
+ * 将投影层 DisplayMessage[] 转换为前端 API 的 DisplayMessage[] 格式。
+ * 投影层用 role + toolCards，前端 API 用 type + 展开的 tool 消息。
+ */
+function convertToServerDisplayMessages(
+  projected: readonly import('../core/ConversationStore.js').DisplayMessage[],
   idPrefix = '',
 ): DisplayMessage[] {
-  // 第一遍：建立 toolId → result 映射
-  type ToolResultEntry = { content: unknown; isError: boolean }
-  const toolResults = new Map<string, ToolResultEntry>()
-  for (const msg of rawMessages) {
-    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-    for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
-      if (block.type === 'tool_result' && block.tool_use_id) {
-        toolResults.set(block.tool_use_id, {
-          content: block.content,
-          isError: block.is_error === true,
-        })
-      }
-    }
-  }
-
-  // 第二遍：构建 DisplayMessage 列表
-  const displayMessages: DisplayMessage[] = []
+  const result: DisplayMessage[] = []
   let idx = 0
-  const baseTs = Date.now()
 
-  for (const msg of rawMessages) {
-    // 优先使用消息自带的 timestamp，无则用序号估算（兼容旧历史数据）
-    const timestamp = msg.timestamp ?? (baseTs - (rawMessages.length - idx) * 1000)
+  for (const dm of projected) {
     idx++
-
-    if (msg.role === 'user') {
-      if (typeof msg.content !== 'string' && !Array.isArray(msg.content)) continue
-
-      // ContentBlock 数组（多模态消息：含图片/PDF 的消息）
-      if (Array.isArray(msg.content)) {
-        const blocks = msg.content as Array<{ type: string; text?: string; source?: { type: string; mediaType?: string; data?: string; url?: string } }>
-
-        // 纯 tool_result 消息（工具调用结果回传给 LLM 的内部消息）：不显示为用户气泡
-        const hasOnlyToolResults = blocks.length > 0 && blocks.every(b => b.type === 'tool_result')
-        if (hasOnlyToolResults) continue
-
-        // 系统内部消息过滤
-        const rawTextContent = blocks.filter(b => b.type === 'text').map(b => b.text ?? '').join('')
-        if (rawTextContent.startsWith('[系统') || rawTextContent.startsWith('[上下文压缩]')) continue
-
-        // 提取内嵌图片的 data URL，供前端 <img> 直接显示
-        const inlineImages: string[] = []
-        for (const b of blocks) {
-          if (b.type === 'image' && b.source) {
-            if (b.source.type === 'base64' && b.source.data && b.source.mediaType) {
-              inlineImages.push(`data:${b.source.mediaType};base64,${b.source.data}`)
-            } else if (b.source.type === 'url' && b.source.url) {
-              inlineImages.push(b.source.url)
-            }
-          }
-        }
-
-        // 从文本内容中提取 @文件名 引用（新格式：图片 block 被还原为 @文件名 文本）
-        IMAGE_PATTERN.lastIndex = 0
-        let imgMatch: RegExpExecArray | null
-        while ((imgMatch = IMAGE_PATTERN.exec(rawTextContent)) !== null) {
-          inlineImages.push(imgMatch[1])
-        }
-
-        // 清理 textContent：
-        // 1. 去掉 @文件名.ext 引用（已提取到 images，不需要显示在气泡文本里）
-        // 2. 去掉旧格式的 [图片] 占位符（无法还原文件名，但不应显示在气泡里）
-        IMAGE_PATTERN.lastIndex = 0
-        const textContent = rawTextContent
-          .replace(IMAGE_PATTERN, '')
-          .replace(/\[图片\]/g, '')
-          .replace(/\s{2,}/g, ' ')
-          .trim()
-
-        displayMessages.push({
-          id: `${idPrefix}u-${idx}`,
-          type: 'user',
-          content: textContent,
-          timestamp,
-          ...(inlineImages.length > 0 ? { images: inlineImages } : {}),
-        })
-        continue
-      }
-
-      // 纯文本消息（原有逻辑）
-      if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
-
-      const images: string[] = []
-      IMAGE_PATTERN.lastIndex = 0
-      let match: RegExpExecArray | null
-      while ((match = IMAGE_PATTERN.exec(msg.content)) !== null) {
-        images.push(match[1])
-      }
-
-      // 去掉 @文件名 引用，不在气泡文本里显示
-      IMAGE_PATTERN.lastIndex = 0
-      const cleanContent = msg.content.replace(IMAGE_PATTERN, '').replace(/\s{2,}/g, ' ').trim()
-
-      displayMessages.push({
+    if (dm.role === 'user') {
+      result.push({
         id: `${idPrefix}u-${idx}`,
         type: 'user',
-        content: cleanContent,
-        timestamp,
-        ...(images.length > 0 ? { images } : {}),
+        content: dm.content,
+        timestamp: dm.timestamp,
+        ...(dm.images && dm.images.length > 0 ? { images: dm.images } : {}),
+        ...(dm.isCron ? { isCron: true } : {}),
+        ...(dm.cronDescription ? { cronDescription: dm.cronDescription } : {}),
+        ...(dm.requestId ? { requestId: dm.requestId } : {}),
       })
-    } else if (msg.role === 'assistant') {
-      const isCron = msg.trigger === 'cron'
-      const requestId = msg.requestId
-      const cronDescription = msg.cronDescription
-
-      if (typeof msg.content === 'string') {
-        if (msg.content.trim()) {
-          displayMessages.push({
-            id: `${idPrefix}a-${idx}`,
-            type: 'assistant',
-            content: msg.content,
-            timestamp,
-            ...(isCron ? { isCron: true } : {}),
-            ...(cronDescription ? { cronDescription } : {}),
-            ...(requestId ? { requestId } : {}),
+    } else if (dm.role === 'assistant') {
+      if (dm.content.trim()) {
+        result.push({
+          id: `${idPrefix}a-${idx}`,
+          type: 'assistant',
+          content: dm.content,
+          timestamp: dm.timestamp,
+          ...(dm.requestId ? { requestId: dm.requestId } : {}),
+        })
+      }
+      if (dm.toolCards) {
+        for (const card of dm.toolCards) {
+          result.push({
+            id: `${idPrefix}t-${card.id}`,
+            type: 'tool',
+            toolId: card.id,
+            toolName: card.name,
+            toolInput: card.input,
+            toolStatus: card.status,
+            toolResult: card.result,
+            timestamp: card.timestamp,
+            ...(card.requestId ? { requestId: card.requestId } : {}),
           })
-        }
-      } else if (Array.isArray(msg.content)) {
-        const textParts = (msg.content as Array<{ type: string; text?: string }>)
-          .filter(b => b.type === 'text')
-          .map(b => b.text ?? '')
-          .join('')
-        if (textParts.trim()) {
-          displayMessages.push({
-            id: `${idPrefix}a-${idx}`,
-            type: 'assistant',
-            content: textParts,
-            timestamp,
-            ...(isCron ? { isCron: true } : {}),
-            ...(cronDescription ? { cronDescription } : {}),
-            ...(requestId ? { requestId } : {}),
-          })
-        }
-        for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
-          if (block.type === 'tool_use' && block.id && block.name) {
-            const resultEntry = toolResults.get(block.id)
-            displayMessages.push({
-              id: `${idPrefix}t-${block.id}`,
-              type: 'tool',
-              toolId: block.id,
-              toolName: block.name,
-              toolInput: block.input,
-              toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
-              toolResult: resultEntry?.content,
-              timestamp: timestamp + 1,
-              ...(requestId ? { requestId } : {}),
-            })
-          }
         }
       }
     }
   }
 
-  return displayMessages
+  return result
 }
+
 
 export interface GatewayConfig {
   port?: number
@@ -599,16 +496,18 @@ export function createGateway(config: GatewayConfig = {}) {
   app.get('/sessions/:id/messages', (req, res) => {
     // 优先从内存中的活跃 session 读取（最新状态）
     const activeSession = manager.getSession(req.params.id)
-    const rawMessages = activeSession
-      ? activeSession.engine.getHistory()
-      : loadDiskSession(req.params.id)
-
-    if (!rawMessages) {
-      res.json([])
+    if (activeSession) {
+      res.json(convertToServerDisplayMessages(activeSession.engine.getDisplayMessages()))
       return
     }
 
-    res.json(formatMessagesForDisplay(rawMessages))
+    // 降级：从磁盘加载事件并投影
+    const events = loadSessionEvents(req.params.id)
+    if (!events) {
+      res.json([])
+      return
+    }
+    res.json(convertToServerDisplayMessages(projectForDisplay(events)))
   })
 
   // GET /sessions/:id/history-segments — 读取会话的压缩归档段列表
@@ -623,14 +522,8 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
-    try {
-      const rawMessages = loadSessionArchive(req.params.id, req.params.filename)
-      if (!rawMessages) { res.json([]); return }
-      res.json(formatMessagesForDisplay(rawMessages, 'arc-'))
-    } catch (err) {
-      log.warn('读取归档消息失败', { error: String(err) })
-      res.json([])
-    }
+    // 旧格式归档（transcript.*.archive.jsonl）已不再支持，返回空
+    res.json([])
   })
 
   // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）

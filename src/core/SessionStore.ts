@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, rmSync, renameSync } from 'fs'
 import { join } from 'path'
 import type { Message } from './QueryEngine.js'
+import type { ConversationEvent } from './ConversationStore.js'
 import { getConfigDir } from './Config.js'
 
 /** 压缩归档段元数据 */
@@ -109,6 +110,27 @@ export function loadSession(sessionId: string): Message[] | null {
 
   const lines = readFileSync(transcriptPath, 'utf-8').split('\n').filter(Boolean)
   return lines.map(l => JSON.parse(l) as Message)
+}
+
+/**
+ * 加载会话的事件日志。
+ * 优先从 events.jsonl 加载，降级到 transcript.jsonl（返回 null 表示需要旧格式转换）。
+ */
+export function loadSessionEvents(sessionId: string): ConversationEvent[] | null {
+  const sessionDir = join(SESSIONS_DIR, sessionId)
+  const eventsPath = join(sessionDir, 'events.jsonl')
+
+  if (existsSync(eventsPath)) {
+    const content = readFileSync(eventsPath, 'utf-8')
+    if (!content.trim()) return []
+    return content
+      .split('\n')
+      .filter(line => line.trim())
+      .map(line => JSON.parse(line) as ConversationEvent)
+  }
+
+  // 没有 events.jsonl，返回 null
+  return null
 }
 
 export function loadSessionMeta(sessionId: string): SessionMeta | null {

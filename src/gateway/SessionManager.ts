@@ -11,8 +11,9 @@ import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt, classifyTask } from '../core/coordinator/coordinatorPrompt.js'
-import { loadSession, loadSessionMeta, saveSession, generateSessionId, archiveSession } from '../core/SessionStore.js'
-import { loadConfig } from '../core/Config.js'
+import { loadSessionEvents, loadSessionMeta, saveSession, generateSessionId, archiveSession } from '../core/SessionStore.js'
+import { ConversationStore, JsonlEventStorage, createUserMessageEvent, createAssistantMessageEvent } from '../core/ConversationStore.js'
+import { loadConfig, getConfigDir } from '../core/Config.js'
 import { runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
@@ -193,8 +194,17 @@ export class SessionManager {
 
     TeamManager.initForSession(sessionId, provider, tools)
 
-    // 恢复已有会话或新建
-    const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
+    // 恢复已有会话或新建：加载事件日志
+    let store: ConversationStore | undefined
+    if (req.resume) {
+      const sessionDir = join(getConfigDir(), 'sessions', req.resume)
+      const eventStorage = new JsonlEventStorage(sessionDir)
+      store = new ConversationStore(eventStorage)
+      const events = loadSessionEvents(req.resume)
+      if (events && events.length > 0) {
+        store.appendEventsNoSave(...events)
+      }
+    }
 
     const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd, sessionId)
 
@@ -207,9 +217,8 @@ export class SessionManager {
       maxTurns: agentConfig.maxTurns,
       maxBudgetUsd: agentConfig.maxBudgetUsd,
       autoCompactThreshold: agentConfig.autoCompactThreshold,
-      initialMessages,
       sessionCwd,
-    })
+    }, store)
     session.permissions = permissions
 
     // 注册压缩前归档回调：保留完整历史，workDir 不变
@@ -436,19 +445,14 @@ export class SessionManager {
         requestId,
       })
 
-      // 将提醒消息写入 history（作为 assistant 消息），并持久化
-      // content 中加 [定时任务触发] 前缀，让 LLM 能识别这条消息是 cron 自动触发的，
-      // 而非对话上下文的一部分，避免用户回复"知了"时 LLM 误判为需要重新执行任务。
-      session.engine.setHistory([
-        ...session.engine.getHistory(),
-        {
-          role: 'assistant',
-          content: [{ type: 'text', text: `[定时任务触发: ${cronJob.description}]\n${cronJob.task}` }],
+      // 将提醒消息写入事件日志（作为 assistant 消息），并持久化
+      session.engine.store.appendEvents(
+        createAssistantMessageEvent(
+          `[定时任务触发: ${cronJob.description}]\n${cronJob.task}`,
+          undefined,
           requestId,
-          trigger: 'cron' as const,
-          cronDescription: cronJob.description,
-        },
-      ])
+        ),
+      )
       saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
 
       // 推送到 IM 平台（如果有绑定的 IM 会话）
@@ -705,23 +709,13 @@ export class SessionManager {
         clearTimeout(visionTimer)
       }
 
-      // 将视觉模型的回答写入主会话历史，供后续对话引用
+      // 将视觉模型的回答写入事件日志，供后续对话引用
       if (visionText.trim()) {
-        const history = [...session.engine.getHistory()]
-        // 历史存储策略：统一存 @filename 文本（图片已落盘，无论 Web 还是 IM 路径）
-        // inlineAttachments 路径（@filename 提取）：processedContent 文本已含 @filename
-        // 显式 attachments 路径（IM 落盘后）：content 已被 PlatformManager 改为含 @filename 的文本
-        // 两种情况下 content 都已包含 @filename，直接存字符串即可
-        const userMsgForHistory: Message = {
-          role: 'user',
-          content: inlineAttachments.length > 0 ? processedContent : content,
-          requestId,
-          timestamp: Date.now(),
-          trigger: 'user' as const,
-        }
-        history.push(userMsgForHistory)
-        history.push({ role: 'assistant', content: visionText, requestId, timestamp: Date.now(), trigger: 'user' as const })
-        session.engine.setHistory(history)
+        const userText = inlineAttachments.length > 0 ? processedContent : content
+        session.engine.store.appendEvents(
+          createUserMessageEvent(typeof userText === 'string' ? userText : String(userText), requestId),
+          createAssistantMessageEvent(visionText, undefined, requestId),
+        )
         saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
       }
 
