@@ -6,3 +6,5 @@ refercode
 bin
 .hrids
 .claude
+coverage
+.idea

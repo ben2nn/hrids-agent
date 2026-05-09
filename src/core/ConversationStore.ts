@@ -58,12 +58,29 @@ export interface CompactEvent {
   summary: string
 }
 
+/** 请求完成事件 —— 标记一轮用户请求的 LLM 执行全部结束 */
+export interface RequestCompleteEvent {
+  type: 'request_complete'
+  id: string
+  timestamp: number
+  requestId?: string
+  status: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied'
+  totalTurns: number        // LLM 调用轮次
+  totalToolCalls: number    // 工具调用总次数
+  durationMs: number        // 从请求开始到结束的总耗时
+  inputTokens?: number      // 本次请求消耗的输入 token
+  outputTokens?: number     // 本次请求消耗的输出 token
+  costUsd?: number          // 本次请求的费用
+  error?: string            // status=error 时的错误信息
+}
+
 /** 所有事件类型的联合 */
 export type ConversationEvent =
   | UserMessageEvent
   | AssistantMessageEvent
   | ToolResultEvent
   | CompactEvent
+  | RequestCompleteEvent
 
 // ── 事件工厂函数 ────────────────────────────────────────────────
 
@@ -132,6 +149,33 @@ export function createCompactEvent(summary: string, requestId?: string): Compact
     timestamp: Date.now(),
     requestId,
     summary,
+  }
+}
+
+export function createRequestCompleteEvent(
+  requestId: string | undefined,
+  status: RequestCompleteEvent['status'],
+  totalTurns: number,
+  totalToolCalls: number,
+  durationMs: number,
+  inputTokens?: number,
+  outputTokens?: number,
+  costUsd?: number,
+  error?: string,
+): RequestCompleteEvent {
+  return {
+    type: 'request_complete',
+    id: genId('rc'),
+    timestamp: Date.now(),
+    requestId,
+    status,
+    totalTurns,
+    totalToolCalls,
+    durationMs,
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(error ? { error } : {}),
   }
 }
 

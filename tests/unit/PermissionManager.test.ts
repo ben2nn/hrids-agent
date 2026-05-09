@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { PermissionManager } from '../../src/core/PermissionManager.js'
 
 // mock 文件系统，避免测试读写真实的 ~/.hrids-agent/permission-rules.json
-const mockFsStore = new Map<string, string>()
+const { mockFsStore } = vi.hoisted(() => ({
+  mockFsStore: new Map<string, string>(),
+}))
 
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>()

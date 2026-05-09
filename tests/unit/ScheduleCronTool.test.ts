@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // mock 文件系统
-const mockStore = new Map<string, string>()
+const { mockStore } = vi.hoisted(() => ({
+  mockStore: new Map<string, string>(),
+}))
 
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>()

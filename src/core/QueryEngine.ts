@@ -8,7 +8,7 @@ import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
-import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent } from './ConversationStore.js'
+import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent, createRequestCompleteEvent } from './ConversationStore.js'
 import { projectForDisplay, projectForLLM, estimateEventTokens } from './projections.js'
 
 const log = logger.child({ component: 'query-engine' })
@@ -689,6 +689,14 @@ ${contentToSummarize}
     this.running = true
     this.abortController = new AbortController()
 
+    // 请求级快照（用于 request_complete 事件）
+    const requestStartTime = Date.now()
+    const costBefore = this.costs.getCostUsd()
+    const usageBefore = this.costs.getUsage()
+    let exitStatus: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied' = 'completed'
+    let totalToolCalls = 0
+    let errorMessage: string | undefined
+
     // 调用 onBeforeSend 钩子（动态更新 systemPrompt、保存会话等）
     // 同时提取消息文本用于后续意图检测，避免重复计算
     const msgText = typeof userMessage === 'string'
@@ -765,7 +773,10 @@ ${contentToSummarize}
 
     try {
       while (turns < maxTurns) {
-        if (this.abortController.signal.aborted) break
+        if (this.abortController.signal.aborted) {
+          exitStatus = 'aborted'
+          break
+        }
         turns++
 
         log.debug(`第 ${turns} 轮开始`, {
@@ -777,6 +788,7 @@ ${contentToSummarize}
 
         // 成本预算检查（每轮开始前）
         if (maxBudgetUsd !== undefined && this.costs.getCostUsd() >= maxBudgetUsd) {
+          exitStatus = 'budget_exceeded'
           yield { type: 'budget_exceeded', costUsd: this.costs.getCostUsd(), limitUsd: maxBudgetUsd }
           break
         }
@@ -815,8 +827,13 @@ ${contentToSummarize}
             fullText = ev.fullText
             toolCalls = ev.toolCalls
             hitMaxOutputTokens = ev.hitMaxOutputTokens
-          } else if (ev.type === 'error' || ev.type === 'interrupted') {
+          } else if (ev.type === 'error') {
             yield ev
+            exitStatus = 'error'
+            llmError = true
+          } else if (ev.type === 'interrupted') {
+            yield ev
+            exitStatus = ev.reason === 'error' ? 'error' : ev.reason
             llmError = true
           } else if (ev.type === 'usage') {
             // 用 API 返回的真实 inputTokens 更新计量
@@ -931,6 +948,7 @@ ${contentToSummarize}
 
         let toolAborted = false
         for (const tc of toolCalls) {
+          totalToolCalls++
           for await (const ev of this.executeOneTool(tc)) {
             if ('type' in ev && ev.type === '__tool_result__') {
               // 将工具结果写入事件日志
@@ -958,6 +976,7 @@ ${contentToSummarize}
 
       // 达到最大轮次（仅 ask/plan 模式会触发，craft 模式 maxTurns = Infinity）
       if (turns >= maxTurns) {
+        exitStatus = 'turn_limit'
         yield { type: 'interrupted', reason: 'turn_limit', message: `已达到最大执行轮次 ${maxTurns}，任务可能未完成。发送"继续"可恢复执行。` }
         yield { type: 'turn_limit', turns }
         this.store.appendEvents(createUserMessageEvent(
@@ -967,13 +986,32 @@ ${contentToSummarize}
       }
       // 被用户中止
       if (this.abortController.signal.aborted) {
+        exitStatus = 'aborted'
         yield { type: 'interrupted', reason: 'aborted', message: '任务已被中止。发送"继续"可恢复执行。' }
         this.store.appendEvents(createUserMessageEvent(
           '[系统提示] 任务被用户中止。如需继续，请发送指令。',
           this.currentRequestId ?? undefined,
         ))
       }
+    } catch (err) {
+      exitStatus = 'error'
+      errorMessage = String(err)
+      yield { type: 'error', message: `消息处理失败: ${errorMessage}` }
     } finally {
+      // 写入请求完成事件（持久化，不 yield 给外部）
+      const usageAfter = this.costs.getUsage()
+      this.store.appendEvents(createRequestCompleteEvent(
+        this.currentRequestId ?? undefined,
+        exitStatus,
+        turns,
+        totalToolCalls,
+        Date.now() - requestStartTime,
+        usageAfter.inputTokens - usageBefore.inputTokens,
+        usageAfter.outputTokens - usageBefore.outputTokens,
+        this.costs.getCostUsd() - costBefore,
+        errorMessage,
+      ))
+
       // 无论正常结束还是异常，都要释放锁并发 done
       this.running = false
       if (this.onAfterSend) {
@@ -1009,9 +1047,25 @@ ${contentToSummarize}
     return projectForDisplay(this.store.getEventLog())
   }
 
-  /** 向后兼容：清空并重新加载（旧调用方已迁移，此方法仅清空） */
-  setHistory(_messages: Message[]) {
+  /** 向后兼容：清空并重新加载历史消息 */
+  setHistory(messages: Message[]) {
     this.store.clear()
+    const events = messages.map(msg => {
+      if (msg.role === 'user') {
+        return createUserMessageEvent(
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+          msg.requestId,
+          msg.trigger,
+          msg.cronDescription,
+        )
+      }
+      return createAssistantMessageEvent(
+        typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+        undefined,
+        msg.requestId,
+      )
+    })
+    this.store.appendEventsNoSave(...events)
   }
 
   private chatMode = false

@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // mock 文件系统
-const mockStore = new Map<string, string>()
+const { mockStore, mockMtimes } = vi.hoisted(() => ({
+  mockStore: new Map<string, string>(),
+  mockMtimes: new Map<string, number>(),
+}))
 
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>()
@@ -13,21 +16,27 @@ vi.mock('fs', async (importOriginal) => {
       if (!v) throw new Error(`ENOENT: ${p}`)
       return v
     }),
-    writeFileSync: vi.fn((p: string, content: string) => mockStore.set(p, content)),
+    writeFileSync: vi.fn((p: string, content: string) => {
+      mockStore.set(p, content)
+      mockMtimes.set(p, Date.now())
+    }),
     renameSync: vi.fn((src: string, dest: string) => {
       const content = mockStore.get(src)
       if (content !== undefined) {
         mockStore.set(dest, content)
+        mockMtimes.set(dest, mockMtimes.get(src) ?? Date.now())
         mockStore.delete(src)
+        mockMtimes.delete(src)
       }
     }),
     mkdirSync: vi.fn(),
-    statSync: vi.fn(() => ({ mtimeMs: Date.now() })),
+    statSync: vi.fn((p: string) => ({ mtimeMs: mockMtimes.get(p) ?? 0 })),
   }
 })
 
 beforeEach(() => {
   mockStore.clear()
+  mockMtimes.clear()
 })
 
 import { loadConfig, saveConfig, _resetConfigCache } from '../../src/core/Config.js'
@@ -62,11 +71,11 @@ describe('Config', () => {
   })
 
   it('配置文件损坏时返回默认值', () => {
-    // 写入无效 JSON
+    // 写入无效 YAML
     const { join } = require('path')
     const { homedir } = require('os')
-    const configFile = join(homedir(), '.hrids-agent', 'config.json')
-    mockStore.set(configFile, 'invalid json {{{')
+    const configFile = join(homedir(), '.hrids', 'config.yaml')
+    mockStore.set(configFile, 'invalid: yaml: {{{')
 
     const config = loadConfig()
     expect(config.model).toBe('qwen3.5-122b-a10b')
