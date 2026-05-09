@@ -120,6 +120,10 @@ export function projectForDisplay(events: readonly ConversationEvent[]): Display
       // tool_result 事件不直接生成展示消息（已通过 assistant_message 的 toolCalls 关联）
       case 'tool_result':
         break
+
+      // request_complete 不生成展示消息（持久化用，不影响前端消息列表）
+      case 'request_complete':
+        break
     }
   }
 
@@ -262,6 +266,10 @@ export function projectForLLM(
 
       // compact 已在上面处理
       case 'compact':
+        break
+
+      // request_complete 不参与 LLM 投影
+      case 'request_complete':
         break
     }
   }
