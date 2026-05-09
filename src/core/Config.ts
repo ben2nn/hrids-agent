@@ -520,7 +520,14 @@ function loadMcpFile(): McpServerConfig[] {
 export function saveConfig(patch: Partial<AgentConfig>) {
   ensureConfigDir()
   const current = loadConfig()
-  const updated = normalize({ ...current, ...patch })
+
+  // 将顶层 model 字段同步到 agent.model（如果 patch 中有 model 但没有 agent.model）
+  const mergedPatch = { ...patch }
+  if (patch.model && !patch.agent?.model) {
+    mergedPatch.agent = { ...patch.agent, model: patch.model }
+  }
+
+  const updated = normalize({ ...current, ...mergedPatch })
   saveYamlFile(CONFIG_YAML_FILE, updated)
   _cachedConfig = updated
   _cachedMtime = existsSync(CONFIG_YAML_FILE) ? statSync(CONFIG_YAML_FILE).mtimeMs : 0

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { z } from 'zod'
 import { QueryEngine } from '../../src/core/QueryEngine.js'
 import type { QueryEngineConfig, StreamEvent } from '../../src/core/QueryEngine.js'
 import type { LLMProvider } from '../../src/core/providers/index.js'
@@ -200,7 +201,7 @@ describe('QueryEngine', () => {
       const mockTool: ToolDef<never> = {
         name: 'echo_tool',
         description: '回显工具',
-        inputSchema: {} as never,
+        inputSchema: z.object({ text: z.string() }) as never,
         readonly: true,
         async execute(input: { text: string }) {
           return { type: 'success', output: `echo: ${input.text}` }
@@ -228,7 +229,7 @@ describe('QueryEngine', () => {
       const writeTool: ToolDef<never> = {
         name: 'write_tool',
         description: '写工具',
-        inputSchema: {} as never,
+        inputSchema: z.object({}) as never,
         readonly: false,
         async execute() {
           return { type: 'success', output: 'written' }

@@ -1047,9 +1047,25 @@ ${contentToSummarize}
     return projectForDisplay(this.store.getEventLog())
   }
 
-  /** 向后兼容：清空并重新加载（旧调用方已迁移，此方法仅清空） */
-  setHistory(_messages: Message[]) {
+  /** 向后兼容：清空并重新加载历史消息 */
+  setHistory(messages: Message[]) {
     this.store.clear()
+    const events = messages.map(msg => {
+      if (msg.role === 'user') {
+        return createUserMessageEvent(
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+          msg.requestId,
+          msg.trigger,
+          msg.cronDescription,
+        )
+      }
+      return createAssistantMessageEvent(
+        typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+        undefined,
+        msg.requestId,
+      )
+    })
+    this.store.appendEventsNoSave(...events)
   }
 
   private chatMode = false
