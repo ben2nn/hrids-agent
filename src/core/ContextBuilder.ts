@@ -17,13 +17,9 @@ export interface ContextInfo {
   date: string
 }
 
-// 默认工作目录：~/.hrids/work/（共享目录，不绑定会话）
+// 默认工作目录路径：~/.hrids/work/（共享目录，不绑定会话，不自动创建）
 export function getDefaultAgentCwd(): string {
-  const dir = join(getConfigDir(), 'work')
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true })
-  }
-  return dir
+  return join(getConfigDir(), 'work')
 }
 
 // 为指定会话计算独立工作目录路径（不创建）：~/.hrids/work/<YYYYMMDD-HHmmss>-<sessionId>/

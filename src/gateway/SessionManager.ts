@@ -230,12 +230,11 @@ export class SessionManager {
 
     // 注册 todos_updated 推送回调（按 sessionId 隔离，避免多会话串流）
     // 传入 sessionId 确保只有当前会话的 todo 操作才触发此回调
-    // 注意：直接从 session.info.cwd 读取，而非 loadTodos()（后者依赖 getGlobalCwd()，
-    // 在异步回调中 getGlobalCwd() 可能已切换到其他会话的 cwd，导致读到旧数据）
+    // todo 数据迁移到 sessions/<sessionId>/tasks/ 目录，不再依赖 workDir
     setTodosUpdatedCallback(() => {
       const s = this.sessions.get(sessionId)
       if (s) {
-        const todoFile = join(s.info.cwd, '.hrids', 'tasks', 'todos.json')
+        const todoFile = join(getConfigDir(), 'sessions', sessionId, 'tasks', 'todos.json')
         let todos: unknown[] = []
         try {
           if (existsSync(todoFile)) {

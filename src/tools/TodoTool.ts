@@ -1,9 +1,9 @@
 // 任务管理系统核心模块 —— 实现全部 5 个任务管理工具
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'fs'
-import { resolve, dirname } from 'path'
+import { resolve, join, dirname } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getConfigDir } from '../core/Config.js'
 import { auditLog } from '../core/audit.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 
@@ -60,10 +60,15 @@ function triggerTodosUpdated(): void {
 
 /**
  * 解析 todos.json 的绝对路径
- * 使用 getGlobalCwd() 确保路径基于持久化工作目录，而非 process.cwd()
+ * Gateway 模式：sessions/<sessionId>/tasks/todos.json
+ * CLI 模式（无 sessionId）：~/.hrids/tasks/todos.json
  */
 function getTodoFile(): string {
-  return resolve(getGlobalCwd(), '.hrids', 'tasks', 'todos.json')
+  const sessionId = getCurrentSessionId()
+  if (sessionId) {
+    return join(getConfigDir(), 'sessions', sessionId, 'tasks', 'todos.json')
+  }
+  return join(getConfigDir(), 'tasks', 'todos.json')
 }
 
 // ─── 读写操作 ─────────────────────────────────────────────────────────────────
@@ -954,7 +959,7 @@ export const TodoResetTool: ToolDef<typeof todoResetInputSchema> = {
 
     // ── 需求 8.1、12.4：备份当前列表（原子写入）─────────────────────────────
     const timestamp = Date.now()
-    const backupPath = resolve(getGlobalCwd(), '.hrids', 'tasks', `todos.bak.${timestamp}.json`)
+    const backupPath = resolve(dirname(getTodoFile()), `todos.bak.${timestamp}.json`)
     try {
       saveTodos(todos, backupPath)
     } catch (err) {

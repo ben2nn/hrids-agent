@@ -8,13 +8,7 @@ import { join } from 'path'
 import { getConfigDir } from './Config.js'
 import { ensureWorkDir } from './ContextBuilder.js'
 
-function initDefaultCwd(): string {
-  const dir = join(getConfigDir(), 'work')
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  return dir
-}
-
-const DEFAULT_CWD = initDefaultCwd()
+const DEFAULT_CWD = join(getConfigDir(), 'work')
 
 // 每个异步上下文存储 { cwd: string }
 const cwdStorage = new AsyncLocalStorage<{ cwd: string }>()
