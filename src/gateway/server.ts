@@ -1460,14 +1460,11 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   // GET /sessions/:id/image?path= — 直接返回图片二进制（用于前端 <img> 标签显示）
+  // 搜索顺序：cwd → sessions/<id>/uploads/
   app.get('/sessions/:id/image', (req, res) => {
-    const activeSession = manager.getSession(req.params.id)
-    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
-
-    if (!cwd) {
-      res.status(404).json({ error: '会话不存在或无工作目录' })
-      return
-    }
+    const sessionId = req.params.id
+    const activeSession = manager.getSession(sessionId)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(sessionId)?.workDir ?? null
 
     const relPath = req.query.path as string
     if (!relPath) {
@@ -1475,9 +1472,27 @@ export function createGateway(config: GatewayConfig = {}) {
       return
     }
 
-    const absPath = resolve(cwd, relPath)
-    if (!absPath.startsWith(resolve(cwd))) {
-      res.status(403).json({ error: '禁止访问 cwd 之外的路径' })
+    // 候选搜索目录：cwd 和 uploads 目录
+    const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+    const searchDirs = [cwd, existsSync(uploadsDir) ? uploadsDir : null].filter(Boolean) as string[]
+
+    if (searchDirs.length === 0) {
+      res.status(404).json({ error: '会话不存在' })
+      return
+    }
+
+    let absPath: string | null = null
+    for (const dir of searchDirs) {
+      const candidate = resolve(dir, relPath)
+      if (!candidate.startsWith(resolve(dir))) continue  // 安全检查：禁止目录穿越
+      if (existsSync(candidate)) {
+        absPath = candidate
+        break
+      }
+    }
+
+    if (!absPath) {
+      res.status(404).json({ error: '图片不存在' })
       return
     }
 

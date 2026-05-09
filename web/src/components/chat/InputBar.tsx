@@ -632,11 +632,10 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
       try {
         const result = await uploadFiles(sessionId, files)
-        // 后端返回的 name 带 .cache/ 前缀（如 .cache/photo.jpg），提取原始文件名用于匹配
+        // 防御性提取文件名（后端已返回纯文件名，此处兼容历史数据）
         const getBaseName = (name: string) => name.split('/').pop() ?? name
         const enriched = result.files.map(f => ({ ...f, isImage: isImageFile(getBaseName(f.name)) }))
         setUploadedFiles(prev => [...prev, ...enriched])
-        // 用原始文件名匹配 pendingFiles（后端返回的 name 有 .cache/ 前缀，pendingFiles 用原始名）
         setPendingFiles(prev => {
           const uploadedBaseNames = new Set(result.files.map(f => getBaseName(f.name)))
           return prev.filter(f => !uploadedBaseNames.has(f.name))
