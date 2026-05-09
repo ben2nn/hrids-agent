@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { generateSessionId, loadSessionEvents, loadSessionMeta, getLastSessionId } from '../core/SessionStore.js'
 import { getConfigDir } from '../core/Config.js'
-import { getSessionWorkDir } from '../core/ContextBuilder.js'
+import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../core/cwd.js'
 import { ConversationStore, JsonlEventStorage } from '../core/ConversationStore.js'
 
@@ -73,16 +73,13 @@ export async function setupSession(opts: SessionSetupOpts): Promise<SessionSetup
     store.appendEventsNoSave(...events)
   }
 
-  // 初始化工作目录
+  // 初始化工作目录路径（不创建，由智能体按需调用 workdir_init 创建）
   const existingWorkDir = loadSessionMeta(sessionId)?.workDir
   const initialCwd = opts.cwd
     ?? opts.agentCwd
     ?? existingWorkDir
-    ?? getSessionWorkDir(sessionId)
+    ?? getSessionWorkDirPath(sessionId)
 
-  if (!existsSync(initialCwd)) {
-    mkdirSync(initialCwd, { recursive: true })
-  }
   setGlobalCwd(initialCwd)
 
   return { sessionId, store, initialCwd }

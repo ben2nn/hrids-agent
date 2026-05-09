@@ -486,73 +486,51 @@ export class PlatformManager {
       if (!adapter) return
 
       // ── IM 图片落盘 ────────────────────────────────────────────────────
-      // 将 attachments 中的图片写入 session.cwd，转换为 @filename 引用。
+      // 将 attachments 中的图片写入 sessions/<id>/uploads/，转换为 @filename 引用。
       // 落盘后两条路径（Web 上传 / IM 渠道）完全统一：
       //   - 历史存 @filename 文本
-      //   - Web 界面通过 getImageUrl 加载
       //   - LLM 通过 extractMediaFromText 读取本地文件
       let effectiveText = msg.text
       let effectiveAttachments = msg.attachments
 
       if (msg.attachments && msg.attachments.length > 0) {
-        const session = this.sessionManager.getSession(agentSessionId)
-        const cwd = session?.info.cwd
+        const { writeFileSync, mkdirSync } = await import('fs')
+        const { join: pathJoin } = await import('path')
+        const { getConfigDir } = await import('../../core/Config.js')
 
-        if (cwd) {
-          const { writeFileSync, mkdirSync, existsSync } = await import('fs')
-          const { join } = await import('path')
+        const uploadsDir = pathJoin(getConfigDir(), 'sessions', agentSessionId, 'uploads')
+        mkdirSync(uploadsDir, { recursive: true })
 
-          const savedNames: string[] = []
+        const savedNames: string[] = []
 
-          for (const att of msg.attachments) {
-            try {
-              // 图片保存到 cwd/.cache/ 子目录，与 Web 上传路径统一
-              const imagesDir = join(cwd, '.cache')
-              if (!existsSync(imagesDir)) mkdirSync(imagesDir, { recursive: true })
-
-              const relPath = `.cache/${att.name}`
-              const absPath = join(cwd, relPath)
-              writeFileSync(absPath, Buffer.from(att.data, 'base64'))
-              savedNames.push(relPath)
-              log.debug('IM 图片已落盘', { name: att.name, path: absPath })
-            } catch (err) {
-              log.warn('IM 图片落盘失败，保留 base64 附件', { name: att.name, error: String(err) })
-              // 落盘失败时保留原始 attachments，走 base64 路径
-            }
+        for (const att of msg.attachments) {
+          try {
+            const absPath = pathJoin(uploadsDir, att.name)
+            writeFileSync(absPath, Buffer.from(att.data, 'base64'))
+            savedNames.push(att.name)
+            log.debug('IM 图片已落盘', { name: att.name, path: absPath })
+          } catch (err) {
+            log.warn('IM 图片落盘失败，保留 base64 附件', { name: att.name, error: String(err) })
+            // 落盘失败时保留原始 attachments，走 base64 路径
           }
+        }
 
-          if (savedNames.length > 0) {
-            // 构建 @filename 引用，追加到消息文本
-            const fileRefs = savedNames.map(n => `@${n}`).join(' ')
-            const baseText = effectiveText.replace(/\[图片\]/g, '').trim()
-            effectiveText = baseText ? `${baseText} ${fileRefs}` : fileRefs
-            // 清空 attachments，走 @filename 路径（extractMediaFromText 会读取本地文件）
-            effectiveAttachments = undefined
+        if (savedNames.length > 0) {
+          // 构建 @filename 引用，追加到消息文本
+          const fileRefs = savedNames.map(n => `@${n}`).join(' ')
+          const baseText = effectiveText.replace(/\[图片\]/g, '').trim()
+          effectiveText = baseText ? `${baseText} ${fileRefs}` : fileRefs
+          // 清空 attachments，走 @filename 路径（extractMediaFromText 会读取本地文件）
+          effectiveAttachments = undefined
 
-            // 广播 im_user_message 给 Web 界面实时显示（用文件名，前端用 getImageUrl 加载）
-            this.sessionManager.broadcastToSession(agentSessionId, {
-              type: 'im_user_message',
-              text: baseText,
-              images: savedNames,   // 文件名，前端用 getImageUrl(sessionId, filename) 加载
-              platform: msg.source.platform,
-              timestamp: Date.now(),
-            })
-          }
-        } else {
-          // 没有 cwd（session 未初始化）：保留 base64 附件，广播 data: URL
-          const visionTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
-          const dataUrls = msg.attachments
-            .filter(a => visionTypes.includes(a.mediaType))
-            .map(a => `data:${a.mediaType};base64,${a.data}`)
-          if (dataUrls.length > 0) {
-            this.sessionManager.broadcastToSession(agentSessionId, {
-              type: 'im_user_message',
-              text: effectiveText.replace(/\[图片\]/g, '').trim(),
-              images: dataUrls,
-              platform: msg.source.platform,
-              timestamp: Date.now(),
-            })
-          }
+          // 广播 im_user_message 给 Web 界面实时显示
+          this.sessionManager.broadcastToSession(agentSessionId, {
+            type: 'im_user_message',
+            text: baseText,
+            images: savedNames,
+            platform: msg.source.platform,
+            timestamp: Date.now(),
+          })
         }
       } else if (effectiveText.trim()) {
         // 纯文字消息：也广播给 Web 界面

@@ -26,25 +26,26 @@ export function getDefaultAgentCwd(): string {
   return dir
 }
 
-// 为指定会话创建独立工作目录：~/.hrids/work/<YYYYMMDD-HHmmss>-<sessionId>/
-export function getSessionWorkDir(sessionId: string): string {
+// 为指定会话计算独立工作目录路径（不创建）：~/.hrids/work/<YYYYMMDD-HHmmss>-<sessionId>/
+export function getSessionWorkDirPath(sessionId: string): string {
   const now = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
   const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   const dirName = `${datePart}-${timePart}-${sessionId}`
-  const dir = join(getConfigDir(), 'work', dirName)
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true })
-    // 初始化 git 仓库，使差异功能可用
-    try {
-      execSync('git init', { cwd: dir, stdio: 'ignore' })
-      execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
-    } catch {
-      // git 不可用时静默忽略
-    }
+  return join(getConfigDir(), 'work', dirName)
+}
+
+// 确保目录存在（含 git init），供需要写入时按需调用
+export function ensureWorkDir(dir: string): void {
+  if (existsSync(dir)) return
+  mkdirSync(dir, { recursive: true })
+  try {
+    execSync('git init', { cwd: dir, stdio: 'ignore' })
+    execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
+  } catch {
+    // git 不可用时静默忽略
   }
-  return dir
 }
 
 // 读取 git 状态（分支、最近提交、工作区变更）
@@ -266,24 +267,26 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
 
   dynamicSections.push('## 环境信息\n' + envInfo.join('\n'))
 
-  // 注入 .cache/ 目录中的上传文件列表，让 LLM 知道可以用 @.cache/filename 引用
-  const cacheDir = join(resolvedCwd, '.cache')
-  if (existsSync(cacheDir)) {
-    try {
-      const cacheFiles = readdirSync(cacheDir)
-        .filter(f => {
-          try { return statSync(join(cacheDir, f)).isFile() } catch { return false }
-        })
-      if (cacheFiles.length > 0) {
-        const fileList = cacheFiles.map(f => `  - @.cache/${f}`).join('\n')
-        dynamicSections.push(
-          `## 已上传的附件文件（位于 cwd/.cache/）\n` +
-          `以下文件已上传到当前会话工作目录，可直接用 @.cache/<文件名> 语法引用：\n${fileList}\n` +
-          `例如：分析 @.cache/${cacheFiles[0]}`
-        )
+  // 注入 uploads 目录中的上传文件列表，让 LLM 知道可以用 @filename 引用
+  if (sessionId) {
+    const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+    if (existsSync(uploadsDir)) {
+      try {
+        const uploadFiles = readdirSync(uploadsDir)
+          .filter(f => {
+            try { return statSync(join(uploadsDir, f)).isFile() } catch { return false }
+          })
+        if (uploadFiles.length > 0) {
+          const fileList = uploadFiles.map(f => `  - @${f}`).join('\n')
+          dynamicSections.push(
+            `## 已上传的附件文件\n` +
+            `以下文件已上传到当前会话，可直接用 @<文件名> 语法引用：\n${fileList}\n` +
+            `例如：分析 @${uploadFiles[0]}`
+          )
+        }
+      } catch {
+        // 读取失败时静默忽略
       }
-    } catch {
-      // 读取失败时静默忽略
     }
   }
 

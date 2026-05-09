@@ -15,6 +15,7 @@ import { SkillTool, SkillListTool, SkillSaveTool } from './SkillTool.js'
 import { SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool, SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool } from './SkillHubTool.js'
 import { TEAM_TOOLS } from './TeamTools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
+import { WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListTool } from './WorkdirTools.js'
 import type { ToolDef } from '../core/Tool.js'
 
 // 根据平台选择 shell 工具：Windows 使用 PowerShellTool，其他平台使用 BashTool
@@ -27,6 +28,7 @@ export {
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
   SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool,
   SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
+  WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListTool,
 }
 export { TEAM_TOOLS } from './TeamTools.js'
 export { MEMORY_TOOLS } from '../memory/index.js'
@@ -56,6 +58,10 @@ export const ALL_TOOLS: ToolDef[] = [
   SkillHubInstallTool,
   SkillHubRecommendTool,
   SkillHubSetupTool,
+  WorkdirInitTool,
+  WorkdirDeliverTool,
+  WorkdirCleanupTool,
+  WorkdirListTool,
   // SkillHubListTool、SkillHubUninstallTool、SkillHubUpgradeTool 已从 ALL_TOOLS 移除，
   // 减少 LLM 工具列表膨胀。如需使用，可通过 bash 命令或直接 import 调用。
   ...TEAM_TOOLS,

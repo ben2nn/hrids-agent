@@ -112,6 +112,7 @@ export interface QueryEngineConfig {
   maxBudgetUsd?: number          // 成本预算上限（USD），超出后停止执行
   autoCompactThreshold?: number  // 历史消息数超过此值时自动触发压缩（默认 80）
   sessionCwd?: string            // 会话工作目录，用于图片预处理
+  uploadsDir?: string            // 会话上传目录，用于 @引用 搜索
 }
 export type InterruptReason = 'turn_limit' | 'budget_exceeded' | 'aborted' | 'error' | 'permission_denied'
 
@@ -645,7 +646,7 @@ ${contentToSummarize}
    */
   private async preprocessUserMessage(text: string): Promise<string | ContentBlock[]> {
     const cwd = this.config.sessionCwd!
-    const { attachments, cleanText, errors } = await extractMediaFromText(text, cwd)
+    const { attachments, cleanText, errors } = await extractMediaFromText(text, cwd, this.config.uploadsDir)
 
     if (attachments.length === 0) {
       // 没有成功加载的媒体，返回原始文本（保留失败引用，让 LLM 知道）

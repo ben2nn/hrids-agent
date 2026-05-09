@@ -7,7 +7,7 @@ import type { CommandContext } from '../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js'
 import type { CronJob } from '../tools/ScheduleCronTool.js'
 import { listSessions, loadSessionEvents, generateSessionId, saveSession, archiveSession, listArchives } from '../core/SessionStore.js'
-import { getSessionWorkDir } from '../core/ContextBuilder.js'
+import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js'
 
@@ -356,7 +356,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       engine.clearHistory()
       setSessionId(newId)
       // 重置工作目录到新的独立子目录，防止旧任务文件污染新任务
-      const newWorkDir = getSessionWorkDir(newId)
+      const newWorkDir = getSessionWorkDirPath(newId)
       setGlobalCwd(newWorkDir)
       try { process.chdir(newWorkDir) } catch { /* 忽略 */ }
       push({ role: 'system', text: `已创建新会话 (${newId})\n工作目录: ${newWorkDir}` })

@@ -1,6 +1,6 @@
 // Server 模式 —— 持续从 stdin 读取 NDJSON 消息，保持会话历史
 import { saveSession, generateSessionId, loadSessionEvents, listSessions, listArchives, archiveSession } from '../core/SessionStore.js'
-import { getSessionWorkDir } from '../core/ContextBuilder.js'
+import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd, getGlobalCwd } from '../core/cwd.js'
 import { CommandRegistry, createBuiltinCommands } from '../core/CommandRegistry.js'
 import { resolveAskUser } from '../tools/AskUserTool.js'
@@ -99,7 +99,7 @@ export async function runServerMode(
           newSession: () => {
             const newId = generateSessionId()
             engine.clearHistory()
-            const newWorkDir = getSessionWorkDir(newId)
+            const newWorkDir = getSessionWorkDirPath(newId)
             setGlobalCwd(newWorkDir)
             // 不调用 process.chdir，避免影响全局进程工作目录
           },

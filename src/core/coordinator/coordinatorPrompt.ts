@@ -93,6 +93,12 @@ const SECTION_FILE_PATH = `# 文件路径
  - 相对路径自动解析到当前工作目录（见环境信息中的"当前工作目录"）
  - 例外：用户明确要求写到某个绝对路径时才可使用`
 
+const SECTION_WORKDIR = `# 工作目录管理
+
+当你执行任务需要工作空间（存储文件、运行代码、保存中间结果等）时，先调用 workdir_init 工具创建工作目录。
+任务完成后，调用 workdir_deliver 工具整理交付摘要。
+纯对话类任务无需创建工作目录。`
+
 const SECTION_OUTPUT = `# 输出规范
 
  - 使用中文回复，简洁直接，不重复已知信息
@@ -527,7 +533,7 @@ const EXTENSIONS: Record<TaskType, PromptExtension> = {
 /** 文件名 → 默认内容映射。供 init 命令生成初始 .md 文件。 */
 export const DEFAULT_MAIN_AGENT_FILES: Record<string, string> = {
   IDENTITY: SECTION_INTRO,
-  SOUL: [SECTION_EXECUTION, SECTION_ACTIONS, SECTION_FILE_PATH].join('\n\n'),
+  SOUL: [SECTION_EXECUTION, SECTION_ACTIONS, SECTION_FILE_PATH, SECTION_WORKDIR].join('\n\n'),
   BOOTSTRAP: [SECTION_TODO, EXT_TASK.content].join('\n\n'),
   TOOLS: SECTION_TOOLS,
   USER: [SECTION_DECISION, SECTION_OUTPUT, SECTION_COREFERENCE].join('\n\n'),
@@ -636,7 +642,8 @@ const SECTION_TOOLS_REFERENCE_FALLBACK = `# 工具速查
  - 人机交互：ask_user / request_decision
  - 协作：agent / schedule_cron
  - 技能管理：skill / skill_list / skill_save
- - SkillHub：skillhub_search / skillhub_install / skillhub_recommend / skillhub_config`
+ - SkillHub：skillhub_search / skillhub_install / skillhub_recommend / skillhub_config
+ - 工作目录：workdir_init / workdir_deliver / workdir_cleanup / workdir_list`
 
 export function isCoordinatorMode(): boolean {
   return process.env.HRIDS_COORDINATOR_MODE === '1'

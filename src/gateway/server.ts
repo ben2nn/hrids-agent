@@ -777,15 +777,16 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // POST /sessions/:id/upload — 上传文件到会话工作目录
+  // POST /sessions/:id/upload — 上传文件到会话 uploads 目录
   // 请求体：JSON { files: Array<{ name: string; data: string }> }
   // data 为 base64 编码的文件内容
   app.post('/sessions/:id/upload', (req, res) => {
-    const activeSession = manager.getSession(req.params.id)
-    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+    const sessionId = req.params.id
+    const sessionDir = join(getConfigDir(), 'sessions', sessionId)
 
-    if (!cwd) {
-      res.status(404).json({ error: '会话不存在或无工作目录' })
+    // 确保 session 目录存在（新建会话可能还没有 session 目录）
+    if (!existsSync(sessionDir)) {
+      res.status(404).json({ error: '会话不存在' })
       return
     }
 
@@ -802,6 +803,9 @@ export function createGateway(config: GatewayConfig = {}) {
         return
       }
 
+      const uploadsDir = join(sessionDir, 'uploads')
+      mkdirSync(uploadsDir, { recursive: true })
+
       const uploaded: Array<{ name: string; path: string; size: number }> = []
 
       for (const file of body.files) {
@@ -817,13 +821,11 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        // 图片统一存放到 cwd/.cache/ 子目录
-        const imagesDir = resolve(cwd, '.cache')
-        const destPath = resolve(imagesDir, safeName)
+        const destPath = resolve(uploadsDir, safeName)
 
-        // 安全检查：确保目标路径在 cwd 内
-        if (!destPath.startsWith(resolve(cwd))) {
-          res.status(403).json({ error: '禁止写入 cwd 之外的路径' })
+        // 安全检查：确保目标路径在 uploadsDir 内
+        if (!destPath.startsWith(resolve(uploadsDir))) {
+          res.status(403).json({ error: '禁止写入 uploads 目录之外的路径' })
           return
         }
 
@@ -836,12 +838,10 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        mkdirSync(imagesDir, { recursive: true })
         writeFileSync(destPath, buffer)
 
-        log.info('文件已上传', { sessionId: req.params.id, file: safeName, size: buffer.length })
-        // name 返回相对路径，前端用 getImageUrl(sessionId, '.cache/xxx.jpg') 加载
-        uploaded.push({ name: `.cache/${safeName}`, path: destPath, size: buffer.length })
+        log.info('文件已上传', { sessionId, file: safeName, size: buffer.length })
+        uploaded.push({ name: safeName, path: destPath, size: buffer.length })
       }
 
       res.json({ files: uploaded })

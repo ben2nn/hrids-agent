@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getConfigDir } from './Config.js'
+import { ensureWorkDir } from './ContextBuilder.js'
 
 function initDefaultCwd(): string {
   const dir = join(getConfigDir(), 'work')
@@ -32,6 +33,17 @@ export function runWithCwd<T>(cwd: string, fn: () => T): T {
  */
 export function getGlobalCwd(): string {
   return cwdStorage.getStore()?.cwd ?? _fallbackCwd
+}
+
+/**
+ * 确保当前会话的工作目录实际存在（惰性初始化）。
+ * 返回 true 表示此次新建了目录，false 表示目录已存在。
+ */
+export function ensureWorkDirForCurrentCwd(): boolean {
+  const dir = getGlobalCwd()
+  if (existsSync(dir)) return false
+  ensureWorkDir(dir)
+  return true
 }
 
 /**

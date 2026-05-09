@@ -419,7 +419,7 @@ export async function loadMediaFromBuffer(
  * 解析消息文本中的 @引用，提取所有媒体附件。
  *
  * 支持的语法：
- *   @filename.jpg          → 相对于 cwd 的本地文件
+ *   @filename.jpg          → 相对于 cwd 或 uploadsDir 的本地文件
  *   @/abs/path/img.png     → 绝对路径
  *   @https://example.com/img.jpg  → URL 图片
  *
@@ -431,6 +431,7 @@ export async function loadMediaFromBuffer(
 export async function extractMediaFromText(
   text: string,
   cwd: string,
+  uploadsDir?: string,
 ): Promise<{
   attachments: MediaAttachment[]
   cleanText: string
@@ -462,8 +463,13 @@ export async function extractMediaFromText(
       attachment = await loadMediaFromUrl(ref)
       if (!attachment) errors.push(`URL 加载失败: ${ref}`)
     } else {
+      // 搜索顺序：cwd → uploadsDir
       const absPath = resolve(cwd, ref)
       attachment = await loadMediaFromFile(absPath, ref)
+      if (!attachment && uploadsDir) {
+        const uploadsPath = resolve(uploadsDir, ref)
+        attachment = await loadMediaFromFile(uploadsPath, ref)
+      }
       if (!attachment) errors.push(`文件不存在或格式不支持: ${ref}`)
     }
 

@@ -9,7 +9,7 @@ import { ALL_TOOLS } from '../tools/index.js'
 import { createAgentTool } from '../tools/AgentTool.js'
 import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js'
+import { buildSystemContext, getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt, classifyTask } from '../core/coordinator/coordinatorPrompt.js'
 import { loadSessionEvents, loadSessionMeta, saveSession, generateSessionId, archiveSession } from '../core/SessionStore.js'
 import { ConversationStore, JsonlEventStorage, createUserMessageEvent, createAssistantMessageEvent } from '../core/ConversationStore.js'
@@ -93,7 +93,7 @@ export class SessionManager {
     const resumeMeta = req.resume ? loadSessionMeta(req.resume) : null
 
     // 确定会话工作目录：优先使用请求中指定的 cwd，resume 时沿用原会话目录，否则新建独立目录
-    const sessionCwd = req.cwd ?? resumeMeta?.workDir ?? getSessionWorkDir(sessionId)
+    const sessionCwd = req.cwd ?? resumeMeta?.workDir ?? getSessionWorkDirPath(sessionId)
 
     log.info('创建会话', { sessionId, model, autoMode: req.autoMode, cwd: sessionCwd })
     auditLog({ sessionId, action: 'session_create', resource: sessionId, result: 'allowed', details: { model } })
@@ -218,6 +218,7 @@ export class SessionManager {
       maxBudgetUsd: agentConfig.maxBudgetUsd,
       autoCompactThreshold: agentConfig.autoCompactThreshold,
       sessionCwd,
+      uploadsDir: join(getConfigDir(), 'sessions', sessionId, 'uploads'),
     }, store)
     session.permissions = permissions
 
@@ -581,7 +582,8 @@ export class SessionManager {
     let processedContent = content  // 去掉 @引用后的干净文本
     if (!hasVisionAttachment) {
       const cwd = session.info.cwd
-      const { attachments: extracted, cleanText, errors } = await extractMediaFromText(content, cwd)
+      const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+      const { attachments: extracted, cleanText, errors } = await extractMediaFromText(content, cwd, uploadsDir)
       if (extracted.length > 0) {
         inlineAttachments.push(...extracted)
         processedContent = cleanText
@@ -596,7 +598,8 @@ export class SessionManager {
     if (!hasVisionAttachment && inlineAttachments.length === 0) {
       const hasVisionIntent = isVisionIntent(content)
       if (hasVisionIntent) {
-        const recentImages = await extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd)
+        const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+        const recentImages = await extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd, uploadsDir)
         inlineAttachments.push(...recentImages)
         if (recentImages.length > 0) {
           log.info('检测到视觉意图，从历史中提取最近图片', { sessionId, count: recentImages.length, files: recentImages.map(a => a.name) })
@@ -1064,6 +1067,7 @@ function isVisionIntent(message: string): boolean {
 async function extractRecentImagesFromHistory(
   history: readonly import('../core/QueryEngine.js').Message[],
   cwd: string,
+  uploadsDir?: string,
 ): Promise<Array<{ name: string; data: string; mediaType: string }>> {
   const imagePattern = /@([^\s@]+\.(?:jpg|jpeg|png|gif|webp|bmp|tiff?|avif|pdf))/gi
 
@@ -1106,8 +1110,11 @@ async function extractRecentImagesFromHistory(
       if (seen.has(filename)) continue
       seen.add(filename)
 
-      const absPath = resolve(cwd, filename)
-      const attachment = await loadMediaFromFile(absPath, filename)
+      // 搜索顺序：cwd → uploadsDir
+      let attachment = await loadMediaFromFile(resolve(cwd, filename), filename)
+      if (!attachment && uploadsDir) {
+        attachment = await loadMediaFromFile(resolve(uploadsDir, filename), filename)
+      }
       if (attachment) result.push(attachment)
     }
 
