@@ -40,7 +40,11 @@ function extractRemovalTarget(command: string): string | null {
 
 export const PowerShellTool: ToolDef<typeof inputSchema> = {
   name: 'bash',  // 对外统一命名为 bash，LLM 无需感知平台差异；实际由 powershell.exe 执行
-  description: '执行 shell 命令（当前平台：Windows PowerShell），返回 stdout 和 stderr。',
+  description: `执行 shell 命令。适合运行脚本、安装依赖、git 操作、系统管理等无法用专用工具完成的任务。
+适用场景：运行程序/脚本、安装包（pip/npm install）、git 操作、进程管理、网络诊断
+不适用场景：读取文件 → 用 file_read | 搜索文件 → 用 glob | 搜索内容 → 用 grep
+             编辑文件 → 用 file_edit | 创建文件 → 用 file_write
+             问候/闲聊/简单问答 → 不需要任何工具，直接回复`,
   inputSchema,
   readonly: false,
 

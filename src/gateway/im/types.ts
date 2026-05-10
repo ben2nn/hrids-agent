@@ -76,7 +76,7 @@ export interface SendResult {
   retryable?: boolean
 }
 
-// ── 平台配置（存储在 ~/.hrids-agent/im-platforms.json）────────────────────────
+// ── 平台配置（存储在 ~/.hrids/im-platforms.json）────────────────────────
 export interface TelegramConfig {
   platform: 'telegram'
   enabled: boolean

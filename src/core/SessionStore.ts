@@ -1,8 +1,9 @@
 // 会话持久化 —— 将对话历史保存到本地磁盘
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, rmSync, renameSync } from 'fs'
-import { homedir } from 'os'
 import { join } from 'path'
 import type { Message } from './QueryEngine.js'
+import type { ConversationEvent } from './ConversationStore.js'
+import { getConfigDir } from './Config.js'
 
 /** 压缩归档段元数据 */
 export interface CompactArchive {
@@ -16,7 +17,7 @@ export interface CompactArchive {
   summary: string
 }
 
-const SESSIONS_DIR = join(homedir(), '.hrids-agent', 'sessions')
+const SESSIONS_DIR = join(getConfigDir(), 'sessions')
 
 export interface SessionMeta {
   id: string
@@ -29,6 +30,8 @@ export interface SessionMeta {
   workDir?: string // 该会话的独立工作目录
   /** 上次保存时已持久化的消息数，用于增量追加 */
   savedMessageCount?: number
+  /** 所属智能体名称（如 main），子智能体由 AgentTool/AgentPool 标记 */
+  agent?: string
 }
 
 function ensureDir(dir: string) {
@@ -40,6 +43,7 @@ export function saveSession(
   messages: readonly Message[],
   model: string,
   workDir?: string,
+  agent?: string,
 ) {
   ensureDir(SESSIONS_DIR)
   const sessionDir = join(SESSIONS_DIR, sessionId)
@@ -91,6 +95,7 @@ export function saveSession(
     title,
     lastUserMessage,
     workDir: workDir ?? existing?.workDir,
+    agent: agent ?? existing?.agent ?? 'main',
   }
   // 原子写入 meta.json：先写 .tmp 再 rename，防止并发写入时文件损坏
   const metaPath = join(sessionDir, 'meta.json')
@@ -105,6 +110,27 @@ export function loadSession(sessionId: string): Message[] | null {
 
   const lines = readFileSync(transcriptPath, 'utf-8').split('\n').filter(Boolean)
   return lines.map(l => JSON.parse(l) as Message)
+}
+
+/**
+ * 加载会话的事件日志。
+ * 优先从 events.jsonl 加载，降级到 transcript.jsonl（返回 null 表示需要旧格式转换）。
+ */
+export function loadSessionEvents(sessionId: string): ConversationEvent[] | null {
+  const sessionDir = join(SESSIONS_DIR, sessionId)
+  const eventsPath = join(sessionDir, 'events.jsonl')
+
+  if (existsSync(eventsPath)) {
+    const content = readFileSync(eventsPath, 'utf-8')
+    if (!content.trim()) return []
+    return content
+      .split('\n')
+      .filter(line => line.trim())
+      .map(line => JSON.parse(line) as ConversationEvent)
+  }
+
+  // 没有 events.jsonl，返回 null
+  return null
 }
 
 export function loadSessionMeta(sessionId: string): SessionMeta | null {
@@ -258,7 +284,7 @@ export function pruneOldSessions(opts: {
 
 /**
  * 删除指定会话的所有数据（transcript、meta、归档文件等全部删除）。
- * 同时删除该会话的工作目录（~/.hrids-agent/work/<date>-<id>/）。
+ * 同时删除该会话的工作目录（~/.hrids/work/<date>-<id>/）。
  * inMemoryCwd：活跃会话在内存中的 cwd，优先于 meta.json 里的 workDir（防止 meta 未写入的情况）。
  * 若目录不存在则静默忽略。
  */
@@ -273,9 +299,9 @@ export function deleteSessionFromDisk(sessionId: string, inMemoryCwd?: string): 
     rmSync(sessionDir, { recursive: true, force: true })
   }
 
-  // 删除工作目录（仅删除 ~/.hrids-agent/work/ 下的子目录，防止误删用户自定义路径）
+  // 删除工作目录（仅删除 ~/.hrids/work/ 下的子目录，防止误删用户自定义路径）
   if (workDir) {
-    const workBase = join(homedir(), '.hrids-agent', 'work')
+    const workBase = join(getConfigDir(), 'work')
     // 安全检查：只删 work/ 下的目录，且不能是 work/ 本身
     if (workDir.startsWith(workBase + '/') || workDir.startsWith(workBase + '\\')) {
       if (existsSync(workDir)) {

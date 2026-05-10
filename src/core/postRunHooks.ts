@@ -3,9 +3,9 @@
 
 import { mkdirSync, writeFileSync, renameSync, existsSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { runMemoryPipeline } from '../memory/index.js'
 import { logger } from './logger.js'
+import { getConfigDir } from './Config.js'
 import type { QueryEngine, ContentBlock } from './QueryEngine.js'
 import type { LLMProvider } from './providers/types.js'
 
@@ -138,7 +138,7 @@ ${condensed}`
 
     log.info('Skill 总结：LLM 提炼完成', { skillName: parsed.name, caller: 'skill-distill' })
 
-    const skillDir = join(homedir(), '.hrids-agent', 'skills', parsed.name)
+    const skillDir = join(getConfigDir(), 'skills', parsed.name)
     const skillMdPath = join(skillDir, 'SKILL.md')
     const isUpdate = existsSync(skillMdPath)
 

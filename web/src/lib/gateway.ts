@@ -29,8 +29,9 @@ export function setGatewayConfig(url: string, token: string): void {
 /**
  * 封装 fetch，自动拼接 baseURL 并添加 Authorization header。
  * 非 2xx 响应会抛出包含状态码的 Error。
+ * @param timeoutMs 超时时间（ms），默认 120s。上传等大请求应传更大值。
  */
-async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+async function apiFetch(path: string, options: RequestInit = {}, timeoutMs = 120_000): Promise<Response> {
   const url = `${_gatewayUrl}${path}`
 
   const headers: Record<string, string> = {
@@ -42,13 +43,25 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
     headers['Authorization'] = `Bearer ${_authToken}`
   }
 
-  const response = await fetch(url, { ...options, headers })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText} (${path})`)
+  try {
+    const response = await fetch(url, { ...options, headers, signal: controller.signal })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText} (${path})`)
+    }
+
+    return response
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}s）: ${path}`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
   }
-
-  return response
 }
 
 // ─── 连接检查 ──────────────────────────────────────────────────────────────
@@ -244,7 +257,7 @@ export async function uploadFiles(sessionId: string, files: File[]): Promise<Upl
   const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/upload`, {
     method: 'POST',
     body: JSON.stringify({ files: filePayloads }),
-  })
+  }, 300_000) // 上传文件给 5 分钟超时
   return res.json()
 }
 

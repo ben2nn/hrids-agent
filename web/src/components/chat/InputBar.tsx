@@ -481,6 +481,8 @@ function hasWriteIntent(message: string): boolean {
   return WRITE_PATTERNS.some(p => p.test(message))
 }
 
+// ─── InputBar 主组件 ───────────────────────────────────────────────────────
+
 export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
   function InputBar({ sessionId, isBusy }, ref) {
     const [text, setText] = useState('')
@@ -518,9 +520,17 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
       if (!isBusy) setHasSent(false)
     }, [isBusy])
 
-    // sessionId 切换时重置 hasSent（保活场景下组件不重建，需手动重置）
+    // sessionId 切换时重置 hasSent 和附件状态（保活场景下组件不重建，需手动重置）
     useEffect(() => {
       setHasSent(false)
+      setPendingFiles([])
+      setUploadedFiles([])
+      setIsUploading(false)
+      setUploadError(null)
+      setImagePreviews(prev => {
+        prev.forEach(url => URL.revokeObjectURL(url))
+        return new Map()
+      })
     }, [sessionId])
     // 自动扩展 textarea 高度，最小保持 MIN_ROWS 行
     useEffect(() => {
@@ -600,7 +610,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
     const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(e.target.files ?? [])
-      if (files.length === 0) return
+      if (files.length === 0 || !sessionId) return
 
       // 重置 input，允许重复选择同一文件
       e.target.value = ''
@@ -622,12 +632,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
 
       try {
         const result = await uploadFiles(sessionId, files)
-        // 标记图片文件
-        const enriched = result.files.map(f => ({ ...f, isImage: isImageFile(f.name) }))
+        // 防御性提取文件名（后端已返回纯文件名，此处兼容历史数据）
+        const getBaseName = (name: string) => name.split('/').pop() ?? name
+        const enriched = result.files.map(f => ({ ...f, isImage: isImageFile(getBaseName(f.name)) }))
         setUploadedFiles(prev => [...prev, ...enriched])
         setPendingFiles(prev => {
-          const uploadedNames = new Set(result.files.map(f => f.name))
-          return prev.filter(f => !uploadedNames.has(f.name))
+          const uploadedBaseNames = new Set(result.files.map(f => getBaseName(f.name)))
+          return prev.filter(f => !uploadedBaseNames.has(f.name))
         })
       } catch (err) {
         setUploadError(`上传失败: ${String(err)}`)
@@ -836,7 +847,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(
                       {imageFiles.length > 0 && (
                         <div className="flex flex-wrap gap-2">
                           {imageFiles.map((file) => {
-                            const previewUrl = imagePreviews.get(file.name)
+                            const baseName = file.name.split('/').pop() ?? file.name
+                            const previewUrl = imagePreviews.get(baseName)
                             return (
                               <div key={file.name} className="relative group">
                                 <div className="w-16 h-16 rounded-lg overflow-hidden border border-[var(--border)] bg-[var(--bg-tertiary)]">

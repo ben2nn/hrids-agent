@@ -1,8 +1,8 @@
 // Gateway 模式 —— 启动 HTTP + WebSocket 服务，供前端或远程客户端连接
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { createGateway } from '../gateway/server.js'
+import { getConfigDir } from '../core/Config.js'
 import { restoreScheduledJobs, setCronTriggerCallback } from '../tools/ScheduleCronTool.js'
 import { logger } from '../core/logger.js'
 
@@ -43,7 +43,7 @@ export async function runGatewayMode(opts: GatewayModeOpts): Promise<void> {
 
         // 降级：无归属时回退到知了会话（兼容旧 cron 数据）
         if (!targetSessionId) {
-          const zhileFile = join(homedir(), '.hrids-agent', 'zhile-session.json')
+          const zhileFile = join(getConfigDir(), 'zhile-session.json')
           if (!existsSync(zhileFile)) {
             logger.warn('[cron] 任务无 sessionId 归属且知了会话文件不存在，跳过触发', { jobId: job.id })
             return

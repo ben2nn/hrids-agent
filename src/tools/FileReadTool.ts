@@ -16,7 +16,9 @@ const MAX_FILE_SIZE = 1024 * 1024 // 1MB
 
 export const FileReadTool: ToolDef<typeof inputSchema> = {
   name: 'file_read',
-  description: '读取文件内容，支持指定行范围，默认显示行号便于精确编辑',
+  description: `读取文件内容。用这个而不是 bash cat。
+适用场景：查看代码、配置文件、日志、数据文件
+不适用场景：搜索文件中的文本 → 用 grep | 查找文件路径 → 用 glob`,
   inputSchema,
   readonly: true,
 

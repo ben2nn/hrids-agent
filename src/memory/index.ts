@@ -1,5 +1,5 @@
 // 记忆系统入口
-export { MemoryStore, getMemoryStore, getMemoryStoreForSession, destroyMemoryStoreForSession } from './store.js'
+export { MemoryStore, getMemoryStore, getMemoryStoreForSession, destroyMemoryStoreForSession, migrateOldMemoryStore } from './store.js'
 export { MemoryStack, getMemoryStack, getMemoryStackForSession, destroyMemoryStackForSession } from './layers.js'
 export { extractMemories, extractFromConversation } from './extractor.js'
 export { runMemoryPipeline } from './pipeline.js'

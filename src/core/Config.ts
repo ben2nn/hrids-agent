@@ -1,15 +1,31 @@
-// 配置系统 —— 读写 ~/.hrids-agent/config.json
+// 配置系统 —— 读写 ~/.hrids/config.yaml（YAML 优先，JSON 降级兼容）
 // 所有运行时配置均从此文件读取，不再依赖 .env
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, statSync, renameSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { McpServerConfig } from '../tools/McpTool.js'
 import type { CustomProviderConfig } from './providers/registry.js'
 import { normalizeProvider } from './providers/registry.js'
+import { loadYamlFile, saveYamlFile } from './YamlLoader.js'
 
-const CONFIG_DIR = join(homedir(), '.hrids-agent')
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
+const OLD_CONFIG_DIR = join(homedir(), '.hrids-agent')
+const CONFIG_DIR = join(homedir(), '.hrids')
+const CONFIG_YAML_FILE = join(CONFIG_DIR, 'config.yaml')
 const MCP_FILE = join(CONFIG_DIR, 'mcp.json')
+
+// 启动时自动迁移旧目录
+function migrateOldConfigDir() {
+  if (existsSync(OLD_CONFIG_DIR) && !existsSync(CONFIG_DIR)) {
+    try {
+      renameSync(OLD_CONFIG_DIR, CONFIG_DIR)
+      process.stderr.write(`[config] 已迁移配置目录 ${OLD_CONFIG_DIR} → ${CONFIG_DIR}\n`)
+    } catch (err) {
+      process.stderr.write(`[config] 目录迁移失败（将继续使用旧目录）: ${String(err)}\n`)
+    }
+  }
+}
+// 立即执行迁移（模块加载时）
+migrateOldConfigDir()
 
 // ── 模型 Fallback 配置 ────────────────────────────────────────
 
@@ -66,6 +82,8 @@ export interface VectorStoreConfig {
 // ── Agent 行为配置 ────────────────────────────────────────────
 
 export interface AgentBehaviorConfig {
+  /** 默认模型（无 llm.fallbacks 时使用，可被 -m 覆盖） */
+  model?: string
   /** 权限模式：ask（每次确认）| craft（自主执行）| plan（只读计划） */
   permissionMode?: 'ask' | 'craft' | 'plan'
   /** 单次回复最大 token 数 */
@@ -126,12 +144,50 @@ export interface SkillHubConfig {
   primaryDownloadUrlTemplate?: string
 }
 
+// ── 多智能体配置 ────────────────────────────────────────────────
+
+/** 智能体角色模板 */
+export interface AgentProfile {
+  name: string
+  description: string
+  model?: string
+  provider?: string
+  apiKey?: string
+  baseUrl?: string
+  systemPrompt?: string
+  systemPromptFile?: string
+  allowedTools?: string[]
+  maxTurns?: number
+  maxBudgetUsd?: number
+  isolated?: boolean
+  autoSelectable?: boolean
+  metadata?: Record<string, string>
+}
+
+export interface MultiAgentConfig {
+  globalMaxConcurrent?: number
+  defaultMaxTurns?: number
+  defaultTimeoutMs?: number
+  defaultModel?: string
+  defaultProvider?: string
+  profiles?: AgentProfile[]
+  profileDirs?: string[]
+  autoSelectProfiles?: boolean
+  allowRecursiveAgent?: boolean
+}
+
+export interface ToolPermissionPolicy {
+  defaultDenyList?: string[]
+  profileOverrides?: Record<string, string[]>
+  allowMcpTools?: boolean
+}
+
 // ── 主配置接口 ────────────────────────────────────────────────
 
 export interface AgentConfig {
   // ── 基础 ──────────────────────────────────────────────────
-  /** 默认模型（无 llm.fallbacks 时使用） */
-  model: string
+  /** @deprecated 请使用 agent.model */
+  model?: string
   /** 显式指定提供商（支持内置 ID、别名、customProviders 中的名称） */
   provider?: string
   /** 直接内联 API Key（不推荐，建议在 fallbacks 中按提供商配置） */
@@ -163,6 +219,10 @@ export interface AgentConfig {
   skillHub?: SkillHubConfig
   mcpServers: McpServerConfig[]
   customProviders?: CustomProviderConfig[]
+
+  // ── 多智能体 ───────────────────────────────────────────────
+  multiAgent?: MultiAgentConfig
+  toolPermissions?: ToolPermissionPolicy
 
   // ── 向后兼容：旧版扁平字段（已迁移到 agent / logging 分组） ──
   /** @deprecated 请使用 agent.permissionMode */
@@ -205,6 +265,7 @@ export interface ResolvedConfig extends AgentConfig {
 const DEFAULTS = {
   model: 'qwen3.5-122b-a10b',
   agent: {
+    model: 'qwen3.5-122b-a10b',
     permissionMode: 'ask' as const,
     maxTokens: 8096,
     maxTurns: 50,
@@ -229,11 +290,24 @@ const DEFAULTS = {
     apiBase: 'https://api.skillhub.cn',
   },
   mcpServers: [] as McpServerConfig[],
+  multiAgent: {
+    globalMaxConcurrent: 10,
+    defaultMaxTurns: 30,
+    defaultTimeoutMs: 300000,
+    autoSelectProfiles: true,
+    allowRecursiveAgent: false,
+    profiles: [],
+    profileDirs: [],
+  } as MultiAgentConfig,
+  toolPermissions: {
+    defaultDenyList: ['todo_write', 'todo_update', 'todo_append', 'todo_reset'],
+    allowMcpTools: false,
+  } as ToolPermissionPolicy,
 }
 
 // ── 单例缓存 ──────────────────────────────────────────────────
 let _cachedConfig: ResolvedConfig | null = null
-// 上次成功读取 config.json 时的文件修改时间（ms），用于检测外部修改
+// 上次成功读取配置文件时的文件修改时间（ms），用于检测外部修改
 let _cachedMtime = 0
 
 function ensureConfigDir() {
@@ -241,7 +315,7 @@ function ensureConfigDir() {
 }
 
 /**
- * 将原始 JSON 配置规范化为 ResolvedConfig：
+ * 将原始配置规范化为 ResolvedConfig：
  * - 新格式（agent / logging 分组）优先
  * - 旧版扁平字段自动迁移（向后兼容）
  * - 过滤掉 _comment / _example 等注释字段
@@ -280,6 +354,7 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
 
   // 合并 agent 分组（新格式优先，旧字段兜底）
   const agent: Required<AgentBehaviorConfig> = {
+    model:          clean.agent?.model           ?? clean.model           ?? DEFAULTS.agent.model,
     permissionMode: clean.agent?.permissionMode ?? clean.permissionMode ?? DEFAULTS.agent.permissionMode,
     maxTokens:      clean.agent?.maxTokens      ?? clean.maxTokens      ?? DEFAULTS.agent.maxTokens,
     maxTurns:       clean.agent?.maxTurns        ?? clean.maxTurns        ?? DEFAULTS.agent.maxTurns,
@@ -304,13 +379,28 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     ...clean.gateway,
   }
 
-  // 深合并 vectorStore / skillHub
+  // 深合并 vectorStore / skillHub / multiAgent / toolPermissions
   const vectorStore: VectorStoreConfig = { ...DEFAULTS.vectorStore, ...clean.vectorStore }
   const skillHub: SkillHubConfig = { ...DEFAULTS.skillHub, ...clean.skillHub }
+  const multiAgent: MultiAgentConfig = {
+    ...DEFAULTS.multiAgent,
+    ...clean.multiAgent,
+    // 内联 profiles 深度合并（用户配置覆盖默认）
+    profiles: clean.multiAgent?.profiles ?? DEFAULTS.multiAgent?.profiles ?? [],
+    profileDirs: clean.multiAgent?.profileDirs ?? DEFAULTS.multiAgent?.profileDirs ?? [],
+  }
+  const toolPermissions: ToolPermissionPolicy = {
+    ...DEFAULTS.toolPermissions,
+    ...clean.toolPermissions,
+    profileOverrides: {
+      ...(DEFAULTS.toolPermissions?.profileOverrides ?? {}),
+      ...(clean.toolPermissions?.profileOverrides ?? {}),
+    },
+  }
 
   return {
-    // 基础字段
-    model:    clean.model    ?? DEFAULTS.model,
+    // 基础字段（model 新规范位置为 agent.model，顶层 model 向后兼容）
+    model:    agent.model,
     provider: clean.provider,
     apiKey:   clean.apiKey,
     baseUrl:  clean.baseUrl,
@@ -330,6 +420,9 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     skillHub,
     mcpServers:      clean.mcpServers      ?? DEFAULTS.mcpServers,
     customProviders: clean.customProviders ?? [],
+    // 多智能体
+    multiAgent,
+    toolPermissions,
     // 展开扁平字段（供旧代码直接访问）
     permissionMode:   agent.permissionMode,
     maxTokens:        agent.maxTokens,
@@ -344,12 +437,14 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
 }
 
 export function loadConfig(): ResolvedConfig {
+  // 检测活跃的配置文件
+  const activeFile = existsSync(CONFIG_YAML_FILE) ? CONFIG_YAML_FILE : null
+
   // 检查文件是否被外部修改（mtime 变化则使缓存失效）
-  if (_cachedConfig) {
+  if (_cachedConfig && activeFile) {
     try {
-      const mtime = statSync(CONFIG_FILE).mtimeMs
+      const mtime = statSync(activeFile).mtimeMs
       if (mtime === _cachedMtime) return _cachedConfig
-      // 文件已被外部修改，清除缓存重新读取
       process.stderr.write(`[config] 检测到配置文件变更，重新加载\n`)
       _cachedConfig = null
     } catch {
@@ -359,23 +454,25 @@ export function loadConfig(): ResolvedConfig {
 
   ensureConfigDir()
 
-  if (!existsSync(CONFIG_FILE)) {
+  // 配置文件不存在：自动生成 YAML
+  if (!activeFile) {
     const generated = normalize({})
     try {
-      writeFileSync(CONFIG_FILE, JSON.stringify(generated, null, 2), 'utf-8')
-      process.stderr.write(`[config] 首次启动，已生成配置文件: ${CONFIG_FILE}\n`)
+      saveYamlFile(CONFIG_YAML_FILE, generated)
+      process.stderr.write(`[config] 首次启动，已生成配置文件: ${CONFIG_YAML_FILE}\n`)
     } catch (err) {
       process.stderr.write(`[config] 写入配置文件失败（将使用内存配置）: ${String(err)}\n`)
     }
     const mcpFileServers = loadMcpFile()
     if (mcpFileServers.length > 0) generated.mcpServers = mcpFileServers
     _cachedConfig = generated
+    _cachedMtime = existsSync(CONFIG_YAML_FILE) ? statSync(CONFIG_YAML_FILE).mtimeMs : 0
     return generated
   }
 
+  // 读取配置文件
   try {
-    // 读取时剥离 UTF-8 BOM（\uFEFF），防止 JSON.parse 因 BOM 失败
-    const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8').replace(/^\uFEFF/, '')) as Partial<AgentConfig>
+    const raw = loadYamlFile<Partial<AgentConfig>>(CONFIG_YAML_FILE)
     const config = normalize(raw)
     // 合并 mcp.json
     const mcpFileServers = loadMcpFile()
@@ -387,19 +484,19 @@ export function loadConfig(): ResolvedConfig {
       ]
     }
     _cachedConfig = config
-    _cachedMtime = statSync(CONFIG_FILE).mtimeMs
+    _cachedMtime = statSync(activeFile).mtimeMs
     return config
-  } catch {
-    process.stderr.write(`[config] 配置文件解析失败，使用默认配置\n`)
+  } catch (err) {
+    process.stderr.write(`[config] 配置文件解析失败: ${String(err)}，使用默认配置\n`)
     // 注意：解析失败时不缓存，下次调用仍会重试读取文件（修复文件后无需重启）
     return normalize({})
   }
 }
 
 /**
- * 读取 ~/.hrids-agent/mcp.json，支持两种格式：
+ * 读取 ~/.hrids/mcp.json，支持两种格式：
  *   1. { "mcpServers": { "name": { command, args, env } } }  （对象格式，兼容 Claude Desktop）
- *   2. McpServerConfig[]  （数组格式，与 config.json 一致）
+ *   2. McpServerConfig[]  （数组格式，与 config.yaml 的 mcpServers 一致）
  */
 function loadMcpFile(): McpServerConfig[] {
   if (!existsSync(MCP_FILE)) return []
@@ -423,17 +520,17 @@ function loadMcpFile(): McpServerConfig[] {
 export function saveConfig(patch: Partial<AgentConfig>) {
   ensureConfigDir()
   const current = loadConfig()
-  const updated = normalize({ ...current, ...patch })
-  const tmpFile = CONFIG_FILE + '.tmp'
-  writeFileSync(tmpFile, JSON.stringify(updated, null, 2), 'utf-8')
-  renameSync(tmpFile, CONFIG_FILE)
-  _cachedConfig = updated
-  // 同步 mtime，避免下次 loadConfig 因 mtime 不匹配触发不必要的重新读取
-  try {
-    _cachedMtime = statSync(CONFIG_FILE).mtimeMs
-  } catch {
-    _cachedMtime = 0
+
+  // 将顶层 model 字段同步到 agent.model（如果 patch 中有 model 但没有 agent.model）
+  const mergedPatch = { ...patch }
+  if (patch.model && !patch.agent?.model) {
+    mergedPatch.agent = { ...patch.agent, model: patch.model }
   }
+
+  const updated = normalize({ ...current, ...mergedPatch })
+  saveYamlFile(CONFIG_YAML_FILE, updated)
+  _cachedConfig = updated
+  _cachedMtime = existsSync(CONFIG_YAML_FILE) ? statSync(CONFIG_YAML_FILE).mtimeMs : 0
 }
 
 /** 清除单例缓存（测试用） */
@@ -444,6 +541,12 @@ export function _resetConfigCache() {
 
 export function getConfigDir(): string {
   return CONFIG_DIR
+}
+
+/** 检查主智能体配置是否已初始化（agents/main/ 目录 + IDENTITY.md） */
+export function hasMainAgentConfig(): boolean {
+  const identityPath = join(CONFIG_DIR, 'agents', 'main', 'IDENTITY.md')
+  return existsSync(identityPath)
 }
 
 // ── 便捷读取函数 ──────────────────────────────────────────────

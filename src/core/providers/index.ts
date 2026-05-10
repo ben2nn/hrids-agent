@@ -1,7 +1,6 @@
-// 提供商工厂 —— 根据注册表和 config.json 自动选择正确的提供商
+// 提供商工厂 —— 根据注册表和 config.yaml 自动选择正确的提供商
 import { AnthropicProvider } from './AnthropicProvider.js'
 import { OpenAIProvider } from './OpenAIProvider.js'
-import { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 import { FallbackProvider } from './FallbackProvider.js'
 import type { LLMProvider, ModelType, ProviderConfig } from './types.js'
 import {
@@ -17,21 +16,22 @@ import type { ModelTypeConfig } from '../Config.js'
 export type { LLMProvider, ModelType, ProviderConfig, StreamChunk, ChatMessage, EmbeddingProvider, SpeechProvider } from './types.js'
 export { AnthropicProvider } from './AnthropicProvider.js'
 export { OpenAIProvider } from './OpenAIProvider.js'
-export { DeepSeekAnthropicProvider } from './DeepSeekAnthropicProvider.js'
 export { FallbackProvider } from './FallbackProvider.js'
 export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel } from './registry.js'
 export type { ProviderDef, CustomProviderConfig } from './registry.js'
 
 // ── ProviderOptions ───────────────────────────────────────────
 
+const DEFAULT_MODEL = 'qwen3.5-122b-a10b'
+
 export interface ProviderOptions {
-  model: string
+  model?: string
   apiKey?: string
   baseUrl?: string
   modelType?: ModelType
   /** 显式指定提供商（支持内置 ID、别名、自定义提供商名称） */
   provider?: string
-  /** 用户自定义提供商列表（来自 config.json 的 customProviders） */
+  /** 用户自定义提供商列表（来自 config.yaml 的 customProviders） */
   customProviders?: CustomProviderConfig[]
   /**
    * 工具调用模式（默认 "native"）：
@@ -44,7 +44,7 @@ export interface ProviderOptions {
 // ── 单一提供商创建 ────────────────────────────────────────────
 
 export function createProvider(opts: ProviderOptions): LLMProvider {
-  const { model, baseUrl, customProviders = [] } = opts
+  const { model = DEFAULT_MODEL, baseUrl, customProviders = [] } = opts
 
   // 1. 显式指定提供商
   if (opts.provider) {
@@ -53,7 +53,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
       throw new Error(
         `未知提供商: "${opts.provider}"。\n` +
         `内置提供商: ${BUILTIN_PROVIDER_IDS.join(', ')}\n` +
-        `如需自定义提供商，请在 config.json 的 customProviders 中添加。`
+        `如需自定义提供商，请在 config.yaml 的 customProviders 中添加。`
       )
     }
     return buildFromDef(def, opts)
@@ -78,7 +78,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
 
   throw new Error(
     `无法自动识别模型 "${model}" 的提供商。\n` +
-    `请在 config.json 中设置 provider 字段，或在 llm.fallbacks 中指定 provider。\n` +
+    `请在 config.yaml 中设置 provider 字段，或在 llm.fallbacks 中指定 provider。\n` +
     `内置提供商: ${BUILTIN_PROVIDER_IDS.join(', ')}`
   )
 }
@@ -86,7 +86,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
 // ── 内部：从 ProviderDef 构建 LLMProvider ─────────────────────
 
 function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
-  const { model, modelType, toolMode = 'native' } = opts
+  const { model = DEFAULT_MODEL, modelType, toolMode = 'native' } = opts
   const baseUrl = opts.baseUrl ?? def.defaultBaseUrl
   const apiKey = opts.apiKey
 
@@ -94,11 +94,6 @@ function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
 
   if (def.transport === 'anthropic_messages') {
     if (!apiKey) throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
-    // dsml 模式或 deepseekCompat：使用 DeepSeekAnthropicProvider
-    // 去掉 cache_control 等不兼容字段，工具调用走 DSML 文本解析
-    if (toolMode === 'dsml' || def.deepseekCompat) {
-      return new DeepSeekAnthropicProvider(config)
-    }
     return new AnthropicProvider(config)
   }
 
@@ -114,7 +109,7 @@ function resolveProviderDef(name: string, customs: CustomProviderConfig[]): Prov
   return getBuiltinProvider(name) ?? getCustomProvider(name, customs)
 }
 
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'deepseek-anthropic', 'groq', 'aliyun', 'zhipu', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'groq', 'aliyun', 'zhipu','xiaomi', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
 
 // ── 多模型 Fallback 工厂 ──────────────────────────────────────
 
@@ -149,7 +144,7 @@ interface TypedProviderContext {
 }
 
 /**
- * 从 ModelTypeConfig（config.json 中的 llm / vision / multimodal / speech）
+ * 从 ModelTypeConfig（config.yaml 中的 llm / vision / multimodal / speech）
  * 创建对应的 LLMProvider，支持多平台 Fallback。
  * API Key 直接从各 fallback 条目的 apiKey 字段读取。
  */
@@ -197,7 +192,7 @@ export function createTypedProvider(ctx: TypedProviderContext): LLMProvider | nu
  * 优先级：config.llm.fallbacks > config.llm.model > config.model
  */
 export function createProviderFromConfig(config: {
-  model: string
+  model?: string
   provider?: string
   apiKey?: string
   baseUrl?: string

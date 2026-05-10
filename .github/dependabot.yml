@@ -1,0 +1,89 @@
+# Dependabot 配置
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+
+updates:
+  # npm 依赖更新
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    reviewers:
+      - "myhrids"
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      production:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      development:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    # 忽略主版本更新（可能有破坏性变更）
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+
+  # web 子目录 npm 依赖更新
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    reviewers:
+      - "myhrids"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "web"
+    groups:
+      web-production:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      web-development:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+
+  # GitHub Actions 更新
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    reviewers:
+      - "myhrids"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

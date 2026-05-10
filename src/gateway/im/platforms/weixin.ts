@@ -15,8 +15,8 @@
 import crypto from 'crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import https from 'https'
-import { homedir } from 'os'
 import { join } from 'path'
+import { getConfigDir } from '../../../core/Config.js'
 import QRCode from 'qrcode'
 import { logger } from '../../../core/logger.js'
 import { loadMediaFromBuffer } from '../../../core/MediaProcessor.js'
@@ -61,7 +61,7 @@ const TYPING_START = 1
 
 // ── 持久化路径 ────────────────────────────────────────────────────────────────
 function accountDir(): string {
-  const dir = join(homedir(), '.hrids-agent', 'weixin', 'accounts')
+  const dir = join(getConfigDir(), 'weixin', 'accounts')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   return dir
 }

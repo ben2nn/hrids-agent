@@ -1,9 +1,9 @@
 // 任务管理系统核心模块 —— 实现全部 5 个任务管理工具
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'fs'
-import { resolve, dirname } from 'path'
+import { resolve, join, dirname } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
-import { getGlobalCwd } from './BashTool.js'
+import { getConfigDir } from '../core/Config.js'
 import { auditLog } from '../core/audit.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 
@@ -60,10 +60,15 @@ function triggerTodosUpdated(): void {
 
 /**
  * 解析 todos.json 的绝对路径
- * 使用 getGlobalCwd() 确保路径基于持久化工作目录，而非 process.cwd()
+ * Gateway 模式：sessions/<sessionId>/tasks/todos.json
+ * CLI 模式（无 sessionId）：~/.hrids/tasks/todos.json
  */
 function getTodoFile(): string {
-  return resolve(getGlobalCwd(), '.hrids', 'tasks', 'todos.json')
+  const sessionId = getCurrentSessionId()
+  if (sessionId) {
+    return join(getConfigDir(), 'sessions', sessionId, 'tasks', 'todos.json')
+  }
+  return join(getConfigDir(), 'tasks', 'todos.json')
 }
 
 // ─── 读写操作 ─────────────────────────────────────────────────────────────────
@@ -954,7 +959,7 @@ export const TodoResetTool: ToolDef<typeof todoResetInputSchema> = {
 
     // ── 需求 8.1、12.4：备份当前列表（原子写入）─────────────────────────────
     const timestamp = Date.now()
-    const backupPath = resolve(getGlobalCwd(), '.hrids', 'tasks', `todos.bak.${timestamp}.json`)
+    const backupPath = resolve(dirname(getTodoFile()), `todos.bak.${timestamp}.json`)
     try {
       saveTodos(todos, backupPath)
     } catch (err) {
@@ -1112,13 +1117,9 @@ const todoReadInputSchema = z.strictObject({})
  */
 export const TodoReadTool: ToolDef<typeof todoReadInputSchema> = {
   name: 'todo_read',
-  description: `读取当前任务状态（只读，不修改任何状态）。
-
-返回内容：
-- 任务整体进度（已完成 / 总数）
-- 最近 3 条已完成任务
-- 未完成任务列表（按优先级排序：high → medium → low，同优先级按 id 升序）
-- 当前执行中任务的验收标准（如有）及下一步操作指令`,
+  description: `读取当前任务列表和进度。仅在需要确认任务状态时调用。
+适用场景：确认当前任务进度、查看有哪些待完成的任务
+不适用场景：建立新计划 → 用 todo_write | 问候/闲聊 | 没有任务时自动调用`,
   inputSchema: todoReadInputSchema,
   readonly: true,
 

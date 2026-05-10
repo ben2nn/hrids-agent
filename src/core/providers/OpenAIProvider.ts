@@ -101,14 +101,27 @@ function toOAIMessages(messages: ChatMessage[], systemPrompt: string[], provider
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
           })
         } else {
-          // user 消息：处理 tool_result 和图片内容块
+          // user 消息：处理 text、tool_result、图片内容块
           const blocks = msg.content as Array<{ type: string; tool_use_id?: string; content?: string; source?: { type: string; mediaType?: string; data?: string; url?: string } }>
 
-          // 检查是否有图片块
           const imageBlocks = blocks.filter(b => b.type === 'image')
           const toolResults = blocks.filter(b => b.type === 'tool_result')
+          const textParts = blocks.filter(b => b.type === 'text').map(b => (b as { text?: string }).text ?? '').join('')
 
-          if (imageBlocks.length > 0) {
+          // tool_result → 转为 role: "tool" 消息（OpenAI 格式要求独立消息）
+          // 同时保留 user 消息中的 text 内容（如有）
+          if (toolResults.length > 0) {
+            if (textParts) {
+              result.push({ role: 'user', content: textParts })
+            }
+            for (const tr of toolResults) {
+              result.push({
+                role: 'tool',
+                content: tr.content ?? '',
+                tool_call_id: tr.tool_use_id ?? '',
+              })
+            }
+          } else if (imageBlocks.length > 0) {
             // 包含图片：构建多模态内容数组（OpenAI vision 格式）
             const multiContent: Array<unknown> = []
             for (const b of blocks) {
@@ -128,14 +141,9 @@ function toOAIMessages(messages: ChatMessage[], systemPrompt: string[], provider
             if (multiContent.length > 0) {
               result.push({ role: 'user', content: multiContent as unknown as string })
             }
-          } else if (toolResults.length > 0) {
-            for (const tr of toolResults) {
-              result.push({
-                role: 'tool',
-                content: tr.content ?? '',
-                tool_call_id: tr.tool_use_id ?? '',
-              })
-            }
+          } else if (textParts) {
+            // 纯 text 块（无图片、无 tool_result）
+            result.push({ role: 'user', content: textParts })
           }
         }
       }

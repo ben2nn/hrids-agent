@@ -1,40 +1,47 @@
 // 记忆工具集 —— 供 agent 主动读写记忆
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import type { ToolDef, ToolContext } from '../core/Tool.js'
+import { logger } from '../core/logger.js'
 import { getMemoryStack } from './layers.js'
 import { getMemoryStore } from './store.js'
 
-/** 获取全局 MemoryStack（记忆跨会话共享，会话 ID 仅作来源标记） */
+const log = logger.child({ component: 'memory-tool' })
+
 function resolveStack() {
   return getMemoryStack()
 }
 
-/** 获取全局 MemoryStore（记忆跨会话共享，会话 ID 仅作来源标记） */
 function resolveStore() {
   return getMemoryStore()
+}
+
+function reportError(ctx: ToolContext | undefined, op: string, err: unknown): void {
+  const msg = `[memory] ${op} 失败: ${err instanceof Error ? err.message : String(err)}`
+  log.error(msg)
+  ctx?.onLog?.(msg)
 }
 
 // ── memory_add ───────────────────────────────────────────────
 
 const addSchema = z.object({
   content: z.string().describe('要记住的内容（原始文本）'),
-  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'emotional', 'fact'])
-    .describe('记忆类型：decision=决策, preference=偏好, milestone=里程碑, problem=问题, emotional=情感, fact=事实'),
-  wing: z.string().optional().describe('所属项目/领域（如 my-project, coding, personal）'),
-  room: z.string().optional().describe('所属主题（如 architecture, auth, deployment）'),
+  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'fact'])
+    .describe('记忆类型：decision=决策, preference=偏好, milestone=里程碑, problem=问题, fact=事实'),
   importance: z.number().optional().describe('重要性 1-5，默认 3'),
-  tags: z.array(z.string()).optional().describe('标签列表'),
 })
 
 export const MemoryAddTool: ToolDef<typeof addSchema> = {
   name: 'memory_add',
-  description: `将重要信息写入长期记忆。以下情况必须主动调用：
-- 用户表达偏好（"以后都用X"、"不要用Y"、"我喜欢X风格"）→ type=preference
-- 做出技术决策（"用X替代Y"、"选择了X方案"、"因为X所以用Y"）→ type=decision
-- 完成重要任务（"搞定了"、"上线了"、"终于解决了"）→ type=milestone
+  description: `将重要信息写入长期记忆，跨会话持久化。
+适用场景：
+- 用户明确纠正或要求记住（"以后不要用X"、"记住这个"）→ type=preference
+- 做出有影响的技术决策（"我们决定用X替代Y"）→ type=decision
+- 完成重要里程碑（"上线了"、"搞定了"）→ type=milestone
 - 发现 bug 根因或解决方案 → type=problem
-- 用户提到项目名、技术栈、团队信息等事实 → type=fact
-不要等到会话结束，发现值得记住的内容时立即调用。`,
+不适用场景：
+- 问候/闲聊/简单对话 → 不需要记录
+- 明显的事实（Python 是编程语言）→ 没有必要记录
+- 任务中间状态 → 用 todo 管理，不要用 memory`,
   inputSchema: addSchema,
   readonly: false,
 
@@ -42,20 +49,20 @@ export const MemoryAddTool: ToolDef<typeof addSchema> = {
     return `记住: ${input.content.slice(0, 60)}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const store = resolveStore()
       const mem = store.addMemory({
         content: input.content,
         type: input.type,
-        wing: input.wing ?? 'general',
-        room: input.room ?? 'general',
+        agent: 'main',
         importance: input.importance ?? 3,
-        tags: input.tags ?? [],
       })
+      ctx?.onLog?.(`[memory] 已记录: ${mem.type} - ${input.content.slice(0, 80)}`)
       return { type: 'success', output: `已记住（ID: ${mem.id}，类型: ${mem.type}）` }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '记录', err)
+      return { type: 'error', message: `记录失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -64,14 +71,14 @@ export const MemoryAddTool: ToolDef<typeof addSchema> = {
 
 const searchSchema = z.object({
   query: z.string().describe('搜索查询'),
-  wing: z.string().optional().describe('限定搜索范围的项目/领域'),
-  room: z.string().optional().describe('限定搜索范围的主题'),
   topK: z.number().optional().describe('返回结果数量，默认 5'),
 })
 
 export const MemorySearchTool: ToolDef<typeof searchSchema> = {
   name: 'memory_search',
-  description: '在长期记忆中搜索相关内容。当需要回忆之前的决策、偏好或事实时调用。',
+  description: `在长期记忆中搜索相关内容。
+适用场景：开始新任务前检查是否有相关历史 | 用户提到之前讨论过的话题
+不适用场景：问候/闲聊 | 用户没有提到需要回忆的内容`,
   inputSchema: searchSchema,
   readonly: true,
 
@@ -79,17 +86,17 @@ export const MemorySearchTool: ToolDef<typeof searchSchema> = {
     return `搜索记忆: ${input.query}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
       const text = await stack.searchText(input.query, {
-        wing: input.wing,
-        room: input.room,
         topK: input.topK ?? 5,
       })
+      ctx?.onLog?.(`[memory] 搜索 "${input.query}" 完成`)
       return { type: 'success', output: text }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '搜索', err)
+      return { type: 'error', message: `搜索失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -97,28 +104,31 @@ export const MemorySearchTool: ToolDef<typeof searchSchema> = {
 // ── memory_recall ────────────────────────────────────────────
 
 const recallSchema = z.object({
-  wing: z.string().optional().describe('项目/领域'),
-  room: z.string().optional().describe('主题'),
+  agent: z.string().optional().describe('智能体名称'),
   limit: z.number().optional().describe('最多返回条数，默认 10'),
 })
 
 export const MemoryRecallTool: ToolDef<typeof recallSchema> = {
   name: 'memory_recall',
-  description: '列出特定项目或主题下的记忆（L2 按需检索）。',
+  description: `列出已保存的记忆条目（按重要性排序）。
+适用场景：用户要求查看记忆、需要回顾之前保存的偏好和决策
+不适用场景：每次对话开始时自动调用 | 问候/闲聊`,
   inputSchema: recallSchema,
   readonly: true,
 
   describe(input) {
-    return `回忆: ${[input.wing, input.room].filter(Boolean).join('/') || '全部'}`
+    return `回忆: ${input.agent ?? '全部'}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
-      const text = stack.recall({ wing: input.wing, room: input.room, limit: input.limit })
+      const text = stack.recall({ agent: input.agent, limit: input.limit })
+      ctx?.onLog?.('[memory] 回忆完成')
       return { type: 'success', output: text }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '回忆', err)
+      return { type: 'error', message: `回忆失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -143,16 +153,18 @@ export const MemoryFactTool: ToolDef<typeof factSchema> = {
     return `记录事实: ${input.subject} → ${input.predicate} → ${input.object}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
       const triple = stack.addFact(input.subject, input.predicate, input.object, {
         validFrom: input.validFrom,
         confidence: input.confidence,
       })
+      ctx?.onLog?.(`[memory] 已记录事实: ${input.subject} → ${input.predicate} → ${input.object}`)
       return { type: 'success', output: `已记录事实（ID: ${triple.id}）` }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '记录事实', err)
+      return { type: 'error', message: `记录事实失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -162,18 +174,16 @@ export const MemoryFactTool: ToolDef<typeof factSchema> = {
 const updateSchema = z.object({
   oldId: z.string().describe('要替换的旧记忆 ID（从 memory_search 或 memory_recall 结果中获取）'),
   content: z.string().describe('新的记忆内容'),
-  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'emotional', 'fact']).optional()
+  type: z.enum(['decision', 'preference', 'milestone', 'problem', 'fact']).optional()
     .describe('新的记忆类型（不填则保持原类型）'),
   importance: z.number().optional().describe('新的重要性 1-5'),
 })
 
 export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
   name: 'memory_update',
-  description: `更新一条已有记忆（标记旧记忆失效，写入新版本）。以下情况必须调用而不是 memory_add：
-- 用户改变了之前的决策（"不用X了，改用Y"）
-- 用户修正了之前的偏好（"其实我更喜欢Y"）
-- 之前记录的事实已经过时（版本升级、项目重命名等）
-先用 memory_search 找到旧记忆的 ID，再调用此工具替换。`,
+  description: `更新已有记忆（标记旧记忆失效，写入新版本）。
+适用场景：用户改变之前的决策/偏好、之前记录的事实已过时
+不适用场景：新增记忆 → 用 memory_add | 闲聊中无意提到的信息`,
   inputSchema: updateSchema,
   readonly: false,
 
@@ -181,7 +191,7 @@ export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
     return `更新记忆: ${input.oldId} → ${input.content.slice(0, 50)}`
   },
 
-  async execute(input) {
+  async execute(input, ctx?: ToolContext) {
     try {
       const store = resolveStore()
       const updated = store.updateMemory(input.oldId, {
@@ -192,9 +202,11 @@ export const MemoryUpdateTool: ToolDef<typeof updateSchema> = {
       if (!updated) {
         return { type: 'error', message: `未找到记忆 ID: ${input.oldId}` }
       }
+      ctx?.onLog?.(`[memory] 已更新: ${input.oldId} → ${updated.id}`)
       return { type: 'success', output: `已更新（旧 ID: ${input.oldId} → 新 ID: ${updated.id}）` }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '更新', err)
+      return { type: 'error', message: `更新失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }
@@ -211,20 +223,20 @@ export const MemoryStatusTool: ToolDef<typeof statusSchema> = {
 
   describe() { return '查看记忆状态' },
 
-  async execute() {
+  async execute(_input, ctx?: ToolContext) {
     try {
       const stack = resolveStack()
       const stats = await stack.status()
       const lines = [
         `记忆总数: ${stats.totalMemories}`,
         `活跃事实: ${stats.activeTriples}`,
-        `项目翼: ${stats.wings.join(', ') || '无'}`,
         '类型分布:',
         ...Object.entries(stats.byType).map(([t, c]) => `  ${t}: ${c}`),
       ]
       return { type: 'success', output: lines.join('\n') }
     } catch (err) {
-      return { type: 'error', message: String(err) }
+      reportError(ctx, '查询状态', err)
+      return { type: 'error', message: `查询状态失败: ${err instanceof Error ? err.message : String(err)}` }
     }
   },
 }

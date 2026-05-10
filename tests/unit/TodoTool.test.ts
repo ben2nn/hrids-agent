@@ -282,7 +282,12 @@ describe('loadTodos() / saveTodos() 文件读写', () => {
 // ─── 任务 8.1：todo_read 单元测试 ─────────────────────────────────────────────
 
 import { TodoReadTool } from '../../src/tools/TodoTool.js'
-import { setGlobalCwd } from '../../src/core/cwd.js'
+import { vi } from 'vitest'
+
+// Mock getConfigDir 让 loadTodos() 读取测试临时目录
+vi.mock('../../src/core/Config.js', () => ({
+  getConfigDir: () => (globalThis as any).__testConfigDir ?? require('os').homedir(),
+}))
 
 describe('TodoReadTool (todo_read)', () => {
   // 辅助：构建 Todo 对象
@@ -300,22 +305,23 @@ describe('TodoReadTool (todo_read)', () => {
     return result.output
   }
 
-  // 使用临时目录隔离测试，通过 setGlobalCwd() 让 loadTodos() 读取正确路径
+  // 使用临时目录隔离测试，mock getConfigDir 指向临时目录
   let testCwd: string
   let todosJsonPath: string
 
   beforeEach(() => {
     testCwd = resolve(tmpdir(), `todo-read-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-    mkdirSync(resolve(testCwd, '.hrids', 'tasks'), { recursive: true })
-    todosJsonPath = resolve(testCwd, '.hrids', 'tasks', 'todos.json')
-    // 将 getGlobalCwd() 指向临时目录
-    setGlobalCwd(testCwd)
+    mkdirSync(resolve(testCwd, 'tasks'), { recursive: true })
+    todosJsonPath = resolve(testCwd, 'tasks', 'todos.json')
+    // 将 getConfigDir() 指向临时目录（无 sessionId 时 loadTodos 使用 getConfigDir()/tasks/）
+    globalThis.__testConfigDir = testCwd
   })
 
   afterEach(() => {
     if (existsSync(testCwd)) {
       rmSync(testCwd, { recursive: true, force: true })
     }
+    delete (globalThis as any).__testConfigDir
   })
 
   function writeTodos(todos: Todo[]): void {

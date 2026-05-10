@@ -62,6 +62,9 @@ const agentSpawnSchema = z.object({
   name: z.string().describe('智能体名称（用于消息寻址）'),
   description: z.string().describe('3-5 词描述任务'),
   prompt: z.string().describe('完整的任务指令'),
+  profile: z.string().optional().describe(
+    '预定义的智能体角色名称（从 agents.d/ 或 config.yaml 加载）'
+  ),
   run_in_background: z.boolean().optional().describe('是否后台运行，默认 false（等待完成）'),
   allowed_tools: z.array(z.string()).optional().describe('允许的工具列表'),
 })
@@ -77,13 +80,26 @@ export const AgentSpawnTool: ToolDef<typeof agentSpawnSchema> = {
     if (!mgr) return { type: 'error', message: '团队管理器未初始化，请先调用 team_create' }
 
     try {
+      // 解析 profile（传入则从 ProfileLoader 加载预设角色）
+      let profile: import('../core/Config.js').AgentProfile | undefined
+      let profilePrompt: string[] | undefined
+      if (input.profile) {
+        const { resolveProfile: rp, resolveSystemPrompt: rsp } = await import('../core/coordinator/ProfileLoader.js')
+        profile = rp(input.profile)
+        if (profile) {
+          const prompt = rsp(profile)
+          profilePrompt = [prompt]
+        }
+      }
+
       const taskId = mgr.submitToTeam(
         input.team,
         input.name,
         input.description,
         input.prompt,
-        undefined,
-        input.allowed_tools,
+        profilePrompt,
+        input.allowed_tools ?? profile?.allowedTools,
+        profile,
       )
 
       if (input.run_in_background) {

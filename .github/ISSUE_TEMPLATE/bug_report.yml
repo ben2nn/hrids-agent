@@ -1,0 +1,142 @@
+name: Bug 报告
+description: 提交 Bug 报告，帮助我们改进项目
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您提交 Bug 报告！请尽量提供详细的信息，帮助我们快速定位和修复问题。
+
+  - type: dropdown
+    id: bug_type
+    attributes:
+      label: Bug 类型
+      description: 请选择最符合的 Bug 类型
+      options:
+        - 回归问题 (之前正常，现在出错)
+        - 崩溃 (进程异常退出或卡死)
+        - 行为异常 (输出/状态不正确)
+        - 性能问题
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 简洁描述遇到的问题
+      placeholder: 例如：运行 hrids-agent --gateway 后，访问 localhost:3000 返回 500 错误
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 重现步骤
+      description: 提供详细的重现步骤
+      placeholder: |
+        1. 运行 `npm install`
+        2. 运行 `npm run build`
+        3. 运行 `hrids-agent --gateway`
+        4. 访问 http://localhost:3000
+        5. 看到错误
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 描述您期望的正确行为
+      placeholder: 应该正常显示 Gateway 管理界面
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 描述实际发生的情况
+      placeholder: 返回 500 Internal Server Error，控制台显示 xxx 错误
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本号
+      description: hrids-agent 的版本
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js 版本
+      description: 运行 `node --version` 获取
+      placeholder: "v20.11.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      description: 选择您的操作系统
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Intel)
+        - macOS (Apple Silicon)
+        - Ubuntu/Debian
+        - CentOS/RHEL
+        - 其他 Linux
+        - Docker
+    validations:
+      required: true
+
+  - type: input
+    id: install_method
+    attributes:
+      label: 安装方式
+      description: 您是如何安装 hrids-agent 的
+      placeholder: npm install -g hrids-agent / docker / 源码编译
+
+  - type: textarea
+    id: config
+    attributes:
+      label: 配置文件
+      description: 提供您的配置文件内容（请隐藏 API Key 等敏感信息）
+      render: yaml
+      placeholder: |
+        llm:
+          provider: anthropic
+          model: claude-sonnet-4-20250514
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志/截图
+      description: 提供相关的错误日志或截图
+      render: shell
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响程度
+      description: 描述这个问题对您的影响
+      placeholder: |
+        影响范围：所有用户
+        严重程度：阻断性 / 严重影响 / 一般 / 轻微
+        发生频率：每次 / 偶尔 / 特定条件下
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 其他有助于解决问题的信息
+      placeholder: 已尝试的解决方案、临时 workaround 等

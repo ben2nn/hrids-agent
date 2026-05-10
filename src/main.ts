@@ -1,22 +1,21 @@
-import { homedir } from 'os'
-import { join } from 'path'
 import { setupSystemProxy } from './core/proxySetup.js'
 setupSystemProxy()
 
 import { Command } from 'commander'
-import { loadConfig } from './core/Config.js'
+import { loadConfig, getConfigDir, hasMainAgentConfig } from './core/Config.js'
 import { QueryEngine } from './core/QueryEngine.js'
 import { PermissionManager } from './core/PermissionManager.js'
 import { listSessions, pruneOldSessions } from './core/SessionStore.js'
 import { buildSystemContext } from './core/ContextBuilder.js'
-import { getCoordinatorSystemPrompt } from './core/coordinator/coordinatorPrompt.js'
+import { getCoordinatorSystemPrompt, classifyTask } from './core/coordinator/coordinatorPrompt.js'
+import { initProfileLoader, listProfiles } from './core/coordinator/ProfileLoader.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { getGlobalCwd } from './core/cwd.js'
 import { restoreScheduledJobs } from './tools/ScheduleCronTool.js'
 import { createAgentTool } from './tools/AgentTool.js'
 import { loadMcpTools } from './tools/McpTool.js'
 import { TeamManager } from './core/coordinator/TeamManager.js'
-import { resetEmbeddingProvider } from './memory/index.js'
+import { resetEmbeddingProvider, migrateOldMemoryStore } from './memory/index.js'
 import { logger } from './core/logger.js'
 
 import { setupProvider } from './bootstrap/setupProvider.js'
@@ -41,7 +40,7 @@ function validateStartupConfig(config: import('./core/Config.js').AgentConfig, c
     )
     if (!hasAnyKey) {
       process.stderr.write(
-        `\x1b[33m[警告]\x1b[0m 未检测到任何 API Key，请在 config.json 的 llm.fallbacks 中为各提供商配置 apiKey\n`,
+        `\x1b[33m[警告]\x1b[0m 未检测到任何 API Key，请在 config.yaml 的 llm.fallbacks 中为各提供商配置 apiKey\n`,
       )
     }
   }
@@ -63,7 +62,7 @@ async function main() {
   // ── init 子命令 ──────────────────────────────────────────────
   program
     .command('init')
-    .description('初始化配置文件（~/.hrids-agent/config.json）')
+    .description('初始化配置文件（~/.hrids/config.yaml）')
     .option('--force', '强制覆盖已有配置文件')
     .action(async (opts) => {
       await runInitCommand({ force: opts.force })
@@ -71,9 +70,9 @@ async function main() {
 
   // ── 主命令 ──────────────────────────────────────────────────
   program
-    .option('-m, --model <model>', '模型名称（自动识别提供商）', 'qwen-plus-2025-07-28')
+    .option('-m, --model <model>', '模型名称（覆盖 config.yaml，自动识别提供商）')
     .option('--provider <provider>', '显式指定提供商：anthropic | openai | deepseek | groq | aliyun | zhipu | nvidia | kimi | minimax | google | openrouter | ollama | custom')
-    .option('--api-key <key>', 'API Key（覆盖 config.json 中的配置）')
+    .option('--api-key <key>', 'API Key（覆盖 config.yaml 中的配置）')
     .option('--base-url <url>', '自定义 API 端点（Ollama / 本地代理）')
     .option('--craft', '自主执行模式（无需确认写操作，agent 独立完成任务）')
     .option('--plan', '计划模式（只读，写操作需手动确认后执行）')
@@ -83,21 +82,23 @@ async function main() {
     .option('-p, --print <message>', '非交互模式：执行一条消息后退出')
     .option('--server', 'Server 模式：持续从 stdin 读取消息（NDJSON），保持会话历史')
     .option('--gateway', 'Gateway 模式：启动 HTTP + WebSocket 服务，供前端或远程客户端连接')
-    .option('--gateway-port <port>', 'Gateway 监听端口（覆盖 config.json gateway.port，默认 3282）')
-    .option('--gateway-host <host>', 'Gateway 监听地址（覆盖 config.json gateway.host，默认 127.0.0.1）')
-    .option('--gateway-token <token>', 'Gateway 鉴权 Token（覆盖 config.json gateway.token）')
+    .option('--gateway-port <port>', 'Gateway 监听端口（覆盖 config.yaml gateway.port，默认 3282）')
+    .option('--gateway-host <host>', 'Gateway 监听地址（覆盖 config.yaml gateway.host，默认 127.0.0.1）')
+    .option('--gateway-token <token>', 'Gateway 鉴权 Token（覆盖 config.yaml gateway.token）')
     .option('--embedding-provider <provider>', 'Embedding 提供商：openai | aliyun | ollama | tfidf（默认 tfidf）')
     .option('--embedding-model <model>', 'Embedding 模型名称')
     .option('--embedding-base-url <url>', 'Embedding API 端点（Ollama 用）')
-    .option('--cwd <dir>', '设置工作目录（覆盖 config.json agent.cwd）')
+    .option('--cwd <dir>', '设置工作目录（覆盖 config.yaml agent.cwd）')
     .option('--max-chars <n>', '非交互模式（-p）输出字符上限，超出后截断（默认不限制）')
+    .option('--profile <name>', '为当前会话指定默认 agent profile')
+    .option('--list-profiles', '列出所有可用的 agent profiles')
     .addHelpText('after', `
 配置:
-  首次运行会自动生成 ~/.hrids-agent/config.json
+  首次运行会自动生成 ~/.hrids/config.yaml
   也可运行 hrids-agent init 手动初始化配置文件
 
 示例:
-  # 使用 config.json 中配置的默认模型和 API Key（推荐）
+  # 使用 config.yaml 中配置的默认模型和 API Key（推荐）
   hrids-agent
 
   # 临时指定模型（不修改配置文件）
@@ -118,7 +119,16 @@ async function main() {
 `)
     .action(async (opts) => {
       const config = loadConfig()
-      process.stderr.write(`[config] 配置目录: ${join(homedir(), '.hrids-agent')}\n`)
+      process.stderr.write(`[config] 配置目录: ${getConfigDir()}\n`)
+
+      // 主智能体配置未初始化时提示
+      if (!hasMainAgentConfig()) {
+        process.stderr.write('\x1b[33m[提示]\x1b[0m 主智能体提示词未初始化，请运行: hrids-agent init\n')
+      }
+
+      // 旧记忆数据库迁移（palace.db → JSONL + index.db）
+      migrateOldMemoryStore()
+
       validateStartupConfig(config, opts.apiKey)
 
       // 初始化 Embedding 提供商
@@ -140,6 +150,21 @@ async function main() {
           gatewayToken: opts.gatewayToken ?? config.gateway?.token,
           gatewayUsers: config.gateway?.users,
         })
+        return
+      }
+
+      // 列出 profiles
+      if (opts.listProfiles) {
+        const profiles = listProfiles(config.multiAgent?.profiles)
+        if (profiles.length === 0) {
+          console.log('没有可用的 agent profiles。')
+          console.log('在 config.yaml 的 multiAgent.profiles 中定义，或将 .yaml 文件放入 ~/.hrids/agents.d/')
+        } else {
+          console.log('可用的 agent profiles:')
+          profiles.forEach(p => {
+            console.log(`  ${p.name} — ${p.description}` + (p.model ? ` (模型: ${p.model})` : ''))
+          })
+        }
         return
       }
 
@@ -174,7 +199,7 @@ async function main() {
       }
 
       // 初始化会话和工作目录
-      const { sessionId, initialMessages, initialCwd } = await setupSession({
+      const { sessionId, store, initialCwd } = await setupSession({
         resume: opts.resume,
         newSession: opts.newSession,
         cwd: opts.cwd,
@@ -193,7 +218,7 @@ async function main() {
         })
       } catch (err) {
         console.error(`\n错误: ${String(err)}\n`)
-        console.error('请在 ~/.hrids-agent/config.json 中配置 llm.fallbacks 和各提供商的 apiKey')
+        console.error('请在 ~/.hrids/config.yaml 中配置 llm.fallbacks 和各提供商的 apiKey')
         process.exit(1)
       }
 
@@ -230,11 +255,17 @@ async function main() {
         ...mcpTools,
       ]
 
+      // 初始化 ProfileLoader（加载全局 + 项目级 profiles）
+      initProfileLoader(config.multiAgent?.profileDirs, process.cwd())
+
       // 初始化全局 TeamManager（多智能体协调）
       TeamManager.init(provider, tools)
 
+      // 获取 profiles 用于 prompt
+      const availableProfiles = listProfiles(config.multiAgent?.profiles)
+
       // 用完整工具列表（含 MCP）构建初始 systemPrompt
-      const initialPrompt = getCoordinatorSystemPrompt(undefined, tools)
+      const initialPrompt = getCoordinatorSystemPrompt(undefined, tools, undefined, availableProfiles)
       const systemPrompt = await buildSystemContext(initialPrompt)
 
       const engine = new QueryEngine({
@@ -246,12 +277,14 @@ async function main() {
         maxTurns: config.maxTurns,
         maxBudgetUsd: config.maxBudgetUsd,
         autoCompactThreshold: config.autoCompactThreshold,
-        initialMessages,
-      })
+      }, store)
 
       // 根据用户消息动态更新 systemPrompt（按任务类型注入扩展块）
       const buildPromptForMessage = async (msg: string): Promise<void> => {
-        const taskPrompt = getCoordinatorSystemPrompt(msg, tools)
+        const types = classifyTask(msg)
+        engine.setChatMode(types.includes('chat'))
+
+        const taskPrompt = getCoordinatorSystemPrompt(msg, tools, undefined, availableProfiles)
         const fullPrompt = await buildSystemContext(taskPrompt, getGlobalCwd())
         engine.setSystemPrompt(fullPrompt)
       }

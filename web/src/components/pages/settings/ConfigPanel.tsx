@@ -1,5 +1,24 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import yaml from 'js-yaml'
 import { getConfigFile, saveConfigFile } from '../../../lib/gateway.js'
+
+// ─── 内置 Provider 列表 ─────────────────────────────────────────────────────
+
+const PROVIDER_LIST = [
+  { id: 'aliyun', name: '阿里云百炼（DashScope）' },
+  { id: 'anthropic', name: 'Anthropic' },
+  { id: 'deepseek', name: 'DeepSeek' },
+  { id: 'google', name: 'Google Gemini' },
+  { id: 'groq', name: 'Groq' },
+  { id: 'kimi', name: 'Kimi（Moonshot AI）' },
+  { id: 'minimax', name: 'MiniMax' },
+  { id: 'nvidia', name: 'NVIDIA NIM' },
+  { id: 'ollama', name: 'Ollama（本地）' },
+  { id: 'openai', name: 'OpenAI' },
+  { id: 'openrouter', name: 'OpenRouter' },
+  { id: 'xiaomi', name: 'Xiaomi MiMo' },
+  { id: 'zhipu', name: '智谱 AI' },
+]
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────
 
@@ -7,6 +26,8 @@ interface FallbackEntry {
   provider: string
   apiKey: string
   models: string
+  baseUrl?: string
+  toolMode?: string
   _comment?: string
 }
 
@@ -16,10 +37,23 @@ interface UserEntry {
   _comment?: string
 }
 
+interface CustomProviderEntry {
+  name: string
+  baseUrl: string
+}
+
+interface McpServerEntry {
+  name: string
+  command: string
+  args: string
+}
+
 interface FormState {
   model: string
   llmFallbacks: FallbackEntry[]
   visionFallbacks: FallbackEntry[]
+  multimodalFallbacks: FallbackEntry[]
+  speechFallbacks: FallbackEntry[]
   embeddingFallbacks: FallbackEntry[]
   embeddingDimensions: string
   vectorBackend: string
@@ -41,12 +75,23 @@ interface FormState {
   loggingTheme: string
   skillHubUrl: string
   skillHubApiBase: string
+  customProviders: CustomProviderEntry[]
+  mcpServers: McpServerEntry[]
+  multiAgentMaxConcurrent: string
+  multiAgentMaxTurns: string
+  multiAgentTimeoutMs: string
+  multiAgentAutoSelect: boolean
+  multiAgentRecursive: boolean
+  toolPermissionDenyList: string
+  toolPermissionAllowMcp: boolean
 }
 
 const DEFAULT_FORM: FormState = {
   model: '',
   llmFallbacks: [],
   visionFallbacks: [],
+  multimodalFallbacks: [],
+  speechFallbacks: [],
   embeddingFallbacks: [],
   embeddingDimensions: '',
   vectorBackend: 'sqlite',
@@ -68,9 +113,18 @@ const DEFAULT_FORM: FormState = {
   loggingTheme: 'default',
   skillHubUrl: '',
   skillHubApiBase: '',
+  customProviders: [],
+  mcpServers: [],
+  multiAgentMaxConcurrent: '',
+  multiAgentMaxTurns: '',
+  multiAgentTimeoutMs: '',
+  multiAgentAutoSelect: true,
+  multiAgentRecursive: false,
+  toolPermissionDenyList: '',
+  toolPermissionAllowMcp: false,
 }
 
-// ─── 解析 JSON → FormState ─────────────────────────────────────────────────
+// ─── 解析 YAML → FormState ─────────────────────────────────────────────────
 
 function parseFallbacks(arr: unknown): FallbackEntry[] {
   if (!Array.isArray(arr)) return []
@@ -83,6 +137,8 @@ function parseFallbacks(arr: unknown): FallbackEntry[] {
         provider: String(obj.provider ?? ''),
         apiKey: String(obj.apiKey ?? ''),
         models,
+        baseUrl: obj.baseUrl ? String(obj.baseUrl) : undefined,
+        toolMode: obj.toolMode ? String(obj.toolMode) : undefined,
         _comment: obj._comment ? String(obj._comment) : undefined,
       }
     })
@@ -102,20 +158,54 @@ function parseUsers(arr: unknown): UserEntry[] {
     })
 }
 
-function jsonToForm(parsed: Record<string, unknown>): FormState {
+function parseCustomProviders(arr: unknown): CustomProviderEntry[] {
+  if (!Array.isArray(arr)) return []
+  return arr
+    .filter((item: unknown) => item && typeof item === 'object')
+    .map((item: unknown) => {
+      const obj = item as Record<string, unknown>
+      return {
+        name: String(obj.name ?? ''),
+        baseUrl: String(obj.baseUrl ?? ''),
+      }
+    })
+}
+
+function parseMcpServers(arr: unknown): McpServerEntry[] {
+  if (!Array.isArray(arr)) return []
+  return arr
+    .filter((item: unknown) => item && typeof item === 'object')
+    .map((item: unknown) => {
+      const obj = item as Record<string, unknown>
+      const args = Array.isArray(obj.args) ? (obj.args as string[]).join(' ') : String(obj.args ?? '')
+      return {
+        name: String(obj.name ?? ''),
+        command: String(obj.command ?? ''),
+        args,
+      }
+    })
+}
+
+function yamlToForm(parsed: Record<string, unknown>): FormState {
   const llm = (parsed.llm ?? {}) as Record<string, unknown>
   const vision = (parsed.vision ?? {}) as Record<string, unknown>
+  const multimodal = (parsed.multimodal ?? {}) as Record<string, unknown>
+  const speech = (parsed.speech ?? {}) as Record<string, unknown>
   const embedding = (parsed.embedding ?? {}) as Record<string, unknown>
   const vectorStore = (parsed.vectorStore ?? {}) as Record<string, unknown>
   const agent = (parsed.agent ?? {}) as Record<string, unknown>
   const gateway = (parsed.gateway ?? {}) as Record<string, unknown>
   const logging = (parsed.logging ?? {}) as Record<string, unknown>
   const skillHub = (parsed.skillHub ?? {}) as Record<string, unknown>
+  const multiAgent = (parsed.multiAgent ?? {}) as Record<string, unknown>
+  const toolPerm = (parsed.toolPermissions ?? {}) as Record<string, unknown>
 
   return {
     model: String(parsed.model ?? ''),
     llmFallbacks: parseFallbacks(llm.fallbacks),
     visionFallbacks: parseFallbacks(vision.fallbacks),
+    multimodalFallbacks: parseFallbacks(multimodal.fallbacks),
+    speechFallbacks: parseFallbacks(speech.fallbacks),
     embeddingFallbacks: parseFallbacks(embedding.fallbacks),
     embeddingDimensions: embedding.dimensions != null ? String(embedding.dimensions) : '',
     vectorBackend: String(vectorStore.backend ?? 'sqlite'),
@@ -137,21 +227,32 @@ function jsonToForm(parsed: Record<string, unknown>): FormState {
     loggingTheme: String(logging.theme ?? 'default'),
     skillHubUrl: String(skillHub.url ?? ''),
     skillHubApiBase: String(skillHub.apiBase ?? ''),
+    customProviders: parseCustomProviders(parsed.customProviders),
+    mcpServers: parseMcpServers(parsed.mcpServers),
+    multiAgentMaxConcurrent: multiAgent.globalMaxConcurrent != null ? String(multiAgent.globalMaxConcurrent) : '',
+    multiAgentMaxTurns: multiAgent.defaultMaxTurns != null ? String(multiAgent.defaultMaxTurns) : '',
+    multiAgentTimeoutMs: multiAgent.defaultTimeoutMs != null ? String(multiAgent.defaultTimeoutMs) : '',
+    multiAgentAutoSelect: Boolean(multiAgent.autoSelectProfiles ?? true),
+    multiAgentRecursive: Boolean(multiAgent.allowRecursiveAgent ?? false),
+    toolPermissionDenyList: Array.isArray(toolPerm.defaultDenyList) ? (toolPerm.defaultDenyList as string[]).join(', ') : '',
+    toolPermissionAllowMcp: Boolean(toolPerm.allowMcpTools ?? false),
   }
 }
 
-// ─── FormState → JSON 对象（保留原始注释字段） ─────────────────────────────
+// ─── FormState → 配置对象 ──────────────────────────────────────────────────
 
-function fallbacksToJson(list: FallbackEntry[]) {
+function fallbacksToObj(list: FallbackEntry[]) {
   return list.map(f => {
     const models = f.models.split(',').map(s => s.trim()).filter(Boolean)
     const obj: Record<string, unknown> = { provider: f.provider, apiKey: f.apiKey, models }
+    if (f.baseUrl) obj.baseUrl = f.baseUrl
+    if (f.toolMode) obj.toolMode = f.toolMode
     if (f._comment) obj._comment = f._comment
     return obj
   })
 }
 
-function usersToJson(list: UserEntry[]) {
+function usersToObj(list: UserEntry[]) {
   return list.map(u => {
     const obj: Record<string, unknown> = { username: u.username, password: u.password }
     if (u._comment) obj._comment = u._comment
@@ -159,19 +260,25 @@ function usersToJson(list: UserEntry[]) {
   })
 }
 
-function formToJson(form: FormState, original: Record<string, unknown>): Record<string, unknown> {
+function formToObj(form: FormState, original: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = { ...original }
 
   result.model = form.model
 
   const llmOrig = (original.llm ?? {}) as Record<string, unknown>
-  result.llm = { ...llmOrig, fallbacks: fallbacksToJson(form.llmFallbacks) }
+  result.llm = { ...llmOrig, fallbacks: fallbacksToObj(form.llmFallbacks) }
 
   const visionOrig = (original.vision ?? {}) as Record<string, unknown>
-  result.vision = { ...visionOrig, fallbacks: fallbacksToJson(form.visionFallbacks) }
+  result.vision = { ...visionOrig, fallbacks: fallbacksToObj(form.visionFallbacks) }
+
+  const mmOrig = (original.multimodal ?? {}) as Record<string, unknown>
+  result.multimodal = { ...mmOrig, fallbacks: fallbacksToObj(form.multimodalFallbacks) }
+
+  const spOrig = (original.speech ?? {}) as Record<string, unknown>
+  result.speech = { ...spOrig, fallbacks: fallbacksToObj(form.speechFallbacks) }
 
   const embOrig = (original.embedding ?? {}) as Record<string, unknown>
-  const embResult: Record<string, unknown> = { ...embOrig, fallbacks: fallbacksToJson(form.embeddingFallbacks) }
+  const embResult: Record<string, unknown> = { ...embOrig, fallbacks: fallbacksToObj(form.embeddingFallbacks) }
   if (form.embeddingDimensions !== '') embResult.dimensions = Number(form.embeddingDimensions)
   result.embedding = embResult
 
@@ -200,7 +307,7 @@ function formToJson(form: FormState, original: Record<string, unknown>): Record<
     port: form.gatewayPort !== '' ? Number(form.gatewayPort) : undefined,
     host: form.gatewayHost,
     token: form.gatewayToken,
-    users: usersToJson(form.gatewayUsers),
+    users: usersToObj(form.gatewayUsers),
   }
 
   const logOrig = (original.logging ?? {}) as Record<string, unknown>
@@ -208,6 +315,36 @@ function formToJson(form: FormState, original: Record<string, unknown>): Record<
 
   const shOrig = (original.skillHub ?? {}) as Record<string, unknown>
   result.skillHub = { ...shOrig, url: form.skillHubUrl, apiBase: form.skillHubApiBase }
+
+  // customProviders
+  result.customProviders = form.customProviders.map(cp => ({ name: cp.name, baseUrl: cp.baseUrl }))
+
+  // mcpServers
+  result.mcpServers = form.mcpServers.map(s => {
+    const obj: Record<string, unknown> = { name: s.name, command: s.command }
+    if (s.args) obj.args = s.args.split(/\s+/).filter(Boolean)
+    return obj
+  })
+
+  // multiAgent
+  const maOrig = (original.multiAgent ?? {}) as Record<string, unknown>
+  result.multiAgent = {
+    ...maOrig,
+    globalMaxConcurrent: form.multiAgentMaxConcurrent !== '' ? Number(form.multiAgentMaxConcurrent) : undefined,
+    defaultMaxTurns: form.multiAgentMaxTurns !== '' ? Number(form.multiAgentMaxTurns) : undefined,
+    defaultTimeoutMs: form.multiAgentTimeoutMs !== '' ? Number(form.multiAgentTimeoutMs) : undefined,
+    autoSelectProfiles: form.multiAgentAutoSelect,
+    allowRecursiveAgent: form.multiAgentRecursive,
+  }
+
+  // toolPermissions
+  const tpOrig = (original.toolPermissions ?? {}) as Record<string, unknown>
+  const denyList = form.toolPermissionDenyList.split(',').map(s => s.trim()).filter(Boolean)
+  result.toolPermissions = {
+    ...tpOrig,
+    defaultDenyList: denyList,
+    allowMcpTools: form.toolPermissionAllowMcp,
+  }
 
   return result
 }
@@ -276,21 +413,125 @@ function FormRow({ label, desc, children }: { label: string; desc?: string; chil
 const inputCls = 'w-full px-2.5 py-1.5 rounded-lg text-xs bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] transition-colors placeholder:text-[var(--text-muted)]'
 const selectCls = 'w-full px-2.5 py-1.5 rounded-lg text-xs bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] transition-colors cursor-pointer'
 
+// ─── 子组件：Provider 下拉选择（combobox） ─────────────────────────────────
+
+function ProviderSelect({
+  value,
+  onChange,
+  customProviders,
+}: {
+  value: string
+  onChange: (v: string) => void
+  customProviders?: CustomProviderEntry[]
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState(value)
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // 同步外部 value 到 query
+  useEffect(() => {
+    if (!open) setQuery(value)
+  }, [value, open])
+
+  // 点击外部关闭
+  useEffect(() => {
+    if (!open) return
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  // 合并内置 + 自定义 provider
+  const allProviders = [
+    ...PROVIDER_LIST,
+    ...(customProviders ?? []).map(cp => ({ id: cp.name.toLowerCase().replace(/\s+/g, '-'), name: cp.name })),
+  ]
+
+  const filtered = query.trim()
+    ? allProviders.filter(p =>
+        p.id.includes(query.toLowerCase()) ||
+        p.name.toLowerCase().includes(query.toLowerCase())
+      )
+    : allProviders
+
+  function handleSelect(id: string) {
+    onChange(id)
+    setQuery(id)
+    setOpen(false)
+  }
+
+  function handleInputChange(v: string) {
+    setQuery(v)
+    setOpen(true)
+  }
+
+  function handleBlur() {
+    // 延迟关闭，让 click 事件先触发
+    setTimeout(() => {
+      setOpen(false)
+      // 如果输入不在列表中，直接作为自定义值
+      if (query.trim() && !allProviders.some(p => p.id === query.trim().toLowerCase())) {
+        onChange(query.trim())
+      }
+    }, 150)
+  }
+
+  return (
+    <div ref={ref} className="relative">
+      <input
+        ref={inputRef}
+        className={inputCls}
+        placeholder="输入或搜索 provider"
+        value={open ? query : value}
+        onChange={e => handleInputChange(e.target.value)}
+        onFocus={() => { setOpen(true); setQuery(value) }}
+        onBlur={handleBlur}
+      />
+      {open && filtered.length > 0 && (
+        <div className="absolute top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-[var(--bg-elevated)] border border-[var(--border)] rounded-lg shadow-[var(--shadow-lg)] z-50">
+          {filtered.map(p => (
+            <button
+              key={p.id}
+              type="button"
+              onMouseDown={(e) => { e.preventDefault(); handleSelect(p.id) }}
+              className={[
+                'w-full px-2.5 py-2 text-left text-xs transition-colors border-0 cursor-pointer',
+                value === p.id
+                  ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
+                  : 'bg-transparent text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]',
+              ].join(' ')}
+            >
+              <span className="font-mono">{p.id}</span>
+              <span className="text-[var(--text-muted)] ml-1.5">{p.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── 子组件：Fallback 列表编辑器 ──────────────────────────────────────────
 
 function FallbackList({
   label,
   list,
   onChange,
+  customProviders,
 }: {
   label: string
   list: FallbackEntry[]
   onChange: (list: FallbackEntry[]) => void
+  customProviders?: CustomProviderEntry[]
 }) {
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
   const add = () => onChange([...list, { provider: '', apiKey: '', models: '' }])
   const remove = (i: number) => onChange(list.filter((_, idx) => idx !== i))
   const update = (i: number, field: keyof FallbackEntry, value: string) => {
-    const next = list.map((item, idx) => idx === i ? { ...item, [field]: value } : item)
+    const next = list.map((item, idx) => idx === i ? { ...item, [field]: value || undefined } : item)
     onChange(next)
   }
 
@@ -315,12 +556,13 @@ function FallbackList({
       {list.map((item, i) => (
         <div key={i} className="rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-2.5 space-y-2">
           <div className="flex items-center gap-2">
-            <input
-              className={inputCls + ' flex-1'}
-              placeholder="provider（如 aliyun）"
-              value={item.provider}
-              onChange={e => update(i, 'provider', e.target.value)}
-            />
+            <div className="flex-1">
+              <ProviderSelect
+                value={item.provider}
+                onChange={v => update(i, 'provider', v)}
+                customProviders={customProviders}
+              />
+            </div>
             <button
               type="button"
               onClick={() => remove(i)}
@@ -343,6 +585,33 @@ function FallbackList({
             value={item.models}
             onChange={e => update(i, 'models', e.target.value)}
           />
+          {/* 展开高级选项 */}
+          <button
+            type="button"
+            onClick={() => setExpandedIdx(expandedIdx === i ? null : i)}
+            className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-0 cursor-pointer px-0"
+          >
+            {expandedIdx === i ? '收起选项 ▲' : '高级选项 ▼'}
+          </button>
+          {expandedIdx === i && (
+            <div className="space-y-2 pt-1">
+              <input
+                className={inputCls}
+                placeholder="baseUrl（可选，覆盖默认地址）"
+                value={item.baseUrl ?? ''}
+                onChange={e => update(i, 'baseUrl', e.target.value)}
+              />
+              <select
+                className={selectCls}
+                value={item.toolMode ?? ''}
+                onChange={e => update(i, 'toolMode', e.target.value)}
+              >
+                <option value="">toolMode（默认 native）</option>
+                <option value="native">native（原生 function calling）</option>
+                <option value="dsml">dsml（文本解析模式）</option>
+              </select>
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -415,6 +684,142 @@ function UserList({
   )
 }
 
+// ─── 子组件：自定义提供商列表编辑器 ────────────────────────────────────────
+
+function CustomProviderList({
+  list,
+  onChange,
+}: {
+  list: CustomProviderEntry[]
+  onChange: (list: CustomProviderEntry[]) => void
+}) {
+  const add = () => onChange([...list, { name: '', baseUrl: '' }])
+  const remove = (i: number) => onChange(list.filter((_, idx) => idx !== i))
+  const update = (i: number, field: keyof CustomProviderEntry, value: string) => {
+    const next = list.map((item, idx) => idx === i ? { ...item, [field]: value } : item)
+    onChange(next)
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-[var(--text-secondary)]">自定义提供商</span>
+        <button
+          type="button"
+          onClick={add}
+          className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent-border)] transition-colors border-0 cursor-pointer"
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          添加
+        </button>
+      </div>
+      {list.length === 0 && (
+        <p className="text-[10px] text-[var(--text-muted)] italic py-1">暂无自定义提供商</p>
+      )}
+      {list.map((item, i) => (
+        <div key={i} className="rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-2.5 space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              className={inputCls + ' flex-1'}
+              placeholder="名称（如 MyLLM）"
+              value={item.name}
+              onChange={e => update(i, 'name', e.target.value)}
+            />
+            <button
+              type="button"
+              onClick={() => remove(i)}
+              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error-subtle)] transition-colors border-0 bg-transparent cursor-pointer"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <input
+            className={inputCls}
+            placeholder="baseUrl（如 https://my-llm.example.com/v1）"
+            value={item.baseUrl}
+            onChange={e => update(i, 'baseUrl', e.target.value)}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ─── 子组件：MCP 服务器列表编辑器 ──────────────────────────────────────────
+
+function McpServerList({
+  list,
+  onChange,
+}: {
+  list: McpServerEntry[]
+  onChange: (list: McpServerEntry[]) => void
+}) {
+  const add = () => onChange([...list, { name: '', command: '', args: '' }])
+  const remove = (i: number) => onChange(list.filter((_, idx) => idx !== i))
+  const update = (i: number, field: keyof McpServerEntry, value: string) => {
+    const next = list.map((item, idx) => idx === i ? { ...item, [field]: value } : item)
+    onChange(next)
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-[var(--text-secondary)]">MCP 服务器</span>
+        <button
+          type="button"
+          onClick={add}
+          className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-[var(--accent-subtle)] text-[var(--accent)] hover:bg-[var(--accent-border)] transition-colors border-0 cursor-pointer"
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          添加
+        </button>
+      </div>
+      {list.length === 0 && (
+        <p className="text-[10px] text-[var(--text-muted)] italic py-1">暂无 MCP 服务器</p>
+      )}
+      {list.map((item, i) => (
+        <div key={i} className="rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-2.5 space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              className={inputCls + ' flex-1'}
+              placeholder="名称（如 filesystem）"
+              value={item.name}
+              onChange={e => update(i, 'name', e.target.value)}
+            />
+            <button
+              type="button"
+              onClick={() => remove(i)}
+              className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error-subtle)] transition-colors border-0 bg-transparent cursor-pointer"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <input
+            className={inputCls}
+            placeholder="command（如 npx）"
+            value={item.command}
+            onChange={e => update(i, 'command', e.target.value)}
+          />
+          <input
+            className={inputCls}
+            placeholder="args（空格分隔，如 -y @modelcontextprotocol/server-filesystem /tmp）"
+            value={item.args}
+            onChange={e => update(i, 'args', e.target.value)}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ─── 子组件：开关 ──────────────────────────────────────────────────────────
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -442,16 +847,16 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
 // ─── 主组件 ────────────────────────────────────────────────────────────────
 
 export function ConfigPanel() {
-  const [tab, setTab] = useState<'form' | 'json'>('form')
+  const [tab, setTab] = useState<'form' | 'yaml'>('form')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle')
 
-  // 原始 JSON 字符串（JSON 视图用）
-  const [jsonText, setJsonText] = useState('')
-  const [jsonError, setJsonError] = useState<string | null>(null)
+  // 原始 YAML 字符串（YAML 视图用）
+  const [yamlText, setYamlText] = useState('')
+  const [yamlError, setYamlError] = useState<string | null>(null)
 
-  // 解析后的原始对象（保留注释字段等）
+  // 解析后的原始对象（保留未知字段）
   const [originalParsed, setOriginalParsed] = useState<Record<string, unknown>>({})
 
   // 表单状态
@@ -467,13 +872,13 @@ export function ConfigPanel() {
         if (cancelled) return
         const text = res.content
         try {
-          const parsed = JSON.parse(text) as Record<string, unknown>
+          const parsed = yaml.load(text) as Record<string, unknown>
           setOriginalParsed(parsed)
-          setForm(jsonToForm(parsed))
-          setJsonText(JSON.stringify(parsed, null, 2))
+          setForm(yamlToForm(parsed))
+          setYamlText(yaml.dump(parsed, { indent: 2, lineWidth: 120, noRefs: true }))
         } catch {
-          setError('配置文件 JSON 解析失败，请检查格式')
-          setJsonText(text)
+          setError('配置文件 YAML 解析失败，请检查格式')
+          setYamlText(text)
         }
       })
       .catch((e: unknown) => {
@@ -485,27 +890,27 @@ export function ConfigPanel() {
     return () => { cancelled = true }
   }, [])
 
-  // ── 表单 → JSON 同步 ──────────────────────────────────────────────────────
+  // ── 表单 → YAML 同步 ──────────────────────────────────────────────────────
   const updateForm = useCallback((patch: Partial<FormState>) => {
     setForm(prev => {
       const next = { ...prev, ...patch }
-      const obj = formToJson(next, originalParsed)
-      setJsonText(JSON.stringify(obj, null, 2))
-      setJsonError(null)
+      const obj = formToObj(next, originalParsed)
+      setYamlText(yaml.dump(obj, { indent: 2, lineWidth: 120, noRefs: true }))
+      setYamlError(null)
       return next
     })
   }, [originalParsed])
 
-  // ── JSON → 表单同步 ───────────────────────────────────────────────────────
-  const handleJsonChange = (text: string) => {
-    setJsonText(text)
+  // ── YAML → 表单同步 ───────────────────────────────────────────────────────
+  const handleYamlChange = (text: string) => {
+    setYamlText(text)
     try {
-      const parsed = JSON.parse(text) as Record<string, unknown>
+      const parsed = yaml.load(text) as Record<string, unknown>
       setOriginalParsed(parsed)
-      setForm(jsonToForm(parsed))
-      setJsonError(null)
+      setForm(yamlToForm(parsed))
+      setYamlError(null)
     } catch {
-      setJsonError('JSON 格式错误，修复后将自动同步到表单')
+      setYamlError('YAML 格式错误，修复后将自动同步到表单')
     }
   }
 
@@ -513,7 +918,7 @@ export function ConfigPanel() {
   const handleSave = async () => {
     setSaveStatus('saving')
     try {
-      await saveConfigFile(jsonText)
+      await saveConfigFile(yamlText)
       setSaveStatus('saved')
       setTimeout(() => setSaveStatus('idle'), 2000)
     } catch (e) {
@@ -540,7 +945,7 @@ export function ConfigPanel() {
       <div className="flex items-center justify-between gap-3">
         {/* Tab 切换 */}
         <div className="flex gap-1 p-1 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border)]">
-          {(['form', 'json'] as const).map(t => (
+          {(['form', 'yaml'] as const).map(t => (
             <button
               key={t}
               type="button"
@@ -552,7 +957,7 @@ export function ConfigPanel() {
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-transparent',
               ].join(' ')}
             >
-              {t === 'form' ? '表单' : 'JSON'}
+              {t === 'form' ? '表单' : 'YAML'}
             </button>
           ))}
         </div>
@@ -604,7 +1009,7 @@ export function ConfigPanel() {
             <FormRow label="默认模型" desc="全局默认使用的模型名称">
               <input
                 className={inputCls}
-                placeholder="如 qwen-plus-2025-07-28"
+                placeholder="如 qwen3.5-35b-a3b"
                 value={form.model}
                 onChange={e => updateForm({ model: e.target.value })}
               />
@@ -613,16 +1018,31 @@ export function ConfigPanel() {
               label="LLM Fallbacks（大语言模型）"
               list={form.llmFallbacks}
               onChange={llmFallbacks => updateForm({ llmFallbacks })}
+              customProviders={form.customProviders}
             />
             <FallbackList
               label="Vision Fallbacks（视觉模型）"
               list={form.visionFallbacks}
               onChange={visionFallbacks => updateForm({ visionFallbacks })}
+              customProviders={form.customProviders}
+            />
+            <FallbackList
+              label="Multimodal Fallbacks（全模态模型）"
+              list={form.multimodalFallbacks}
+              onChange={multimodalFallbacks => updateForm({ multimodalFallbacks })}
+              customProviders={form.customProviders}
+            />
+            <FallbackList
+              label="Speech Fallbacks（语音模型）"
+              list={form.speechFallbacks}
+              onChange={speechFallbacks => updateForm({ speechFallbacks })}
+              customProviders={form.customProviders}
             />
             <FallbackList
               label="Embedding Fallbacks（向量模型）"
               list={form.embeddingFallbacks}
               onChange={embeddingFallbacks => updateForm({ embeddingFallbacks })}
+              customProviders={form.customProviders}
             />
             <FormRow label="Embedding 维度" desc="向量维度，留空使用模型默认值">
               <input
@@ -633,6 +1053,18 @@ export function ConfigPanel() {
                 onChange={e => updateForm({ embeddingDimensions: e.target.value })}
               />
             </FormRow>
+          </SectionCard>
+
+          {/* 自定义提供商 */}
+          <SectionCard title="自定义提供商" defaultOpen={false} icon={
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
+            </svg>
+          }>
+            <CustomProviderList
+              list={form.customProviders}
+              onChange={customProviders => updateForm({ customProviders })}
+            />
           </SectionCard>
 
           {/* 向量配置 */}
@@ -740,6 +1172,78 @@ export function ConfigPanel() {
             )}
           </SectionCard>
 
+          {/* 多智能体配置 */}
+          <SectionCard title="多智能体配置" defaultOpen={false} icon={
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+            </svg>
+          }>
+            <FormRow label="最大并发数" desc="子智能体最大并发数量">
+              <input
+                className={inputCls}
+                type="number"
+                placeholder="如 10"
+                value={form.multiAgentMaxConcurrent}
+                onChange={e => updateForm({ multiAgentMaxConcurrent: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="默认最大轮次" desc="子智能体默认最大对话轮数">
+              <input
+                className={inputCls}
+                type="number"
+                placeholder="如 30"
+                value={form.multiAgentMaxTurns}
+                onChange={e => updateForm({ multiAgentMaxTurns: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="默认超时（ms）" desc="子智能体默认超时时间">
+              <input
+                className={inputCls}
+                type="number"
+                placeholder="如 300000"
+                value={form.multiAgentTimeoutMs}
+                onChange={e => updateForm({ multiAgentTimeoutMs: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="自动选择角色" desc="根据任务自动匹配最合适的 profile">
+              <Toggle checked={form.multiAgentAutoSelect} onChange={v => updateForm({ multiAgentAutoSelect: v })} />
+            </FormRow>
+            <FormRow label="允许递归派生" desc="子智能体是否可以再派生子智能体">
+              <Toggle checked={form.multiAgentRecursive} onChange={v => updateForm({ multiAgentRecursive: v })} />
+            </FormRow>
+          </SectionCard>
+
+          {/* 工具权限 */}
+          <SectionCard title="工具权限" defaultOpen={false} icon={
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          }>
+            <FormRow label="默认禁止工具" desc="子智能体默认禁止使用的工具（逗号分隔）">
+              <input
+                className={inputCls}
+                placeholder="如 todo_write, todo_update"
+                value={form.toolPermissionDenyList}
+                onChange={e => updateForm({ toolPermissionDenyList: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="允许 MCP 工具" desc="子智能体是否可以使用 MCP 工具">
+              <Toggle checked={form.toolPermissionAllowMcp} onChange={v => updateForm({ toolPermissionAllowMcp: v })} />
+            </FormRow>
+          </SectionCard>
+
+          {/* MCP 服务器 */}
+          <SectionCard title="MCP 服务器" defaultOpen={false} icon={
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2" /><rect x="2" y="14" width="20" height="8" rx="2" ry="2" /><line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" />
+            </svg>
+          }>
+            <McpServerList
+              list={form.mcpServers}
+              onChange={mcpServers => updateForm({ mcpServers })}
+            />
+          </SectionCard>
+
           {/* 网关配置 */}
           <SectionCard title="网关配置" icon={
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -835,12 +1339,12 @@ export function ConfigPanel() {
         </div>
       )}
 
-      {/* ── JSON 视图 ── */}
-      {tab === 'json' && (
+      {/* ── YAML 视图 ── */}
+      {tab === 'yaml' && (
         <div className="space-y-2">
-          {jsonError && (
+          {yamlError && (
             <div className="px-3 py-2 rounded-lg border border-[var(--error)] bg-[var(--error-subtle)] text-[10px] text-[var(--error)]">
-              {jsonError}
+              {yamlError}
             </div>
           )}
           <textarea
@@ -849,8 +1353,8 @@ export function ConfigPanel() {
               'bg-[var(--bg-secondary)] border border-[var(--border)]',
               'text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)] transition-colors',
             ].join(' ')}
-            value={jsonText}
-            onChange={e => handleJsonChange(e.target.value)}
+            value={yamlText}
+            onChange={e => handleYamlChange(e.target.value)}
             spellCheck={false}
           />
         </div>

@@ -1,18 +1,23 @@
 // 通用工作者协调器 system prompt
 //
 // 分层设计：
-//   静态层（STATIC_SECTIONS）—— 内容固定，适合 API 缓存，逐元素打 cache_control
-//   工具速查层               —— 根据实际工具列表动态生成（含 MCP 工具自动分组）
-//   扩展层（EXT_*）          —— 按任务类型按需注入，追加到数组末尾（不缓存）
-//   动态层                   —— 工作目录、时间、Git 状态由 ContextBuilder 注入（不缓存）
+//   静态层（8 个 section）—— 优先从 ~/.hrids/agents/main/*.md 加载，文件不存在时回退到代码默认值
+//   工具速查层             —— 根据实际工具列表动态生成（含 MCP 工具自动分组）
+//   扩展层（EXT_*）        —— 按任务类型按需注入，追加到数组末尾（不缓存）
+//   动态层                 —— 工作目录、时间、Git 状态由 ContextBuilder 注入（不缓存）
 //
-// 重构原则：
-//   - 静态层只放"每次请求都需要"的核心规则，控制在 ~600 字以内
-//   - 任务状态机（todo 详细规则）移到 EXT_TASK，只在多步骤任务时注入
-//   - 豁免判断只在一处定义（SECTION_EXECUTION），消除重复
-//   - 工具速查动态化，避免提到用户没有的工具
+// 文件映射：
+//   IDENTITY.md   ← SECTION_INTRO
+//   SOUL.md       ← SECTION_EXECUTION + SECTION_ACTIONS + SECTION_FILE_PATH
+//   BOOTSTRAP.md  ← SECTION_TODO + EXT_TASK
+//   TOOLS.md      ← SECTION_TOOLS
+//   USER.md       ← SECTION_DECISION + SECTION_OUTPUT + SECTION_COREFERENCE
+//   AGENTS.md     ← EXT_AGENT（始终加载）
+//   MEMORY.md     ← EXT_MEMORY（始终加载）
+//   HEARTBEAT.md  ← 新增（预留）
 
 import type { ToolDef } from '../Tool.js'
+import { loadPromptFile } from './PromptLoader.js'
 
 const SHELL_TOOL_NAME = process.platform === 'win32' ? 'powershell' : 'bash'
 
@@ -26,15 +31,16 @@ const SECTION_INTRO = `你是一个通用自主工作者（hrids-agent）。用�
 
 const SECTION_EXECUTION = `# 执行原则
 
-**以下情况直接回复，不调用任何工具，不建立任务计划**：
-- 问候、闲聊、感谢、确认（"你好"、"谢谢"、"好的"、"明白了"）
-- 纯知识问答：凭已有知识直接回答
-- 用户只是在表达情绪或反馈
-- **用户对 \`[定时任务触发]\` 消息的确认回复**（"知了"、"好的"、"收到"等）：这类消息是系统自动触发的提醒，用户确认后无需执行任何操作，**绝对不能重新创建定时任务**
+你的每条回复应该是以下之一：
+(a) 调用工具推进任务执行——调用前用一句话（≤10字）说明意图，找到数据后立即继续处理
+(b) 直接向用户交付最终结果——包括问候回复、知识问答、确认回复、情绪反馈
 
-**其他所有情况**：调用工具前用一句话（≤10字）说明意图，然后立即调用，不要长篇解释。找到数据后立即继续处理，不能停在"找到了"这一步。**只要任务尚未完成，必须调用工具继续执行，不能只输出文字描述后停下。**
+不要输出"我将做X"然后停止——说了就立即做。
+无工具调用时，用心跳协议标记意图（详见 HEARTBEAT.md）。
+用户对 \`[定时任务触发]\` 消息的确认回复（"知了"、"收到"等）：属于 (b)，直接文字回复。
 
-遇到错误先分析根因，再决定修复方案。同一错误不要尝试超过 2 次相同修复方式，第 3 次必须换思路。报告结果要如实：测试失败就说失败，未验证就说未验证。`
+遇到错误先分析根因再修复。同一错误不超过 2 次相同方式，第 3 次必须换思路。
+报告结果要如实：测试失败就说失败，未验证就说未验证。`
 
 const SECTION_ACTIONS = `# 谨慎操作
 
@@ -87,6 +93,12 @@ const SECTION_FILE_PATH = `# 文件路径
  - 相对路径自动解析到当前工作目录（见环境信息中的"当前工作目录"）
  - 例外：用户明确要求写到某个绝对路径时才可使用`
 
+const SECTION_WORKDIR = `# 工作目录管理
+
+当你执行任务需要工作空间（存储文件、运行代码、保存中间结果等）时，先调用 workdir_init 工具创建工作目录。
+任务完成后，调用 workdir_deliver 工具整理交付摘要。
+纯对话类任务无需创建工作目录。`
+
 const SECTION_OUTPUT = `# 输出规范
 
  - 使用中文回复，简洁直接，不重复已知信息
@@ -116,21 +128,32 @@ const SECTION_COREFERENCE = `# 指代解析规则
  - 用户说"继续" / "接着做" → 继续最近一次未完成的任务，不要询问继续什么
  - 用户说"改一下" / "优化一下" → 对最近一次输出的内容进行修改`
 
-/** 静态层：所有固定内容，顺序固定，适合 API 逐元素缓存。 */
-const STATIC_SECTIONS: string[] = [
-  SECTION_INTRO,
-  SECTION_EXECUTION,
-  SECTION_ACTIONS,
-  SECTION_TOOLS,
-  SECTION_TODO,
-  SECTION_DECISION,
-  SECTION_FILE_PATH,
-  SECTION_OUTPUT,
-  SECTION_COREFERENCE,
-]
+const SECTION_HEARTBEAT = `# 心跳协议
+
+每条回复末尾用以下标记声明意图（不要输出在代码块内）：
+
+ - \`[HEARTBEAT:CONTINUE]\` — 还有未完成的工作，请求继续执行
+ - \`[HEARTBEAT:DONE]\` — 任务已完成，或本轮无需继续
+
+规则：
+ - 有工具调用时：工具执行后自然进入下一轮，不需要标记
+ - 无工具调用时：必须输出 DONE 或 CONTINUE
+ - 简单问答/问候：直接回复，不需要标记（系统自动识别为完成）
+ - CONTINUE 不要连续输出超过 2 次无工具调用的续接请求`
+
+// 导出标记常量，供 QueryEngine 检测使用
+export const HEARTBEAT_CONTINUE = '[HEARTBEAT:CONTINUE]'
+export const HEARTBEAT_DONE = '[HEARTBEAT:DONE]'
+
+// ─────────────────────────────────────────────
+// 文件加载静态层 + 默认值导出（在 EXT_* 定义之后）
+// ─────────────────────────────────────────────
+
+/** 静态 section 定义顺序：5 + 3 = 8 个 */
+const STATIC_FILE_NAMES = ['IDENTITY', 'SOUL', 'BOOTSTRAP', 'TOOLS', 'USER', 'AGENTS', 'MEMORY', 'HEARTBEAT'] as const
 
 /** 静态层元素数量，供 AnthropicProvider 判断缓存边界 */
-export const STATIC_SECTION_COUNT = STATIC_SECTIONS.length
+export const STATIC_SECTION_COUNT = STATIC_FILE_NAMES.length
 
 // ─────────────────────────────────────────────
 // 动态工具速查：根据实际工具列表生成，含 MCP 工具分组
@@ -362,13 +385,12 @@ const EXT_MEMORY: PromptExtension = {
   id: 'memory',
   content: `# 记忆管理
 
-遇到以下情况立即调用 memory_add，不要等到会话结束：
+仅在以下场景调用 memory_add（不要在问候/闲聊时调用）：
 
- - 用户偏好："以后都用X"、"不要用Y" → type=preference
- - 技术决策："选择X方案"、"用X替代Y" → type=decision
- - 重要里程碑："搞定了"、"上线了" → type=milestone
+ - 用户明确要求记住或纠正（"以后不要用X"、"记住这个"）→ type=preference
+ - 有影响的技术决策（"我们决定用X替代Y"）→ type=decision
+ - 重要里程碑（"上线了"、"搞定了"）→ type=milestone
  - bug 根因或解决方案 → type=problem
- - 项目名、技术栈等事实 → type=fact
 
 若新信息与已有记忆矛盾，先 memory_search 找旧记忆 ID，再 memory_update 替换。`,
 }
@@ -390,7 +412,7 @@ SkillHub 收录 3.4 万个 AI 技能（https://skillhub.cloud.tencent.com）。�
 // 任务分类：关键词匹配 → 扩展块 ID 列表
 // ─────────────────────────────────────────────
 
-export type TaskType = 'task' | 'script' | 'crawl' | 'code' | 'agent' | 'file' | 'memory' | 'skillhub'
+export type TaskType = 'task' | 'script' | 'crawl' | 'code' | 'agent' | 'file' | 'memory' | 'skillhub' | 'chat'
 
 interface ClassifyRule {
   type: TaskType
@@ -398,6 +420,14 @@ interface ClassifyRule {
 }
 
 const CLASSIFY_RULES: ClassifyRule[] = [
+  // chat：问候/闲聊/简单确认，不触发任何工具
+  {
+    type: 'chat',
+    keywords: [
+      /^(你好|hi|hello|hey|嗨|哈喽|早|晚安|早上好|下午好|晚上好|在吗|在不在|怎么样|最近怎么样|谢谢|感谢|thx|thanks|ok|好的|收到|知了|嗯)\s*[!！。.？?]*$/i,
+      /^(哈+|嘿+|噢+|哦+|啊+|嗯+|呵+)\s*$/i,
+    ],
+  },
   // task：多步骤任务，需要建立任务计划
   {
     type: 'task',
@@ -468,11 +498,14 @@ const CLASSIFY_RULES: ClassifyRule[] = [
 
 export function classifyTask(message: string): TaskType[] {
   const matched = new Set<TaskType>()
+  const trimmed = message.trim()
   for (const rule of CLASSIFY_RULES) {
-    if (rule.keywords.some(re => re.test(message))) {
+    if (rule.keywords.some(re => re.test(trimmed))) {
       matched.add(rule.type)
     }
   }
+  // chat 是排他类型：匹配到 chat 就直接返回，不注入任何扩展和工具
+  if (matched.has('chat')) return ['chat']
   // crawl 隐含 script；code/crawl/script 隐含 task（多步骤任务）
   if (matched.has('crawl')) matched.add('script')
   if (matched.has('crawl') || matched.has('script') || matched.has('code')) {
@@ -490,6 +523,56 @@ const EXTENSIONS: Record<TaskType, PromptExtension> = {
   file: EXT_FILE,
   memory: EXT_MEMORY,
   skillhub: EXT_SKILLHUB,
+  chat: { id: 'chat', content: '' },  // chat 无扩展内容，纯占位
+}
+
+// ─────────────────────────────────────────────
+// 文件加载静态层 + 默认值导出
+// ─────────────────────────────────────────────
+
+/** 文件名 → 默认内容映射。供 init 命令生成初始 .md 文件。 */
+export const DEFAULT_MAIN_AGENT_FILES: Record<string, string> = {
+  IDENTITY: SECTION_INTRO,
+  SOUL: [SECTION_EXECUTION, SECTION_ACTIONS, SECTION_FILE_PATH, SECTION_WORKDIR].join('\n\n'),
+  BOOTSTRAP: [SECTION_TODO, EXT_TASK.content].join('\n\n'),
+  TOOLS: SECTION_TOOLS,
+  USER: [SECTION_DECISION, SECTION_OUTPUT, SECTION_COREFERENCE].join('\n\n'),
+  AGENTS: EXT_AGENT.content,
+  MEMORY: EXT_MEMORY.content,
+  HEARTBEAT: SECTION_HEARTBEAT,
+}
+
+/**
+ * 加载静态层 section。优先从文件加载，不存在时回退到代码默认值。
+ * 返回 8 个 section 字符串。
+ */
+function loadStaticSections(): string[] {
+  return STATIC_FILE_NAMES.map(name => loadPromptFile(name) ?? DEFAULT_MAIN_AGENT_FILES[name] ?? '')
+}
+
+// ─────────────────────────────────────────────
+// Profile 速查：向 coordinator 展示可用智能体角色
+// ─────────────────────────────────────────────
+
+/**
+ * 根据可用 profiles 列表生成 profile 速查 section。
+ * 仅展示 autoSelectable 不为 false 的 profile。
+ */
+function buildProfilesReferenceSection(
+  profiles: Array<{ name: string; description: string; tags?: string[]; model?: string; autoSelectable?: boolean }>,
+): string {
+  const selectable = profiles.filter(p => p.autoSelectable !== false)
+  if (selectable.length === 0) return ''
+
+  const lines: string[] = ['# 可用智能体角色']
+  for (const p of selectable) {
+    const modelHint = p.model ? ` (模型: ${p.model})` : ''
+    const tagsHint = p.tags && p.tags.length > 0 ? ` [${p.tags.join(', ')}]` : ''
+    lines.push(` - **${p.name}**${tagsHint}: ${p.description}${modelHint}`)
+  }
+  lines.push('')
+  lines.push('使用 agent 或 agent_spawn 工具时，传入 profile 参数指定角色。coordinator 可根据任务类型自动匹配最合适的 profile。')
+  return lines.join('\n')
 }
 
 // ─────────────────────────────────────────────
@@ -514,15 +597,36 @@ export function getCoordinatorSystemPrompt(
   message?: string,
   tools?: readonly ToolDef[],
   forceExtensions?: TaskType[],
+  profiles?: Array<{ name: string; description: string; tags?: string[]; model?: string; autoSelectable?: boolean }>,
 ): string[] {
+  const types = forceExtensions ?? (message ? classifyTask(message) : [])
+  const isChat = types.includes('chat')
+
+  if (isChat) {
+    // chat 模式：只保留核心身份和输出规范，排除所有工具相关内容
+    const staticSections = loadStaticSections()
+    const chatSections = staticSections.filter((_, i) => i !== 3)  // 排除 TOOLS.md（第 4 个）
+    // 追加聊天模式专用指令（替换工具速查位置）
+    chatSections.push(`# 当前模式：聊天
+
+你处于聊天模式，没有可用工具。直接用自然语言回复用户，不要输出工具调用格式。
+问候、闲聊、知识问答、情感交流——直接回复即可。`)
+    return chatSections
+  }
+
   const toolsRefSection = tools && tools.length > 0
     ? buildToolsReferenceSection(tools)
     : SECTION_TOOLS_REFERENCE_FALLBACK
 
-  const types = forceExtensions ?? (message ? classifyTask(message) : [])
-  const extensions = types.map(t => EXTENSIONS[t].content)
+  const extensions = types.filter(t => t !== 'chat').map(t => EXTENSIONS[t].content)
 
-  return [...STATIC_SECTIONS, toolsRefSection, ...extensions]
+  const sections = [...loadStaticSections(), toolsRefSection, ...extensions]
+
+  if (profiles && profiles.length > 0) {
+    sections.push(buildProfilesReferenceSection(profiles))
+  }
+
+  return sections
 }
 
 /**
@@ -538,7 +642,8 @@ const SECTION_TOOLS_REFERENCE_FALLBACK = `# 工具速查
  - 人机交互：ask_user / request_decision
  - 协作：agent / schedule_cron
  - 技能管理：skill / skill_list / skill_save
- - SkillHub：skillhub_search / skillhub_install / skillhub_recommend / skillhub_config`
+ - SkillHub：skillhub_search / skillhub_install / skillhub_recommend / skillhub_config
+ - 工作目录：workdir_init / workdir_deliver / workdir_cleanup / workdir_list`
 
 export function isCoordinatorMode(): boolean {
   return process.env.HRIDS_COORDINATOR_MODE === '1'

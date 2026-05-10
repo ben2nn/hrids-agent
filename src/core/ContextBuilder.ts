@@ -5,6 +5,7 @@ import { promisify } from 'util'
 import { homedir } from 'os'
 import { join } from 'path'
 import { getGlobalCwd } from './cwd.js'
+import { getConfigDir } from './Config.js'
 
 const execAsync = promisify(exec)
 
@@ -16,34 +17,31 @@ export interface ContextInfo {
   date: string
 }
 
-// 默认工作目录：~/.hrids-agent/work/（共享目录，不绑定会话）
+// 默认工作目录路径：~/.hrids/work/（共享目录，不绑定会话，不自动创建）
 export function getDefaultAgentCwd(): string {
-  const dir = join(homedir(), '.hrids-agent', 'work')
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true })
-  }
-  return dir
+  return join(getConfigDir(), 'work')
 }
 
-// 为指定会话创建独立工作目录：~/.hrids-agent/work/<YYYYMMDD-HHmmss>-<sessionId>/
-export function getSessionWorkDir(sessionId: string): string {
+// 为指定会话计算独立工作目录路径（不创建）：~/.hrids/work/<YYYYMMDD-HHmmss>-<sessionId>/
+export function getSessionWorkDirPath(sessionId: string): string {
   const now = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
   const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   const dirName = `${datePart}-${timePart}-${sessionId}`
-  const dir = join(homedir(), '.hrids-agent', 'work', dirName)
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true })
-    // 初始化 git 仓库，使差异功能可用
-    try {
-      execSync('git init', { cwd: dir, stdio: 'ignore' })
-      execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
-    } catch {
-      // git 不可用时静默忽略
-    }
+  return join(getConfigDir(), 'work', dirName)
+}
+
+// 确保目录存在（含 git init），供需要写入时按需调用
+export function ensureWorkDir(dir: string): void {
+  if (existsSync(dir)) return
+  mkdirSync(dir, { recursive: true })
+  try {
+    execSync('git init', { cwd: dir, stdio: 'ignore' })
+    execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
+  } catch {
+    // git 不可用时静默忽略
   }
-  return dir
 }
 
 // 读取 git 状态（分支、最近提交、工作区变更）
@@ -101,7 +99,7 @@ async function _fetchGitContext(cwd?: string): Promise<string | null> {
 // 搜索顺序：
 //   1. {cwd}/AGENT.md          —— 项目级记忆（随代码库存放）
 //   2. {cwd}/.hrids/AGENT.md   —— 项目级记忆（隐藏目录，适合不想提交到 git 的场景）
-//   3. ~/.hrids-agent/AGENT.md —— 用户级全局记忆（跨项目通用规则）
+//   3. ~/.hrids/AGENT.md —— 用户级全局记忆（跨项目通用规则）
 //
 // 结果按 cwd 分桶缓存 30 秒，避免每条消息都重复读磁盘
 const _memFilesCacheMap = new Map<string, { result: string[]; ts: number }>()
@@ -132,7 +130,7 @@ function _fetchMemoryFiles(cwd: string): string[] {
   const candidates = [
     join(cwd, 'AGENT.md'),
     join(cwd, '.hrids', 'AGENT.md'),
-    join(homedir(), '.hrids-agent', 'AGENT.md'),
+    join(getConfigDir(), 'AGENT.md'),
   ]
 
   const contents: string[] = []
@@ -151,7 +149,7 @@ function _fetchMemoryFiles(cwd: string): string[] {
 
 // 构建完整的系统上下文，注入动态内容（记忆、环境信息）
 // 接受 string[]，追加动态 section 后返回 string[]
-// cwd 参数可选，不传则使用 ~/.hrids-agent/work/（仅用于记忆文件查找）
+// cwd 参数可选，不传则使用 ~/.hrids/work/（仅用于记忆文件查找）
 // sessionId 参数可选，传入时注入会话级记忆（Gateway 多会话隔离），否则注入全局记忆
 export async function buildSystemContext(basePrompt: string[], cwd?: string, sessionId?: string): Promise<string[]> {
   const resolvedCwd = cwd ?? getDefaultAgentCwd()
@@ -168,16 +166,16 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
     dynamicSections.push('## 项目记忆\n' + memFiles.join('\n\n'))
   }
 
-  // 注入长期记忆（L0 身份 + L1 核心摘要）
+  // 注入长期记忆
   // Gateway 多会话模式：使用会话级记忆（按 sessionId 隔离，防止跨用户泄漏）
   // CLI 单会话模式：使用全局记忆（跨会话积累知识）
   try {
     const { getMemoryStackForSession, getMemoryStack } = await import('../memory/index.js')
     const stack = sessionId ? getMemoryStackForSession(sessionId) : getMemoryStack()
-    const { l0Identity, l1Essential, totalTokens } = stack.wakeUp()
+    const { summary, totalTokens } = stack.wakeUp()
     const stats = await stack.status()
     if (stats.totalMemories > 0) {
-      dynamicSections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${l0Identity}\n\n${l1Essential}`)
+      dynamicSections.push(`## 长期记忆（共 ${stats.totalMemories} 条，约 ${totalTokens} tokens）\n${summary}`)
     }
   } catch {
     // 记忆系统不可用时静默跳过
@@ -206,7 +204,24 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
   ]
 
   if (isWindows) {
-    envInfo.push('注意: Windows 环境，路径分隔符为 \\，使用 PowerShell 语法，例如 Get-ChildItem / Remove-Item / Copy-Item')
+    envInfo.push(
+      '注意: Windows 环境，Shell 为 PowerShell，路径分隔符为 \\' + '\n' +
+      '常用命令对照（必须用 PowerShell 语法，禁止直接使用 Linux 命令）：' + '\n' +
+      '  mkdir -p dir        → New-Item -ItemType Directory -Force -Path dir' + '\n' +
+      '  ls / ls -la         → Get-ChildItem（别名 ls / dir 也可用）' + '\n' +
+      '  cp src dst          → Copy-Item src dst' + '\n' +
+      '  mv src dst          → Move-Item src dst' + '\n' +
+      '  rm file             → Remove-Item file' + '\n' +
+      '  rm -rf dir          → Remove-Item -Recurse -Force dir' + '\n' +
+      '  cat file            → Get-Content file' + '\n' +
+      '  echo "text"         → Write-Output "text"（或 echo 也可用）' + '\n' +
+      '  grep pattern file   → Select-String -Path file -Pattern pattern' + '\n' +
+      '  find . -name "*.x"  → Get-ChildItem -Recurse -Filter "*.x"' + '\n' +
+      '  pwd                 → Get-Location（别名 pwd 也可用）' + '\n' +
+      '  export VAR=val      → $env:VAR = "val"' + '\n' +
+      '  cmd1 && cmd2        → cmd1; if ($?) { cmd2 }' + '\n' +
+      '  chmod +x script.sh  → （Windows 无需，直接运行 .ps1 / .bat）'
+    )
   } else if (isMac) {
     envInfo.push('注意: macOS 环境，使用 bash/zsh 命令')
   } else {
@@ -248,24 +263,26 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
 
   dynamicSections.push('## 环境信息\n' + envInfo.join('\n'))
 
-  // 注入 .cache/ 目录中的上传文件列表，让 LLM 知道可以用 @.cache/filename 引用
-  const cacheDir = join(resolvedCwd, '.cache')
-  if (existsSync(cacheDir)) {
-    try {
-      const cacheFiles = readdirSync(cacheDir)
-        .filter(f => {
-          try { return statSync(join(cacheDir, f)).isFile() } catch { return false }
-        })
-      if (cacheFiles.length > 0) {
-        const fileList = cacheFiles.map(f => `  - @.cache/${f}`).join('\n')
-        dynamicSections.push(
-          `## 已上传的附件文件（位于 cwd/.cache/）\n` +
-          `以下文件已上传到当前会话工作目录，可直接用 @.cache/<文件名> 语法引用：\n${fileList}\n` +
-          `例如：分析 @.cache/${cacheFiles[0]}`
-        )
+  // 注入 uploads 目录中的上传文件列表，让 LLM 知道可以用 @filename 引用
+  if (sessionId) {
+    const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+    if (existsSync(uploadsDir)) {
+      try {
+        const uploadFiles = readdirSync(uploadsDir)
+          .filter(f => {
+            try { return statSync(join(uploadsDir, f)).isFile() } catch { return false }
+          })
+        if (uploadFiles.length > 0) {
+          const fileList = uploadFiles.map(f => `  - @${f}`).join('\n')
+          dynamicSections.push(
+            `## 已上传的附件文件\n` +
+            `以下文件已上传到当前会话，可直接用 @<文件名> 语法引用：\n${fileList}\n` +
+            `例如：分析 @${uploadFiles[0]}`
+          )
+        }
+      } catch {
+        // 读取失败时静默忽略
       }
-    } catch {
-      // 读取失败时静默忽略
     }
   }
 

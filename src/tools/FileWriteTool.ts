@@ -13,7 +13,9 @@ const inputSchema = z.object({
 
 export const FileWriteTool: ToolDef<typeof inputSchema> = {
   name: 'file_write',
-  description: '创建或覆盖写入文件，自动创建父目录',
+  description: `创建新文件或覆盖已有文件。用这个而不是 bash echo > file。
+适用场景：创建新文件、生成报告、导出数据
+不适用场景：修改已有文件的部分内容 → 用 file_edit | 读取文件 → 用 file_read`,
   inputSchema,
   readonly: false,
   isDestructive: true,  // 覆盖写入是不可逆操作

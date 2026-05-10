@@ -1,13 +1,13 @@
 // 定时调度工具 —— 让工作者能够设置定时任务，主动触发执行
-// 基于 node-cron 实现，持久化到 ~/.hrids-agent/crons.json
+// 基于 node-cron 实现，持久化到 ~/.hrids/crons.json
 import { z } from 'zod'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
-import { homedir } from 'os'
 import { join } from 'path'
 import type { ToolDef } from '../core/Tool.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
+import { getConfigDir } from '../core/Config.js'
 
-const CRON_FILE = join(homedir(), '.hrids-agent', 'crons.json')
+const CRON_FILE = join(getConfigDir(), 'crons.json')
 
 // ── 并发写入保护：防止同一轮次并行工具调用导致重复创建 ──────────────────────
 // 使用内存级互斥锁，确保 create 操作串行执行（读-检查-写 原子化）
@@ -40,7 +40,7 @@ function loadCrons(): CronJob[] {
 }
 
 function saveCrons(crons: CronJob[]) {
-  const dir = join(homedir(), '.hrids-agent')
+  const dir = getConfigDir()
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   // 原子写入：先写临时文件再 rename，防止并发写入时文件损坏
   const tmp = CRON_FILE + '.tmp'

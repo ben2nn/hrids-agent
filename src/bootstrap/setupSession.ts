@@ -1,13 +1,15 @@
 // 会话初始化 —— 恢复旧会话或新建会话，初始化工作目录
 import { existsSync, mkdirSync } from 'fs'
-import { generateSessionId, loadSession, loadSessionMeta, getLastSessionId } from '../core/SessionStore.js'
-import { getSessionWorkDir } from '../core/ContextBuilder.js'
+import { join } from 'path'
+import { generateSessionId, loadSessionEvents, loadSessionMeta, getLastSessionId } from '../core/SessionStore.js'
+import { getConfigDir } from '../core/Config.js'
+import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../core/cwd.js'
-import type { Message } from '../core/QueryEngine.js'
+import { ConversationStore, JsonlEventStorage } from '../core/ConversationStore.js'
 
 export interface SessionSetupResult {
   sessionId: string
-  initialMessages: Message[]
+  store: ConversationStore
   initialCwd: string
 }
 
@@ -20,18 +22,12 @@ export interface SessionSetupOpts {
 
 export async function setupSession(opts: SessionSetupOpts): Promise<SessionSetupResult> {
   let sessionId: string
-  let initialMessages: Message[]
 
   if (opts.resume) {
-    // 明确指定 --resume，直接恢复
     sessionId = opts.resume
-    initialMessages = loadSession(sessionId) ?? []
   } else if (opts.newSession) {
-    // 明确指定 --new-session，强制新建
     sessionId = generateSessionId()
-    initialMessages = []
   } else {
-    // 默认行为：检测是否有上次会话，有则询问用户
     const lastSessionId = getLastSessionId()
     if (lastSessionId) {
       const lastMeta = loadSessionMeta(lastSessionId)
@@ -58,32 +54,33 @@ export async function setupSession(opts: SessionSetupOpts): Promise<SessionSetup
 
       if (answer === '' || answer === 'y') {
         sessionId = lastSessionId
-        initialMessages = loadSession(sessionId) ?? []
-        console.log(`已恢复会话（${initialMessages.length} 条消息）\n`)
+        console.log('已恢复会话\n')
       } else {
         sessionId = generateSessionId()
-        initialMessages = []
         console.log('已创建新会话\n')
       }
     } else {
       sessionId = generateSessionId()
-      initialMessages = []
     }
   }
 
-  // 初始化工作目录（优先级：--cwd > config.agentCwd > 旧会话目录 > 新建会话独立目录）
+  // 加载或创建事件存储
+  const sessionDir = join(getConfigDir(), 'sessions', sessionId)
+  const eventStorage = new JsonlEventStorage(sessionDir)
+  const store = new ConversationStore(eventStorage)
+  const events = loadSessionEvents(sessionId)
+  if (events && events.length > 0) {
+    store.appendEventsNoSave(...events)
+  }
+
+  // 初始化工作目录路径（不创建，由智能体按需调用 workdir_init 创建）
   const existingWorkDir = loadSessionMeta(sessionId)?.workDir
   const initialCwd = opts.cwd
     ?? opts.agentCwd
     ?? existingWorkDir
-    ?? getSessionWorkDir(sessionId)
+    ?? getSessionWorkDirPath(sessionId)
 
-  if (!existsSync(initialCwd)) {
-    mkdirSync(initialCwd, { recursive: true })
-  }
   setGlobalCwd(initialCwd)
-  // 注意：不调用 process.chdir，避免修改进程级工作目录影响 Gateway 多会话场景
-  // cwd 通过 AsyncLocalStorage（runWithCwd）在每次消息处理时注入
 
-  return { sessionId, initialMessages, initialCwd }
+  return { sessionId, store, initialCwd }
 }

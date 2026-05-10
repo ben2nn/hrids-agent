@@ -1,0 +1,82 @@
+# GitHub Actions Labeler 配置
+# https://github.com/actions/labeler
+
+# 核心模块
+core:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "src/**/*.ts"
+      - "src/**/*.tsx"
+
+# Web UI
+web:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "web/**"
+      - "src/web/**"
+
+# 文档
+docs:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "docs/**"
+      - "*.md"
+      - "README.md"
+
+# 测试
+tests:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "tests/**"
+      - "**/*.test.ts"
+      - "**/*.spec.ts"
+      - "vitest.config.ts"
+
+# CI/CD
+ci:
+  - changed-files:
+    - any-glob-to-any-file:
+      - ".github/**"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".dockerignore"
+
+# 依赖更新
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "package.json"
+      - "package-lock.json"
+      - "web/package.json"
+      - "web/package-lock.json"
+
+# 配置文件
+config:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "config.example.yaml"
+      - "tsconfig.json"
+      - "eslint.config.js"
+      - ".gitignore"
+      - ".npmignore"
+
+# CLI 相关
+cli:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "bin/**"
+      - "src/cli/**"
+
+# Gateway 相关
+gateway:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "src/gateway/**"
+      - "src/web/**"
+
+# LLM 集成
+llm:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "src/llm/**"
+      - "src/providers/**"

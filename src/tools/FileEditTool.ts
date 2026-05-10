@@ -15,7 +15,9 @@ const inputSchema = z.object({
 
 export const FileEditTool: ToolDef<typeof inputSchema> = {
   name: 'file_edit',
-  description: '对文件做精确的字符串替换，oldStr 必须在文件中唯一',
+  description: `对已有文件做精确的字符串替换。用这个而不是 bash sed/awk。
+适用场景：修改代码中的函数、更新配置项、修复 bug
+不适用场景：创建新文件 → 用 file_write | 整个文件重写 → 用 file_write`,
   inputSchema,
   readonly: false,
 

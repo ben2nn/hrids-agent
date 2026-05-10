@@ -6,17 +6,18 @@ import { execSync } from 'child_process'
 import { randomBytes } from 'crypto'
 import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSession as loadDiskSession, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
+import { listSessions as listDiskSessions, loadSessionEvents, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
+import { load as parseYaml } from 'js-yaml'
 import type { CreateSessionRequest } from './types.js'
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, renameSync } from 'fs'
 import { resolve, join, basename, extname } from 'path'
-import { homedir } from 'os'
-import { loadConfig, saveConfig } from '../core/Config.js'
+import { loadConfig, saveConfig, getConfigDir } from '../core/Config.js'
 import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
 import { PlatformManager } from './im/PlatformManager.js'
 import type { IMGatewayConfig, IMPlatform, PlatformConfig } from './im/types.js'
+import { projectForDisplay } from '../core/projections.js'
 
 const log = logger.child({ component: 'gateway-server' })
 
@@ -54,165 +55,61 @@ const IMAGE_PATTERN = /@([^\s@]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/
  * @param rawMessages 原始消息列表
  * @param idPrefix    消息 ID 前缀，用于区分来源（'' 或 'arc-'）
  */
-function formatMessagesForDisplay(
-  rawMessages: readonly import('../core/QueryEngine.js').Message[],
+/**
+ * 将投影层 DisplayMessage[] 转换为前端 API 的 DisplayMessage[] 格式。
+ * 投影层用 role + toolCards，前端 API 用 type + 展开的 tool 消息。
+ */
+function convertToServerDisplayMessages(
+  projected: readonly import('../core/ConversationStore.js').DisplayMessage[],
   idPrefix = '',
 ): DisplayMessage[] {
-  // 第一遍：建立 toolId → result 映射
-  type ToolResultEntry = { content: unknown; isError: boolean }
-  const toolResults = new Map<string, ToolResultEntry>()
-  for (const msg of rawMessages) {
-    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
-    for (const block of msg.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
-      if (block.type === 'tool_result' && block.tool_use_id) {
-        toolResults.set(block.tool_use_id, {
-          content: block.content,
-          isError: block.is_error === true,
-        })
-      }
-    }
-  }
-
-  // 第二遍：构建 DisplayMessage 列表
-  const displayMessages: DisplayMessage[] = []
+  const result: DisplayMessage[] = []
   let idx = 0
-  const baseTs = Date.now()
 
-  for (const msg of rawMessages) {
-    // 优先使用消息自带的 timestamp，无则用序号估算（兼容旧历史数据）
-    const timestamp = msg.timestamp ?? (baseTs - (rawMessages.length - idx) * 1000)
+  for (const dm of projected) {
     idx++
-
-    if (msg.role === 'user') {
-      if (typeof msg.content !== 'string' && !Array.isArray(msg.content)) continue
-
-      // ContentBlock 数组（多模态消息：含图片/PDF 的消息）
-      if (Array.isArray(msg.content)) {
-        const blocks = msg.content as Array<{ type: string; text?: string; source?: { type: string; mediaType?: string; data?: string; url?: string } }>
-
-        // 纯 tool_result 消息（工具调用结果回传给 LLM 的内部消息）：不显示为用户气泡
-        const hasOnlyToolResults = blocks.length > 0 && blocks.every(b => b.type === 'tool_result')
-        if (hasOnlyToolResults) continue
-
-        // 系统内部消息过滤
-        const rawTextContent = blocks.filter(b => b.type === 'text').map(b => b.text ?? '').join('')
-        if (rawTextContent.startsWith('[系统') || rawTextContent.startsWith('[上下文压缩]')) continue
-
-        // 提取内嵌图片的 data URL，供前端 <img> 直接显示
-        const inlineImages: string[] = []
-        for (const b of blocks) {
-          if (b.type === 'image' && b.source) {
-            if (b.source.type === 'base64' && b.source.data && b.source.mediaType) {
-              inlineImages.push(`data:${b.source.mediaType};base64,${b.source.data}`)
-            } else if (b.source.type === 'url' && b.source.url) {
-              inlineImages.push(b.source.url)
-            }
-          }
-        }
-
-        // 从文本内容中提取 @文件名 引用（新格式：图片 block 被还原为 @文件名 文本）
-        IMAGE_PATTERN.lastIndex = 0
-        let imgMatch: RegExpExecArray | null
-        while ((imgMatch = IMAGE_PATTERN.exec(rawTextContent)) !== null) {
-          inlineImages.push(imgMatch[1])
-        }
-
-        // 清理 textContent：
-        // 1. 去掉 @文件名.ext 引用（已提取到 images，不需要显示在气泡文本里）
-        // 2. 去掉旧格式的 [图片] 占位符（无法还原文件名，但不应显示在气泡里）
-        IMAGE_PATTERN.lastIndex = 0
-        const textContent = rawTextContent
-          .replace(IMAGE_PATTERN, '')
-          .replace(/\[图片\]/g, '')
-          .replace(/\s{2,}/g, ' ')
-          .trim()
-
-        displayMessages.push({
-          id: `${idPrefix}u-${idx}`,
-          type: 'user',
-          content: textContent,
-          timestamp,
-          ...(inlineImages.length > 0 ? { images: inlineImages } : {}),
-        })
-        continue
-      }
-
-      // 纯文本消息（原有逻辑）
-      if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩]')) continue
-
-      const images: string[] = []
-      IMAGE_PATTERN.lastIndex = 0
-      let match: RegExpExecArray | null
-      while ((match = IMAGE_PATTERN.exec(msg.content)) !== null) {
-        images.push(match[1])
-      }
-
-      // 去掉 @文件名 引用，不在气泡文本里显示
-      IMAGE_PATTERN.lastIndex = 0
-      const cleanContent = msg.content.replace(IMAGE_PATTERN, '').replace(/\s{2,}/g, ' ').trim()
-
-      displayMessages.push({
+    if (dm.role === 'user') {
+      result.push({
         id: `${idPrefix}u-${idx}`,
         type: 'user',
-        content: cleanContent,
-        timestamp,
-        ...(images.length > 0 ? { images } : {}),
+        content: dm.content,
+        timestamp: dm.timestamp,
+        ...(dm.images && dm.images.length > 0 ? { images: dm.images } : {}),
+        ...(dm.isCron ? { isCron: true } : {}),
+        ...(dm.cronDescription ? { cronDescription: dm.cronDescription } : {}),
+        ...(dm.requestId ? { requestId: dm.requestId } : {}),
       })
-    } else if (msg.role === 'assistant') {
-      const isCron = msg.trigger === 'cron'
-      const requestId = msg.requestId
-      const cronDescription = msg.cronDescription
-
-      if (typeof msg.content === 'string') {
-        if (msg.content.trim()) {
-          displayMessages.push({
-            id: `${idPrefix}a-${idx}`,
-            type: 'assistant',
-            content: msg.content,
-            timestamp,
-            ...(isCron ? { isCron: true } : {}),
-            ...(cronDescription ? { cronDescription } : {}),
-            ...(requestId ? { requestId } : {}),
+    } else if (dm.role === 'assistant') {
+      if (dm.content.trim()) {
+        result.push({
+          id: `${idPrefix}a-${idx}`,
+          type: 'assistant',
+          content: dm.content,
+          timestamp: dm.timestamp,
+          ...(dm.requestId ? { requestId: dm.requestId } : {}),
+        })
+      }
+      if (dm.toolCards) {
+        for (const card of dm.toolCards) {
+          result.push({
+            id: `${idPrefix}t-${card.id}`,
+            type: 'tool',
+            toolId: card.id,
+            toolName: card.name,
+            toolInput: card.input,
+            toolStatus: card.status,
+            toolResult: card.result,
+            timestamp: card.timestamp,
+            ...(card.requestId ? { requestId: card.requestId } : {}),
           })
-        }
-      } else if (Array.isArray(msg.content)) {
-        const textParts = (msg.content as Array<{ type: string; text?: string }>)
-          .filter(b => b.type === 'text')
-          .map(b => b.text ?? '')
-          .join('')
-        if (textParts.trim()) {
-          displayMessages.push({
-            id: `${idPrefix}a-${idx}`,
-            type: 'assistant',
-            content: textParts,
-            timestamp,
-            ...(isCron ? { isCron: true } : {}),
-            ...(cronDescription ? { cronDescription } : {}),
-            ...(requestId ? { requestId } : {}),
-          })
-        }
-        for (const block of msg.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>) {
-          if (block.type === 'tool_use' && block.id && block.name) {
-            const resultEntry = toolResults.get(block.id)
-            displayMessages.push({
-              id: `${idPrefix}t-${block.id}`,
-              type: 'tool',
-              toolId: block.id,
-              toolName: block.name,
-              toolInput: block.input,
-              toolStatus: resultEntry ? (resultEntry.isError ? 'error' : 'success') : 'success',
-              toolResult: resultEntry?.content,
-              timestamp: timestamp + 1,
-              ...(requestId ? { requestId } : {}),
-            })
-          }
         }
       }
     }
   }
 
-  return displayMessages
+  return result
 }
+
 
 export interface GatewayConfig {
   port?: number
@@ -516,7 +413,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /config/zhile-session — 读取知了专属会话 ID
   app.get('/config/zhile-session', (_req, res) => {
-    const file = join(homedir(), '.hrids-agent', 'zhile-session.json')
+    const file = join(getConfigDir(), 'zhile-session.json')
     if (!existsSync(file)) { res.json({ sessionId: null }); return }
     try {
       const data = JSON.parse(readFileSync(file, 'utf-8')) as { sessionId?: string }
@@ -528,7 +425,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // PUT /config/zhile-session — 保存知了专属会话 ID
   app.put('/config/zhile-session', (req, res) => {
-    const dir = join(homedir(), '.hrids-agent')
+    const dir = getConfigDir()
     const file = join(dir, 'zhile-session.json')
     try {
       const body = req.body as { sessionId?: string | null }
@@ -547,7 +444,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const cfg = loadConfig()
       const defaultModel = cfg.model
 
-      // 从 config.json 的 llm.fallbacks 读取模型列表
+      // 从 config.yaml 的 llm.fallbacks 读取模型列表
       for (const group of cfg.llm?.fallbacks ?? []) {
         for (const m of group.models) {
           models.push({ provider: group.provider, model: m, isDefault: m === defaultModel })
@@ -599,16 +496,18 @@ export function createGateway(config: GatewayConfig = {}) {
   app.get('/sessions/:id/messages', (req, res) => {
     // 优先从内存中的活跃 session 读取（最新状态）
     const activeSession = manager.getSession(req.params.id)
-    const rawMessages = activeSession
-      ? activeSession.engine.getHistory()
-      : loadDiskSession(req.params.id)
-
-    if (!rawMessages) {
-      res.json([])
+    if (activeSession) {
+      res.json(convertToServerDisplayMessages(activeSession.engine.getDisplayMessages()))
       return
     }
 
-    res.json(formatMessagesForDisplay(rawMessages))
+    // 降级：从磁盘加载事件并投影
+    const events = loadSessionEvents(req.params.id)
+    if (!events) {
+      res.json([])
+      return
+    }
+    res.json(convertToServerDisplayMessages(projectForDisplay(events)))
   })
 
   // GET /sessions/:id/history-segments — 读取会话的压缩归档段列表
@@ -623,14 +522,8 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
-    try {
-      const rawMessages = loadSessionArchive(req.params.id, req.params.filename)
-      if (!rawMessages) { res.json([]); return }
-      res.json(formatMessagesForDisplay(rawMessages, 'arc-'))
-    } catch (err) {
-      log.warn('读取归档消息失败', { error: String(err) })
-      res.json([])
-    }
+    // 旧格式归档（transcript.*.archive.jsonl）已不再支持，返回空
+    res.json([])
   })
 
   // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）
@@ -884,15 +777,16 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // POST /sessions/:id/upload — 上传文件到会话工作目录
+  // POST /sessions/:id/upload — 上传文件到会话 uploads 目录
   // 请求体：JSON { files: Array<{ name: string; data: string }> }
   // data 为 base64 编码的文件内容
   app.post('/sessions/:id/upload', (req, res) => {
-    const activeSession = manager.getSession(req.params.id)
-    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
+    const sessionId = req.params.id
+    const sessionDir = join(getConfigDir(), 'sessions', sessionId)
 
-    if (!cwd) {
-      res.status(404).json({ error: '会话不存在或无工作目录' })
+    // 确保 session 目录存在（新建会话可能还没有 session 目录）
+    if (!existsSync(sessionDir)) {
+      res.status(404).json({ error: '会话不存在' })
       return
     }
 
@@ -909,6 +803,9 @@ export function createGateway(config: GatewayConfig = {}) {
         return
       }
 
+      const uploadsDir = join(sessionDir, 'uploads')
+      mkdirSync(uploadsDir, { recursive: true })
+
       const uploaded: Array<{ name: string; path: string; size: number }> = []
 
       for (const file of body.files) {
@@ -924,13 +821,11 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        // 图片统一存放到 cwd/.cache/ 子目录
-        const imagesDir = resolve(cwd, '.cache')
-        const destPath = resolve(imagesDir, safeName)
+        const destPath = resolve(uploadsDir, safeName)
 
-        // 安全检查：确保目标路径在 cwd 内
-        if (!destPath.startsWith(resolve(cwd))) {
-          res.status(403).json({ error: '禁止写入 cwd 之外的路径' })
+        // 安全检查：确保目标路径在 uploadsDir 内
+        if (!destPath.startsWith(resolve(uploadsDir))) {
+          res.status(403).json({ error: '禁止写入 uploads 目录之外的路径' })
           return
         }
 
@@ -943,12 +838,10 @@ export function createGateway(config: GatewayConfig = {}) {
           return
         }
 
-        mkdirSync(imagesDir, { recursive: true })
         writeFileSync(destPath, buffer)
 
-        log.info('文件已上传', { sessionId: req.params.id, file: safeName, size: buffer.length })
-        // name 返回相对路径，前端用 getImageUrl(sessionId, '.cache/xxx.jpg') 加载
-        uploaded.push({ name: `.cache/${safeName}`, path: destPath, size: buffer.length })
+        log.info('文件已上传', { sessionId, file: safeName, size: buffer.length })
+        uploaded.push({ name: safeName, path: destPath, size: buffer.length })
       }
 
       res.json({ files: uploaded })
@@ -960,7 +853,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /crons — 读取定时任务列表
   app.get('/crons', (_req, res) => {
-    const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
+    const cronFile = join(getConfigDir(), 'crons.json')
     if (!existsSync(cronFile)) {
       res.json([])
       return
@@ -975,7 +868,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // PUT /crons/:id/toggle — 启用/禁用定时任务（同步更新文件和内存调度器）
   app.put('/crons/:id/toggle', async (req, res) => {
-    const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
+    const cronFile = join(getConfigDir(), 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
       return
@@ -1005,7 +898,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // DELETE /crons/:id — 删除定时任务（同步清除内存调度器中的 timer）
   app.delete('/crons/:id', async (req, res) => {
-    const cronFile = join(homedir(), '.hrids-agent', 'crons.json')
+    const cronFile = join(getConfigDir(), 'crons.json')
     if (!existsSync(cronFile)) {
       res.status(404).json({ error: '定时任务文件不存在' })
       return
@@ -1033,7 +926,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // POST /crons — 创建定时任务（前端直接创建，不经过 Agent）
   app.post('/crons', async (req, res) => {
-    const cronDir = join(homedir(), '.hrids-agent')
+    const cronDir = getConfigDir()
     const cronFile = join(cronDir, 'crons.json')
     try {
       const body = req.body as {
@@ -1118,7 +1011,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /mcp — 读取 MCP 服务器配置列表
   app.get('/mcp', (_req, res) => {
-    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    const mcpFile = join(getConfigDir(), 'mcp.json')
     if (!existsSync(mcpFile)) {
       res.json({ mcpServers: {} })
       return
@@ -1133,7 +1026,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // PUT /mcp — 保存完整 MCP 配置（覆盖写入）
   app.put('/mcp', (req, res) => {
-    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpDir = getConfigDir()
     const mcpFile = join(mcpDir, 'mcp.json')
     try {
       const body = req.body as { mcpServers?: Record<string, unknown> }
@@ -1153,7 +1046,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // POST /mcp/:name — 添加或更新单个 MCP 服务器
   app.post('/mcp/:name', (req, res) => {
-    const mcpDir = join(homedir(), '.hrids-agent')
+    const mcpDir = getConfigDir()
     const mcpFile = join(mcpDir, 'mcp.json')
     try {
       const serverName = req.params.name
@@ -1181,7 +1074,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // DELETE /mcp/:name — 删除单个 MCP 服务器
   app.delete('/mcp/:name', (req, res) => {
-    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    const mcpFile = join(getConfigDir(), 'mcp.json')
     try {
       const serverName = req.params.name
       if (!existsSync(mcpFile)) {
@@ -1204,7 +1097,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /mcp/config-path — 返回 MCP 配置文件路径（供前端展示）
   app.get('/mcp/config-path', (_req, res) => {
-    const mcpFile = join(homedir(), '.hrids-agent', 'mcp.json')
+    const mcpFile = join(getConfigDir(), 'mcp.json')
     res.json({ path: mcpFile })
   })
 
@@ -1275,12 +1168,11 @@ export function createGateway(config: GatewayConfig = {}) {
     try {
       const { writeFileSync, existsSync, readFileSync, mkdirSync } = await import('fs')
       const { join } = await import('path')
-      const { homedir } = await import('os')
 
       const skillName = decodeURIComponent(req.params.name)
       const { enabled } = req.body as { enabled: boolean }
 
-      const agentDir = join(homedir(), '.hrids-agent')
+      const agentDir = getConfigDir()
       const disabledPath = join(agentDir, 'skills-disabled.json')
 
       let disabled: string[] = []
@@ -1568,14 +1460,11 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   // GET /sessions/:id/image?path= — 直接返回图片二进制（用于前端 <img> 标签显示）
+  // 搜索顺序：cwd → sessions/<id>/uploads/
   app.get('/sessions/:id/image', (req, res) => {
-    const activeSession = manager.getSession(req.params.id)
-    const cwd = activeSession?.info.cwd ?? loadSessionMeta(req.params.id)?.workDir ?? null
-
-    if (!cwd) {
-      res.status(404).json({ error: '会话不存在或无工作目录' })
-      return
-    }
+    const sessionId = req.params.id
+    const activeSession = manager.getSession(sessionId)
+    const cwd = activeSession?.info.cwd ?? loadSessionMeta(sessionId)?.workDir ?? null
 
     const relPath = req.query.path as string
     if (!relPath) {
@@ -1583,9 +1472,27 @@ export function createGateway(config: GatewayConfig = {}) {
       return
     }
 
-    const absPath = resolve(cwd, relPath)
-    if (!absPath.startsWith(resolve(cwd))) {
-      res.status(403).json({ error: '禁止访问 cwd 之外的路径' })
+    // 候选搜索目录：cwd 和 uploads 目录
+    const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+    const searchDirs = [cwd, existsSync(uploadsDir) ? uploadsDir : null].filter(Boolean) as string[]
+
+    if (searchDirs.length === 0) {
+      res.status(404).json({ error: '会话不存在' })
+      return
+    }
+
+    let absPath: string | null = null
+    for (const dir of searchDirs) {
+      const candidate = resolve(dir, relPath)
+      if (!candidate.startsWith(resolve(dir))) continue  // 安全检查：禁止目录穿越
+      if (existsSync(candidate)) {
+        absPath = candidate
+        break
+      }
+    }
+
+    if (!absPath) {
+      res.status(404).json({ error: '图片不存在' })
       return
     }
 
@@ -1632,7 +1539,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /api/logs — 读取最近的日志条目
   app.get('/api/logs', (req, res) => {
-    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+    const logFile = join(getConfigDir(), 'logs', 'agent.log')
     const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000)
     const level = String(req.query.level ?? 'all')
 
@@ -1664,7 +1571,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
   // GET /api/usage — 读取模型用量统计（从日志中聚合）
   app.get('/api/usage', (_req, res) => {
-    const logFile = join(homedir(), '.hrids-agent', 'logs', 'agent.log')
+    const logFile = join(getConfigDir(), 'logs', 'agent.log')
 
     if (!existsSync(logFile)) {
       res.json({ sessions: [], totals: { inputTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 } })
@@ -1721,9 +1628,9 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // GET /api/config-file — 读取 config.json 原始内容
+  // GET /api/config-file — 读取 config.yaml 原始内容
   app.get('/api/config-file', (_req, res) => {
-    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    const configFile = join(getConfigDir(), 'config.yaml')
     if (!existsSync(configFile)) {
       res.json({ content: '{}', path: configFile })
       return
@@ -1736,24 +1643,24 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // PUT /api/config-file — 保存 config.json 原始内容
+  // PUT /api/config-file — 保存 config.yaml 原始内容
   app.put('/api/config-file', async (req, res) => {
-    const configFile = join(homedir(), '.hrids-agent', 'config.json')
+    const configFile = join(getConfigDir(), 'config.yaml')
     try {
       const { content } = req.body as { content?: string }
       if (typeof content !== 'string') {
         res.status(400).json({ error: '缺少 content 字段' })
         return
       }
-      // 验证 JSON 格式
-      JSON.parse(content)
+      // 验证 YAML 格式
+      parseYaml(content)
       const tmp = configFile + '.tmp'
       writeFileSync(tmp, content, 'utf-8')
       renameSync(tmp, configFile)
       // 清除配置缓存，下次读取时重新加载
       const { _resetConfigCache } = await import('../core/Config.js')
       _resetConfigCache()
-      log.info('config.json 已通过 Web 界面更新')
+      log.info('config.yaml 已通过 Web 界面更新')
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: String(err) })

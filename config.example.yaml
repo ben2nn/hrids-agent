@@ -1,0 +1,153 @@
+# 复制此文件到 ~/.hrids/config.yaml 并填入你的配置
+# 完整字段说明见 docs/AGENT.md，或运行 hrids-agent --help
+# 大语言模型（主对话引擎，必须配置）
+# 同平台内按 models 顺序重试，全部失败后切换下一平台
+llm:
+  fallbacks:
+    - provider: aliyun
+      apiKey: sk-xxxxxxxx
+      models:
+        - qwen3.5-35b-a3b
+        - qwen3.6-flash-2026-04-16
+        - qwen3.5-plus-2026-04-20
+    - provider: deepseek
+      apiKey: sk-xxxxxxxx
+      models:
+        - deepseek-chat
+        - deepseek-reasoner
+    - provider: anthropic
+      apiKey: sk-ant-xxxxxxxx
+      models:
+        - claude-3-5-haiku-20241022
+        - claude-3-5-sonnet-20241022
+    - provider: openai
+      apiKey: sk-xxxxxxxx
+      models:
+        - gpt-4o
+        - gpt-4o-mini
+    - provider: groq
+      apiKey: gsk_xxxxxxxx
+      models:
+        - llama-3.3-70b-versatile
+        - mixtral-8x7b-32768
+
+# 视觉模型（图像理解，可选；未配置则复用 llm）
+vision:
+  fallbacks:
+    - provider: aliyun
+      apiKey: sk-xxxxxxxx
+      models:
+        - qwen-vl-plus-latest
+        - qwen-vl-max
+    - provider: openai
+      apiKey: sk-xxxxxxxx
+      models:
+        - gpt-4o
+        - gpt-4o-mini
+
+# 全模态模型（文本 + 图像 + 音频，可选；未配置则复用 vision/llm）
+multimodal:
+  fallbacks:
+    - provider: aliyun
+      apiKey: sk-xxxxxxxx
+      models:
+        - qwen-omni-turbo
+        - qwen-omni-mini
+
+# 语音模型（TTS / STT，可选）
+speech:
+  fallbacks:
+    - provider: aliyun
+      apiKey: sk-xxxxxxxx
+      models:
+        - cosyvoice-v2
+        - paraformer-realtime-v2
+
+# 向量模型（语义检索，可选；未配置则降级 TF-IDF，无需 API）
+embedding:
+  fallbacks:
+    - provider: aliyun
+      apiKey: sk-xxxxxxxx
+      models:
+        - text-embedding-v3
+        - text-embedding-v2
+    - provider: openai
+      apiKey: sk-xxxxxxxx
+      models:
+        - text-embedding-3-small
+  dimensions: 512
+
+# 向量存储后端。backend: sqlite（默认，内置）| pgvector | seekdb
+vectorStore:
+  backend: sqlite
+
+# Agent 运行时行为配置
+agent:
+  model: qwen3.5-35b-a3b
+  permissionMode: ask
+  maxTokens: 8096
+  maxTurns: 50
+  memoryCondense: true
+  autoDistillSkill: false
+  autoPruneSessions: true
+  pruneKeepCount: 50
+  pruneMaxAgeDays: 90
+
+# Gateway 模式（HTTP + WebSocket 服务）。启动：hrids-agent --gateway
+gateway:
+  port: 3282
+  host: 127.0.0.1
+  token: ""
+  # 用户列表（配置后前端显示用户名/密码登录界面）
+  users:
+    - username: admin
+      password: your-password
+
+# 日志级别：debug | info | warn | error
+logging:
+  level: info
+  theme: default
+
+# AI Skills 社区（https://skillhub.cn）
+skillHub:
+  url: https://skillhub.cn
+  apiBase: https://api.skillhub.cn
+
+# 自定义提供商 —— 接入任意 OpenAI 兼容接口，配置后可在 llm.fallbacks 中使用
+# customProviders:
+#   - name: MyLLM
+#     baseUrl: https://my-llm.example.com/v1
+
+# MCP 服务器。也可单独维护 ~/.hrids/mcp.json（兼容 Claude Desktop 格式）
+# mcpServers:
+#   - name: filesystem
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#     env: {}
+
+# 多智能体配置。子智能体通过 agent 工具派生，支持按角色分配不同模型和权限
+multiAgent:
+  globalMaxConcurrent: 10
+  defaultMaxTurns: 30
+  defaultTimeoutMs: 300000
+  autoSelectProfiles: true
+  allowRecursiveAgent: false
+  # 内联 profile 示例：代码审查专家
+  # profiles:
+  #   - name: code-reviewer
+  #     description: 审查代码质量、安全性和最佳实践
+  #     model: claude-3-5-sonnet-20241022
+  #     provider: anthropic
+  #     allowedTools: [file_read, grep, glob]
+  #     maxTurns: 15
+  #     autoSelectable: true
+  profileDirs: []
+
+# 子智能体工具权限策略
+toolPermissions:
+  defaultDenyList:
+    - todo_write
+    - todo_update
+    - todo_append
+    - todo_reset
+  allowMcpTools: false

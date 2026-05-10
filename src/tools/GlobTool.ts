@@ -10,7 +10,10 @@ const inputSchema = z.object({
 
 export const GlobTool: ToolDef<typeof inputSchema> = {
   name: 'glob',
-  description: '用 glob 模式搜索文件路径',
+  description: `用 glob 模式搜索文件路径，返回匹配的文件列表。
+适用场景：查找特定类型/名称的文件（如 *.py、src/**/*.ts）
+不适用场景：读取文件内容 → 用 file_read | 搜索文件内容 → 用 grep
+             问候/闲聊 → 不需要任何工具`,
   inputSchema,
   readonly: true,
 

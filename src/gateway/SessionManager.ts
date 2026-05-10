@@ -9,10 +9,11 @@ import { ALL_TOOLS } from '../tools/index.js'
 import { createAgentTool } from '../tools/AgentTool.js'
 import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { buildSystemContext, getSessionWorkDir } from '../core/ContextBuilder.js'
-import { getCoordinatorSystemPrompt } from '../core/coordinator/coordinatorPrompt.js'
-import { loadSession, loadSessionMeta, saveSession, generateSessionId, archiveSession } from '../core/SessionStore.js'
-import { loadConfig } from '../core/Config.js'
+import { buildSystemContext, getSessionWorkDirPath } from '../core/ContextBuilder.js'
+import { getCoordinatorSystemPrompt, classifyTask } from '../core/coordinator/coordinatorPrompt.js'
+import { loadSessionEvents, loadSessionMeta, saveSession, generateSessionId, archiveSession } from '../core/SessionStore.js'
+import { ConversationStore, JsonlEventStorage, createUserMessageEvent, createAssistantMessageEvent } from '../core/ConversationStore.js'
+import { loadConfig, getConfigDir } from '../core/Config.js'
 import { runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
 import { resolveAskUser, setGatewayAskCallback } from '../tools/AskUserTool.js'
@@ -92,14 +93,14 @@ export class SessionManager {
     const resumeMeta = req.resume ? loadSessionMeta(req.resume) : null
 
     // 确定会话工作目录：优先使用请求中指定的 cwd，resume 时沿用原会话目录，否则新建独立目录
-    const sessionCwd = req.cwd ?? resumeMeta?.workDir ?? getSessionWorkDir(sessionId)
+    const sessionCwd = req.cwd ?? resumeMeta?.workDir ?? getSessionWorkDirPath(sessionId)
 
     log.info('创建会话', { sessionId, model, autoMode: req.autoMode, cwd: sessionCwd })
     auditLog({ sessionId, action: 'session_create', resource: sessionId, result: 'allowed', details: { model } })
 
     // 创建 LLM 提供商
     // 若请求显式指定了 model/provider/apiKey，则用 createProvider 精确创建；
-    // 否则走 config.json 的 llm.fallbacks / model 多模型 fallback 配置
+    // 否则走 config.yaml 的 llm.fallbacks / model 多模型 fallback 配置
     const provider = (req.model || req.provider || req.apiKey)
       ? createProvider({
           model,
@@ -193,8 +194,17 @@ export class SessionManager {
 
     TeamManager.initForSession(sessionId, provider, tools)
 
-    // 恢复已有会话或新建
-    const initialMessages = req.resume ? loadSession(req.resume) ?? [] : []
+    // 恢复已有会话或新建：加载事件日志
+    let store: ConversationStore | undefined
+    if (req.resume) {
+      const sessionDir = join(getConfigDir(), 'sessions', req.resume)
+      const eventStorage = new JsonlEventStorage(sessionDir)
+      store = new ConversationStore(eventStorage)
+      const events = loadSessionEvents(req.resume)
+      if (events && events.length > 0) {
+        store.appendEventsNoSave(...events)
+      }
+    }
 
     const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd, sessionId)
 
@@ -207,9 +217,9 @@ export class SessionManager {
       maxTurns: agentConfig.maxTurns,
       maxBudgetUsd: agentConfig.maxBudgetUsd,
       autoCompactThreshold: agentConfig.autoCompactThreshold,
-      initialMessages,
       sessionCwd,
-    })
+      uploadsDir: join(getConfigDir(), 'sessions', sessionId, 'uploads'),
+    }, store)
     session.permissions = permissions
 
     // 注册压缩前归档回调：保留完整历史，workDir 不变
@@ -220,12 +230,11 @@ export class SessionManager {
 
     // 注册 todos_updated 推送回调（按 sessionId 隔离，避免多会话串流）
     // 传入 sessionId 确保只有当前会话的 todo 操作才触发此回调
-    // 注意：直接从 session.info.cwd 读取，而非 loadTodos()（后者依赖 getGlobalCwd()，
-    // 在异步回调中 getGlobalCwd() 可能已切换到其他会话的 cwd，导致读到旧数据）
+    // todo 数据迁移到 sessions/<sessionId>/tasks/ 目录，不再依赖 workDir
     setTodosUpdatedCallback(() => {
       const s = this.sessions.get(sessionId)
       if (s) {
-        const todoFile = join(s.info.cwd, '.hrids', 'tasks', 'todos.json')
+        const todoFile = join(getConfigDir(), 'sessions', sessionId, 'tasks', 'todos.json')
         let todos: unknown[] = []
         try {
           if (existsSync(todoFile)) {
@@ -436,19 +445,14 @@ export class SessionManager {
         requestId,
       })
 
-      // 将提醒消息写入 history（作为 assistant 消息），并持久化
-      // content 中加 [定时任务触发] 前缀，让 LLM 能识别这条消息是 cron 自动触发的，
-      // 而非对话上下文的一部分，避免用户回复"知了"时 LLM 误判为需要重新执行任务。
-      session.engine.setHistory([
-        ...session.engine.getHistory(),
-        {
-          role: 'assistant',
-          content: [{ type: 'text', text: `[定时任务触发: ${cronJob.description}]\n${cronJob.task}` }],
+      // 将提醒消息写入事件日志（作为 assistant 消息），并持久化
+      session.engine.store.appendEvents(
+        createAssistantMessageEvent(
+          `[定时任务触发: ${cronJob.description}]\n${cronJob.task}`,
+          undefined,
           requestId,
-          trigger: 'cron' as const,
-          cronDescription: cronJob.description,
-        },
-      ])
+        ),
+      )
       saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
 
       // 推送到 IM 平台（如果有绑定的 IM 会话）
@@ -577,7 +581,8 @@ export class SessionManager {
     let processedContent = content  // 去掉 @引用后的干净文本
     if (!hasVisionAttachment) {
       const cwd = session.info.cwd
-      const { attachments: extracted, cleanText, errors } = await extractMediaFromText(content, cwd)
+      const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+      const { attachments: extracted, cleanText, errors } = await extractMediaFromText(content, cwd, uploadsDir)
       if (extracted.length > 0) {
         inlineAttachments.push(...extracted)
         processedContent = cleanText
@@ -592,7 +597,8 @@ export class SessionManager {
     if (!hasVisionAttachment && inlineAttachments.length === 0) {
       const hasVisionIntent = isVisionIntent(content)
       if (hasVisionIntent) {
-        const recentImages = await extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd)
+        const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
+        const recentImages = await extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd, uploadsDir)
         inlineAttachments.push(...recentImages)
         if (recentImages.length > 0) {
           log.info('检测到视觉意图，从历史中提取最近图片', { sessionId, count: recentImages.length, files: recentImages.map(a => a.name) })
@@ -630,7 +636,7 @@ export class SessionManager {
         session.engine.setProvider(visionProvider)
         this.broadcast(session, { type: 'model_switched', requestId, model: visionProvider.model, reason: 'vision_content' })
       } else {
-        log.warn('检测到图片/PDF，但未配置视觉模型（config.json 的 vision 字段），使用当前模型', { sessionId })
+        log.warn('检测到图片/PDF，但未配置视觉模型（config.yaml 的 vision 字段），使用当前模型', { sessionId })
       }
     }
 
@@ -705,23 +711,13 @@ export class SessionManager {
         clearTimeout(visionTimer)
       }
 
-      // 将视觉模型的回答写入主会话历史，供后续对话引用
+      // 将视觉模型的回答写入事件日志，供后续对话引用
       if (visionText.trim()) {
-        const history = [...session.engine.getHistory()]
-        // 历史存储策略：统一存 @filename 文本（图片已落盘，无论 Web 还是 IM 路径）
-        // inlineAttachments 路径（@filename 提取）：processedContent 文本已含 @filename
-        // 显式 attachments 路径（IM 落盘后）：content 已被 PlatformManager 改为含 @filename 的文本
-        // 两种情况下 content 都已包含 @filename，直接存字符串即可
-        const userMsgForHistory: Message = {
-          role: 'user',
-          content: inlineAttachments.length > 0 ? processedContent : content,
-          requestId,
-          timestamp: Date.now(),
-          trigger: 'user' as const,
-        }
-        history.push(userMsgForHistory)
-        history.push({ role: 'assistant', content: visionText, requestId, timestamp: Date.now(), trigger: 'user' as const })
-        session.engine.setHistory(history)
+        const userText = inlineAttachments.length > 0 ? processedContent : content
+        session.engine.store.appendEvents(
+          createUserMessageEvent(typeof userText === 'string' ? userText : String(userText), requestId),
+          createAssistantMessageEvent(visionText, undefined, requestId),
+        )
         saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
       }
 
@@ -734,6 +730,9 @@ export class SessionManager {
       return
     }
     // 根据消息内容动态注入任务相关扩展（skill 沉淀、爬虫、代码开发等规范）
+    const types = classifyTask(content)
+    session.engine.setChatMode(types.includes('chat'))
+
     const allTools = session.engine.getTools()
     const coordinatorPrompt = getCoordinatorSystemPrompt(content, allTools)
 
@@ -1067,6 +1066,7 @@ function isVisionIntent(message: string): boolean {
 async function extractRecentImagesFromHistory(
   history: readonly import('../core/QueryEngine.js').Message[],
   cwd: string,
+  uploadsDir?: string,
 ): Promise<Array<{ name: string; data: string; mediaType: string }>> {
   const imagePattern = /@([^\s@]+\.(?:jpg|jpeg|png|gif|webp|bmp|tiff?|avif|pdf))/gi
 
@@ -1109,8 +1109,11 @@ async function extractRecentImagesFromHistory(
       if (seen.has(filename)) continue
       seen.add(filename)
 
-      const absPath = resolve(cwd, filename)
-      const attachment = await loadMediaFromFile(absPath, filename)
+      // 搜索顺序：cwd → uploadsDir
+      let attachment = await loadMediaFromFile(resolve(cwd, filename), filename)
+      if (!attachment && uploadsDir) {
+        attachment = await loadMediaFromFile(resolve(uploadsDir, filename), filename)
+      }
       if (attachment) result.push(attachment)
     }
 

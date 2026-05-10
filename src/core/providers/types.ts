@@ -29,7 +29,7 @@ export type ContentPart =
 
 export interface ImageSource {
   type: 'base64' | 'url'
-  mediaType?: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+  mediaType?: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | 'application/pdf'
   data?: string   // base64 编码的图像数据
   url?: string    // 图像 URL
 }
