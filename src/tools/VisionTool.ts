@@ -110,7 +110,7 @@ export const VisionTool: ToolDef<typeof inputSchema> = {
         apiKey = first.apiKey ?? config.apiKey
         baseUrl = first.baseUrl ?? resolveDefaultBaseUrl(first.provider)
       } else {
-        model = config.model
+        model = config.model ?? ''
         apiKey = config.apiKey
         baseUrl = config.baseUrl ?? 'https://api.openai.com/v1'
       }
