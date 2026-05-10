@@ -36,7 +36,8 @@ jobs:
   preflight:
     name: Preflight Check
     runs-on: ubuntu-latest
-    if: inputs.preflight_only == true
+    # 始终运行预检查作为质量门控；release job 通过 needs 依赖此 job，
+    # 如果 preflight 失败则 release 不会执行
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -53,7 +54,12 @@ jobs:
         run: npm ci
 
       - name: Run linter
-        run: npm run lint || echo "No lint script"
+        run: |
+          if node -e "process.exit(require('./package.json').scripts.lint ? 0 : 1)"; then
+            npm run lint
+          else
+            echo "No lint script defined, skipping"
+          fi
 
       - name: Run tests
         run: npm test
@@ -97,6 +103,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run linter
+        run: |
+          if node -e "process.exit(require('./package.json').scripts.lint ? 0 : 1)"; then
+            npm run lint
+          else
+            echo "No lint script defined, skipping"
+          fi
+
+      - name: Run tests
+        run: npm test
+
       - name: Build
         run: npm run build
 
@@ -108,7 +125,8 @@ jobs:
 
       - name: Check if already published
         run: |
-          if npm view hrids-agent@${{ env.NEW_VERSION }} version >/dev/null 2>&1; then
+          PKG_NAME=$(node -p "require('./package.json').name")
+          if npm view "$PKG_NAME@${{ env.NEW_VERSION }}" version >/dev/null 2>&1; then
             echo "Version ${{ env.NEW_VERSION }} already published!"
             exit 1
           fi

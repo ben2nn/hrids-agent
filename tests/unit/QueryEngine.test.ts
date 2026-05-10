@@ -177,7 +177,7 @@ describe('QueryEngine', () => {
       const gen = engine.send('task')
 
       // 启动执行
-      const firstEvent = gen.next()
+      gen.next()
 
       // 稍等一下确保已经开始运行
       await new Promise(r => setTimeout(r, 50))
