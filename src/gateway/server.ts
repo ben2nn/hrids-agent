@@ -6,7 +6,7 @@ import { execSync } from 'child_process'
 import { randomBytes } from 'crypto'
 import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSessionEvents, loadSessionMeta, listArchives as listSessionArchives, loadArchive as loadSessionArchive, deleteSessionFromDisk } from '../core/SessionStore.js'
+import { listSessions as listDiskSessions, loadSessionEvents, loadSessionMeta, listArchives as listSessionArchives, deleteSessionFromDisk } from '../core/SessionStore.js'
 import { logger } from '../core/logger.js'
 import { load as parseYaml } from 'js-yaml'
 import type { CreateSessionRequest } from './types.js'
@@ -45,8 +45,6 @@ export interface DisplayMessage {
   requestId?: string
   timestamp: number
 }
-
-const IMAGE_PATTERN = /@([^\s@]+\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif))/gi
 
 /**
  * 将原始 Message[] 转换为前端 DisplayMessage[]。

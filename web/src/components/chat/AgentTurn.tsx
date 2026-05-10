@@ -213,7 +213,7 @@ function ProcessPanel({
   const toggleCard = (toolId: string) =>
     setExpandedCards(prev => {
       const next = new Set(prev)
-      next.has(toolId) ? next.delete(toolId) : next.add(toolId)
+      if (next.has(toolId)) next.delete(toolId); else next.add(toolId)
       return next
     })
 

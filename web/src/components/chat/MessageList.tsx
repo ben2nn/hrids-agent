@@ -220,7 +220,6 @@ export function MessageList({ sessionId }: MessageListProps) {
   const entries = useMemo(
     () => groupMessages(messages, toolCardsMap, hasStreaming),
     // toolCardsMap 引用稳定（Map 内部更新时 Zustand 会创建新 Map），hasStreaming 变化时重算
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [messages, toolCardsMap, hasStreaming],
   )
 

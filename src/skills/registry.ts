@@ -2,7 +2,6 @@
 
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { join, dirname, resolve } from 'path'
-import { homedir } from 'os'
 import { getConfigDir } from '../core/Config.js'
 import type { Skill, BundledSkillDefinition, SkillFrontmatter } from './types.js'
 

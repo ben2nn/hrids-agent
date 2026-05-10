@@ -3,7 +3,6 @@ import { readdirSync, statSync, existsSync, rmSync } from 'fs'
 import { join } from 'path'
 import type { ToolDef, ToolContext, ToolResult } from '../core/Tool.js'
 import { getGlobalCwd, ensureWorkDirForCurrentCwd } from '../core/cwd.js'
-import { ensureWorkDir } from '../core/ContextBuilder.js'
 import { getConfigDir } from '../core/Config.js'
 import { logger } from '../core/logger.js'
 
@@ -22,7 +21,7 @@ export const WorkdirInitTool: ToolDef<typeof initSchema> = {
   inputSchema: initSchema,
   readonly: false,
 
-  async execute(_input, ctx?: ToolContext): Promise<ToolResult> {
+  async execute(_input, _ctx?: ToolContext): Promise<ToolResult> {
     const cwd = getGlobalCwd()
     const created = ensureWorkDirForCurrentCwd()
 
@@ -48,7 +47,7 @@ export const WorkdirDeliverTool: ToolDef<typeof deliverSchema> = {
   inputSchema: deliverSchema,
   readonly: true,
 
-  async execute(input, ctx?: ToolContext): Promise<ToolResult> {
+  async execute(input, _ctx?: ToolContext): Promise<ToolResult> {
     const cwd = getGlobalCwd()
     const lines = [`## 任务完成\n${input.summary}\n`, `### 产出物`]
 
@@ -75,7 +74,7 @@ export const WorkdirCleanupTool: ToolDef<typeof cleanupSchema> = {
   readonly: false,
   isDestructive: true,
 
-  async execute(_input, ctx?: ToolContext): Promise<ToolResult> {
+  async execute(_input, _ctx?: ToolContext): Promise<ToolResult> {
     const cwd = getGlobalCwd()
 
     if (!existsSync(cwd)) {
@@ -108,7 +107,7 @@ export const WorkdirListTool: ToolDef<typeof listSchema> = {
   inputSchema: listSchema,
   readonly: true,
 
-  async execute(_input, ctx?: ToolContext): Promise<ToolResult> {
+  async execute(_input, _ctx?: ToolContext): Promise<ToolResult> {
     const workRoot = join(getConfigDir(), 'work')
 
     if (!existsSync(workRoot)) {

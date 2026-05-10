@@ -1,5 +1,4 @@
 // 会话初始化 —— 恢复旧会话或新建会话，初始化工作目录
-import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { generateSessionId, loadSessionEvents, loadSessionMeta, getLastSessionId } from '../core/SessionStore.js'
 import { getConfigDir } from '../core/Config.js'

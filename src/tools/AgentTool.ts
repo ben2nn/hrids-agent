@@ -9,7 +9,7 @@ import { PermissionManager } from '../core/PermissionManager.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { runWithCwd, getGlobalCwd } from '../core/cwd.js'
 import { getCurrentSessionId, runWithSession } from '../core/sessionContext.js'
-import { resolveProfile, resolveSystemPrompt, listProfiles } from '../core/coordinator/ProfileLoader.js'
+import { resolveProfile, resolveSystemPrompt } from '../core/coordinator/ProfileLoader.js'
 import type { AgentProfile } from '../core/Config.js'
 import { loadConfig } from '../core/Config.js'
 

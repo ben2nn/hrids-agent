@@ -8,7 +8,7 @@ import type {
   DisplayMessage,
   DisplayToolCard,
 } from './ConversationStore.js'
-import type { Message, ContentBlock, ImageSource } from './QueryEngine.js'
+import type { ContentBlock } from './QueryEngine.js'
 import type { ChatMessage } from './providers/types.js'
 
 // ── 常量 ────────────────────────────────────────────────────────

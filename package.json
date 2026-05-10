@@ -1,6 +1,6 @@
 {
   "name": "hrids-agent",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "原创智能体 CLI，借鉴 agentic CLI 架构思想",
   "type": "module",
   "bin": {

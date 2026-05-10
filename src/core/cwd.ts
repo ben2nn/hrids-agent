@@ -3,7 +3,7 @@
 // 所有工具统一从这里 import，避免对 BashTool 的隐性依赖。
 
 import { AsyncLocalStorage } from 'async_hooks'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { getConfigDir } from './Config.js'
 import { ensureWorkDir } from './ContextBuilder.js'
