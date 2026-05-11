@@ -1,6 +1,6 @@
 // 系统上下文构建器 —— 注入 Git 状态、AGENT.md 记忆文件等
-import { exec, execSync } from 'child_process'
-import { existsSync, readFileSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { exec } from 'child_process'
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { promisify } from 'util'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -30,18 +30,6 @@ export function getSessionWorkDirPath(sessionId: string): string {
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   const dirName = `${datePart}-${timePart}-${sessionId}`
   return join(getConfigDir(), 'work', dirName)
-}
-
-// 确保目录存在（含 git init），供需要写入时按需调用
-export function ensureWorkDir(dir: string): void {
-  if (existsSync(dir)) return
-  mkdirSync(dir, { recursive: true })
-  try {
-    execSync('git init', { cwd: dir, stdio: 'ignore' })
-    execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
-  } catch {
-    // git 不可用时静默忽略
-  }
 }
 
 // 读取 git 状态（分支、最近提交、工作区变更）

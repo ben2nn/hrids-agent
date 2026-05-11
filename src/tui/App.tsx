@@ -6,7 +6,7 @@ import type { CommandRegistry } from '../core/CommandRegistry.js'
 import type { CommandContext } from '../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js'
 import type { CronJob } from '../tools/ScheduleCronTool.js'
-import { listSessions, loadSessionEvents, generateSessionId, saveSession, archiveSession, listArchives } from '../core/SessionStore.js'
+import { listSessions, loadSessionEvents, generateSessionId, saveSessionMeta, archiveSession, listArchives } from '../core/SessionStore.js'
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js'
@@ -322,7 +322,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   // 注册压缩前归档回调：保留完整历史，workDir 不变
   useEffect(() => {
     engine.onBeforeCompact = async (summary: string) => {
-      saveSession(sessionId, engine.getHistory(), modelRef.current)
+      engine.store.saveToDisk()
       archiveSession(sessionId, summary)
     }
     return () => { engine.onBeforeCompact = null }
@@ -337,7 +337,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     generateCompactSummary: async () => {
       return engine.generateCompactSummary()
     },
-    getHistoryLength: () => engine.getHistory().length,
+    getHistoryLength: () => engine.store.getEventCount(),
     getEstimatedTokens: () => engine.getEstimatedTokens(),
     getCostSummary: () => engine.costs.getSummary(),
     getBudgetInfo: () => ({

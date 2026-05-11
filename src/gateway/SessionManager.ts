@@ -11,8 +11,8 @@ import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { buildSystemContext, getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt, classifyTask } from '../core/coordinator/coordinatorPrompt.js'
-import { loadSessionEvents, loadSessionMeta, saveSession, generateSessionId, archiveSession } from '../core/SessionStore.js'
-import { ConversationStore, JsonlEventStorage, createUserMessageEvent, createAssistantMessageEvent } from '../core/ConversationStore.js'
+import { loadSessionEvents, loadSessionMeta, saveSessionMeta, generateSessionId, archiveSession } from '../core/SessionStore.js'
+import { ConversationStore, JsonlEventStorage, createUserMessageEvent, createAssistantMessageEvent, createSystemEvent } from '../core/ConversationStore.js'
 import { loadConfig, getConfigDir } from '../core/Config.js'
 import { runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
@@ -224,7 +224,7 @@ export class SessionManager {
 
     // 注册压缩前归档回调：保留完整历史，workDir 不变
     session.engine.onBeforeCompact = async (summary: string) => {
-      saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+      session.engine.store.saveToDisk()
       archiveSession(sessionId, summary)
     }
 
@@ -335,10 +335,11 @@ export class SessionManager {
       }
     }
 
-    // 保存所有会话历史
+    // 保存所有会话事件到磁盘
     for (const [id, session] of this.sessions) {
       try {
-        saveSession(id, session.engine.getHistory(), session.info.model, session.info.cwd)
+        session.engine.store.saveToDisk()
+        saveSessionMeta(id, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
       } catch { /* 忽略 */ }
     }
 
@@ -445,15 +446,16 @@ export class SessionManager {
         requestId,
       })
 
-      // 将提醒消息写入事件日志（作为 assistant 消息），并持久化
+      // 将提醒消息写入事件日志（作为系统事件），并持久化
       session.engine.store.appendEvents(
-        createAssistantMessageEvent(
+        createSystemEvent(
+          'cron_trigger',
           `[定时任务触发: ${cronJob.description}]\n${cronJob.task}`,
-          undefined,
           requestId,
+          cronJob.description,
         ),
       )
-      saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+      saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
 
       // 推送到 IM 平台（如果有绑定的 IM 会话）
       if (this.cronIMCallback) {
@@ -598,7 +600,7 @@ export class SessionManager {
       const hasVisionIntent = isVisionIntent(content)
       if (hasVisionIntent) {
         const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
-        const recentImages = await extractRecentImagesFromHistory(session.engine.getHistory(), session.info.cwd, uploadsDir)
+        const recentImages = await extractRecentImagesFromHistory(session.engine.store.getEventLog(), session.info.cwd, uploadsDir)
         inlineAttachments.push(...recentImages)
         if (recentImages.length > 0) {
           log.info('检测到视觉意图，从历史中提取最近图片', { sessionId, count: recentImages.length, files: recentImages.map(a => a.name) })
@@ -718,7 +720,7 @@ export class SessionManager {
           createUserMessageEvent(typeof userText === 'string' ? userText : String(userText), requestId),
           createAssistantMessageEvent(visionText, undefined, requestId),
         )
-        saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+        saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
       }
 
       this.broadcast(session, toClientMessage({ type: 'done' }, requestId, visionProvider.model) ?? { type: 'done', requestId })
@@ -788,9 +790,9 @@ ${writeTools.join('、')}
           log.debug('QueryEngine 事件（无对应客户端消息，跳过广播）', { sessionId, requestId, evType: ev.type })
         }
 
-        // 每次工具调用结束后增量保存，减少崩溃时的数据丢失
-        if (ev.type === 'tool_end' || ev.type === 'done') {
-          saveSession(sessionId, session.engine.getHistory(), session.info.model, session.info.cwd)
+        // 每次工具调用结束后增量保存元数据（事件已由 appendEvents 自动持久化）
+        if (ev.type === 'done') {
+          saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
         }
       }
     } catch (err) {
@@ -929,13 +931,18 @@ ${writeTools.join('、')}
       }
       case 'clear_history': {
         // 清除会话历史：中止当前任务，清空 engine 历史，通知前端
-        if (session.info.status === 'busy') {
-          session.engine.abort()
+        try {
+          if (session.info.status === 'busy') {
+            session.engine.abort()
+          }
+          session.engine.clearHistory()
+          saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: 0 })
+          this.broadcast(session, { type: 'history_cleared' })
+          log.info('会话历史已清除', { sessionId })
+        } catch (err) {
+          log.error('清除会话历史失败', { sessionId, error: String(err) })
+          this.broadcast(session, { type: 'error', message: `清除历史失败: ${String(err)}` })
         }
-        session.engine.clearHistory()
-        saveSession(sessionId, [], session.info.model, session.info.cwd)
-        this.broadcast(session, { type: 'history_cleared' })
-        log.info('会话历史已清除', { sessionId })
         break
       }
     }
@@ -1059,48 +1066,43 @@ function isVisionIntent(message: string): boolean {
   return VISION_PATTERNS.some(p => p.test(message))
 }
 
-// ── 从历史消息中提取最近上传的图片文件 ──────────────────────────────────────
-// 扫描历史中最近的用户消息：
-//   1. 优先从 ContentBlock 数组中直接取 image block（IM 图片走这条路）
+// ── 从事件日志中提取最近上传的图片文件 ──────────────────────────────────────
+// 扫描事件日志中最近的用户消息：
+//   1. 优先从 UserMessageEvent.images 字段取已保存的图片路径（IM 图片走这条路）
 //   2. 其次扫描文本中的 @filename 引用（Web 上传走这条路）
 async function extractRecentImagesFromHistory(
-  history: readonly import('../core/QueryEngine.js').Message[],
+  eventLog: readonly import('../core/ConversationStore.js').ConversationEvent[],
   cwd: string,
   uploadsDir?: string,
 ): Promise<Array<{ name: string; data: string; mediaType: string }>> {
   const imagePattern = /@([^\s@]+\.(?:jpg|jpeg|png|gif|webp|bmp|tiff?|avif|pdf))/gi
 
-  // 从最新消息往前扫描，找到第一批图片（最近一次上传的那批）
+  // 从最新事件往前扫描，找到第一批图片（最近一次上传的那批）
   const result: Array<{ name: string; data: string; mediaType: string }> = []
   const seen = new Set<string>()
 
-  // 只扫描最近 20 条消息，避免性能问题
-  const recentHistory = history.slice(-20)
-  for (let i = recentHistory.length - 1; i >= 0; i--) {
-    const msg = recentHistory[i]
-    if (msg.role !== 'user') continue
+  // 只扫描最近的用户消息事件
+  const userEvents = eventLog
+    .filter((e): e is import('../core/ConversationStore.js').UserMessageEvent => e.type === 'user_message')
+    .slice(-20)
 
-    // 路径 1：ContentBlock 数组中的 image block（IM 图片直接携带 base64）
-    if (Array.isArray(msg.content)) {
-      const blocks = msg.content as Array<{ type: string; source?: { type: string; mediaType?: string; data?: string } }>
-      for (const b of blocks) {
-        if (b.type === 'image' && b.source?.type === 'base64' && b.source.data && b.source.mediaType) {
-          const key = b.source.data.slice(0, 32)  // 用 base64 前缀去重
-          if (seen.has(key)) continue
-          seen.add(key)
-          result.push({ name: 'image', data: b.source.data, mediaType: b.source.mediaType })
-        }
+  for (let i = userEvents.length - 1; i >= 0; i--) {
+    const ev = userEvents[i]
+
+    // 路径 1：UserMessageEvent.images 字段（IM 图片已保存为文件路径）
+    if (ev.images && ev.images.length > 0) {
+      for (const imgPath of ev.images) {
+        const key = imgPath
+        if (seen.has(key)) continue
+        seen.add(key)
+        const attachment = await loadMediaFromFile(resolve(cwd, imgPath), imgPath)
+        if (attachment) result.push(attachment)
       }
       if (result.length > 0) break
     }
 
     // 路径 2：文本中的 @filename 引用（Web 上传）
-    const text = typeof msg.content === 'string'
-      ? msg.content
-      : (msg.content as Array<{ type: string; text?: string }>)
-          .filter(b => b.type === 'text')
-          .map(b => b.text ?? '')
-          .join('')
+    const text = ev.content
 
     let match: RegExpExecArray | null
     imagePattern.lastIndex = 0

@@ -199,6 +199,7 @@ function ProcessPanel({
   isRunning,
   startTime,
   endTime,
+  cronDescription,
 }: {
   processMessages: DisplayMessage[]
   toolCardsMap: Map<string, ToolCardState> | null
@@ -206,6 +207,7 @@ function ProcessPanel({
   isRunning: boolean
   startTime: number
   endTime?: number
+  cronDescription?: string
 }) {
   const [expanded, setExpanded] = useState(false)
   const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set())
@@ -300,7 +302,7 @@ function ProcessPanel({
           <polyline points="20 6 9 17 4 12" />
         </svg>
         <span className="text-[12px] font-medium shrink-0" style={{ color: 'var(--text-primary)' }}>
-          {latestLabel || '执行完成'}
+          {cronDescription || latestLabel || '执行完成'}
         </span>
         {latestSummary && (
           <span className="text-[11px] font-mono truncate flex-1 min-w-0" style={{ color: 'var(--text-muted)' }}>
@@ -407,6 +409,7 @@ export function AgentTurn({ data, toolCardsMap, sessionId, showAvatar, streaming
                 isRunning={isRunning}
                 startTime={startTime}
                 endTime={endTime}
+                cronDescription={cronDescription}
               />
             )}
             {hasFinal && <MarkdownRenderer content={finalContent} />}

@@ -1,5 +1,5 @@
 // Server 模式 —— 持续从 stdin 读取 NDJSON 消息，保持会话历史
-import { saveSession, generateSessionId, loadSessionEvents, listSessions, listArchives, archiveSession } from '../core/SessionStore.js'
+import { saveSessionMeta, extractSessionTitle, generateSessionId, loadSessionEvents, listSessions, listArchives, archiveSession } from '../core/SessionStore.js'
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd, getGlobalCwd } from '../core/cwd.js'
 import { CommandRegistry, createBuiltinCommands } from '../core/CommandRegistry.js'
@@ -33,7 +33,7 @@ export async function runServerMode(
 
   // 注册压缩前归档回调
   engine.onBeforeCompact = async (summary: string) => {
-    saveSession(sessionId, engine.getHistory(), model, initialCwd)
+    engine.store.saveToDisk()
     archiveSession(sessionId, summary)
   }
 
@@ -85,7 +85,7 @@ export async function runServerMode(
           clearHistory: () => engine.clearHistory(),
           compactHistory: async (s: string) => { engine.compactHistory(s) },
           generateCompactSummary: async () => engine.generateCompactSummary(),
-          getHistoryLength: () => engine.getHistory().length,
+          getHistoryLength: () => engine.store.getEventCount(),
           getEstimatedTokens: () => engine.getEstimatedTokens(),
           getCostSummary: () => engine.costs.getSummary(),
           getBudgetInfo: () => ({ spent: engine.costs.getCostUsd(), limit: undefined as number | undefined }),
@@ -125,7 +125,8 @@ export async function runServerMode(
             for await (const ev of engine.send(result.prompt)) {
               emit(ev)
             }
-            saveSession(sessionId, engine.getHistory(), model, initialCwd)
+            const { title, lastUserMessage } = extractSessionTitle(engine.store.getEventLog())
+            saveSessionMeta(sessionId, { model, workDir: initialCwd, eventCount: engine.store.getEventCount(), title, lastUserMessage })
             void autoExtractMemories(engine, sessionId, provider, memoryCondense)
             void autoDistillSkill(engine, provider, skillDistill)
           } catch (err) {
@@ -143,7 +144,7 @@ export async function runServerMode(
         for await (const ev of engine.send(msgWithCtx)) {
           emit(ev)
         }
-        saveSession(sessionId, engine.getHistory(), model, initialCwd)
+        saveSessionMeta(sessionId, { model, workDir: initialCwd, eventCount: engine.store.getEventCount() })
         void autoExtractMemories(engine, sessionId, provider, memoryCondense)
         void autoDistillSkill(engine, provider, skillDistill)
       } catch (err) {

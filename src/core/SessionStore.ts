@@ -1,17 +1,16 @@
 // 会话持久化 —— 将对话历史保存到本地磁盘
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, rmSync, renameSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from 'fs'
 import { join } from 'path'
-import type { Message } from './QueryEngine.js'
 import type { ConversationEvent } from './ConversationStore.js'
 import { getConfigDir } from './Config.js'
 
 /** 压缩归档段元数据 */
 export interface CompactArchive {
-  /** 归档文件名（不含路径），如 transcript.20250421-143022.archive.jsonl */
+  /** 归档文件名（不含路径），如 events.20250421-143022.archive.jsonl */
   filename: string
   /** 归档时间 ISO 字符串 */
   archivedAt: string
-  /** 归档前的消息数量 */
+  /** 归档前的事件数量 */
   messageCount: number
   /** 本次压缩生成的摘要文本 */
   summary: string
@@ -38,105 +37,86 @@ function ensureDir(dir: string) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
 
-export function saveSession(
-  sessionId: string,
-  messages: readonly Message[],
-  model: string,
-  workDir?: string,
-  agent?: string,
-) {
-  ensureDir(SESSIONS_DIR)
-  const sessionDir = join(SESSIONS_DIR, sessionId)
-  ensureDir(sessionDir)
-
-  const transcriptPath = join(sessionDir, 'transcript.jsonl')
-  const existing = loadSessionMeta(sessionId)
-  const savedCount = existing?.savedMessageCount ?? 0
-
-  if (savedCount === 0 || !existsSync(transcriptPath)) {
-    // 首次保存或文件不存在：全量写入
-    const lines = messages.map(m => JSON.stringify(m)).join('\n')
-    writeFileSync(transcriptPath, lines + (lines ? '\n' : ''), 'utf-8')
-  } else if (messages.length > savedCount) {
-    // 增量追加：只写新增的消息
-    const newLines = messages.slice(savedCount).map(m => JSON.stringify(m)).join('\n')
-    appendFileSync(transcriptPath, newLines + '\n', 'utf-8')
-  } else if (messages.length < savedCount) {
-    // 消息数减少（发生了 compact/clearHistory）：全量重写
-    const lines = messages.map(m => JSON.stringify(m)).join('\n')
-    writeFileSync(transcriptPath, lines + (lines ? '\n' : ''), 'utf-8')
+/** 从事件日志中提取会话标题（首条用户消息前 60 字）和最近用户消息（末条前 80 字） */
+export function extractSessionTitle(events: readonly ConversationEvent[]): { title?: string; lastUserMessage?: string } {
+  let title: string | undefined
+  let lastUserMessage: string | undefined
+  for (const ev of events) {
+    if (ev.type === 'user_message' && ev.content && !ev.content.startsWith('[系统') && !ev.content.startsWith('[上下文压缩]')) {
+      if (!title) title = ev.content.slice(0, 60)
+      lastUserMessage = ev.content.slice(0, 80)
+    }
   }
-  // messages.length === savedCount：无变化，跳过写入
-
-  // 保存元数据
-  const firstUserMsg = messages.find(
-    m => m.role === 'user' && typeof m.content === 'string' &&
-    !m.content.startsWith('[系统') && !m.content.startsWith('[上下文压缩]')
-  )
-  const title = typeof firstUserMsg?.content === 'string'
-    ? firstUserMsg.content.slice(0, 60)
-    : (existing?.title ?? '新对话')
-
-  const lastUserMsg = [...messages].reverse().find(
-    m => m.role === 'user' && typeof m.content === 'string' &&
-    !m.content.startsWith('[系统') && !m.content.startsWith('[上下文压缩]')
-  )
-  const lastUserMessage = typeof lastUserMsg?.content === 'string'
-    ? lastUserMsg.content.slice(0, 80)
-    : undefined
-
-  const meta: SessionMeta = {
-    id: sessionId,
-    createdAt: existing?.createdAt ?? new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    messageCount: messages.length,
-    savedMessageCount: messages.length,
-    model,
-    title,
-    lastUserMessage,
-    workDir: workDir ?? existing?.workDir,
-    agent: agent ?? existing?.agent ?? 'main',
-  }
-  // 原子写入 meta.json：先写 .tmp 再 rename，防止并发写入时文件损坏
-  const metaPath = join(sessionDir, 'meta.json')
-  const metaTmp = metaPath + '.tmp'
-  writeFileSync(metaTmp, JSON.stringify(meta, null, 2), 'utf-8')
-  renameSync(metaTmp, metaPath)
-}
-
-export function loadSession(sessionId: string): Message[] | null {
-  const transcriptPath = join(SESSIONS_DIR, sessionId, 'transcript.jsonl')
-  if (!existsSync(transcriptPath)) return null
-
-  const lines = readFileSync(transcriptPath, 'utf-8').split('\n').filter(Boolean)
-  return lines.map(l => JSON.parse(l) as Message)
+  return { title, lastUserMessage }
 }
 
 /**
  * 加载会话的事件日志。
- * 优先从 events.jsonl 加载，降级到 transcript.jsonl（返回 null 表示需要旧格式转换）。
+ * 从 events.jsonl 加载，返回 null 表示文件不存在。
  */
 export function loadSessionEvents(sessionId: string): ConversationEvent[] | null {
   const sessionDir = join(SESSIONS_DIR, sessionId)
   const eventsPath = join(sessionDir, 'events.jsonl')
 
   if (existsSync(eventsPath)) {
-    const content = readFileSync(eventsPath, 'utf-8')
-    if (!content.trim()) return []
-    return content
-      .split('\n')
-      .filter(line => line.trim())
-      .map(line => JSON.parse(line) as ConversationEvent)
+    try {
+      const content = readFileSync(eventsPath, 'utf-8')
+      if (!content.trim()) return []
+      return content
+        .split('\n')
+        .filter(line => line.trim())
+        .map(line => JSON.parse(line) as ConversationEvent)
+    } catch {
+      // 事件文件损坏时返回空数组，避免阻塞会话创建
+      return []
+    }
   }
 
   // 没有 events.jsonl，返回 null
   return null
 }
 
+/**
+ * 仅保存会话元数据。
+ * 用于事件溯源模式下更新 meta.json（title、updatedAt、messageCount 等）。
+ */
+export function saveSessionMeta(
+  sessionId: string,
+  opts: { model?: string; workDir?: string; agent?: string; eventCount?: number; title?: string; lastUserMessage?: string },
+): void {
+  const sessionDir = join(SESSIONS_DIR, sessionId)
+  ensureDir(sessionDir)
+
+  const existing = loadSessionMeta(sessionId)
+  const now = new Date().toISOString()
+
+  const meta: SessionMeta = {
+    id: sessionId,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    messageCount: opts.eventCount ?? existing?.messageCount ?? 0,
+    savedMessageCount: opts.eventCount ?? existing?.savedMessageCount ?? 0,
+    model: opts.model ?? existing?.model ?? '',
+    title: opts.title ?? existing?.title ?? '新对话',
+    lastUserMessage: opts.lastUserMessage ?? existing?.lastUserMessage,
+    workDir: opts.workDir ?? existing?.workDir,
+    agent: opts.agent ?? existing?.agent ?? 'main',
+  }
+
+  const metaPath = join(sessionDir, 'meta.json')
+  const metaTmp = metaPath + '.tmp'
+  writeFileSync(metaTmp, JSON.stringify(meta, null, 2), 'utf-8')
+  renameSync(metaTmp, metaPath)
+}
+
 export function loadSessionMeta(sessionId: string): SessionMeta | null {
   const metaPath = join(SESSIONS_DIR, sessionId, 'meta.json')
   if (!existsSync(metaPath)) return null
-  return JSON.parse(readFileSync(metaPath, 'utf-8')) as SessionMeta
+  try {
+    return JSON.parse(readFileSync(metaPath, 'utf-8')) as SessionMeta
+  } catch {
+    return null
+  }
 }
 
 export function listSessions(): SessionMeta[] {
@@ -163,30 +143,35 @@ export function getLastSessionId(): string | null {
 
 /**
  * 归档当前会话历史（压缩前调用）
- * 将 transcript.jsonl 重命名为 transcript.{timestamp}.archive.jsonl
+ * 将 events.jsonl 复制为 events.{timestamp}.archive.jsonl
  * 同时保存归档元数据到 archives.json
  */
 export function archiveSession(sessionId: string, summary: string): string {
   const sessionDir = join(SESSIONS_DIR, sessionId)
-  const transcriptPath = join(sessionDir, 'transcript.jsonl')
-  
-  if (!existsSync(transcriptPath)) {
-    throw new Error(`会话 ${sessionId} 的 transcript.jsonl 不存在，无法归档`)
+  const eventsPath = join(sessionDir, 'events.jsonl')
+
+  if (!existsSync(eventsPath)) {
+    throw new Error(`会话 ${sessionId} 的 events.jsonl 不存在，无法归档`)
   }
 
-  // 读取当前历史消息数量
-  const lines = readFileSync(transcriptPath, 'utf-8').split('\n').filter(Boolean)
-  const messageCount = lines.length
+  // 读取当前事件数量
+  const content = readFileSync(eventsPath, 'utf-8')
+  const eventCount = content.split('\n').filter(line => {
+    const trimmed = line.trim()
+    if (!trimmed) return false
+    // 跳过 schema marker 行
+    try { return !JSON.parse(trimmed).$schema } catch { return false }
+  }).length
 
-  // 生成归档文件名：transcript.{YYYYMMDD-HHmmss}.archive.jsonl
+  // 生成归档文件名
   const now = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
   const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-  const archiveFilename = `transcript.${timestamp}.archive.jsonl`
+  const archiveFilename = `events.${timestamp}.archive.jsonl`
   const archivePath = join(sessionDir, archiveFilename)
 
-  // 复制（而非移动）transcript.jsonl 到归档文件，保留原文件供后续覆盖
-  writeFileSync(archivePath, readFileSync(transcriptPath, 'utf-8'), 'utf-8')
+  // 复制 events.jsonl 到归档文件
+  writeFileSync(archivePath, content, 'utf-8')
 
   // 更新归档元数据列表
   const archivesPath = join(sessionDir, 'archives.json')
@@ -200,7 +185,7 @@ export function archiveSession(sessionId: string, summary: string): string {
   archives.push({
     filename: archiveFilename,
     archivedAt: now.toISOString(),
-    messageCount,
+    messageCount: eventCount,
     summary,
   })
 
@@ -225,15 +210,20 @@ export function listArchives(sessionId: string): CompactArchive[] {
 }
 
 /**
- * 读取指定归档段的完整消息历史
+ * 读取指定归档段的事件日志
  */
-export function loadArchive(sessionId: string, filename: string): Message[] | null {
+export function loadArchive(sessionId: string, filename: string): ConversationEvent[] | null {
   const archivePath = join(SESSIONS_DIR, sessionId, filename)
   if (!existsSync(archivePath)) return null
 
   try {
-    const lines = readFileSync(archivePath, 'utf-8').split('\n').filter(Boolean)
-    return lines.map(l => JSON.parse(l) as Message)
+    const content = readFileSync(archivePath, 'utf-8')
+    if (!content.trim()) return []
+    return content
+      .split('\n')
+      .filter(line => line.trim())
+      .map(line => JSON.parse(line))
+      .filter(obj => !obj.$schema) as ConversationEvent[]
   } catch {
     return null
   }
@@ -283,7 +273,7 @@ export function pruneOldSessions(opts: {
 }
 
 /**
- * 删除指定会话的所有数据（transcript、meta、归档文件等全部删除）。
+ * 删除指定会话的所有数据（events、meta、归档文件等全部删除）。
  * 同时删除该会话的工作目录（~/.hrids/work/<date>-<id>/）。
  * inMemoryCwd：活跃会话在内存中的 cwd，优先于 meta.json 里的 workDir（防止 meta 未写入的情况）。
  * 若目录不存在则静默忽略。

@@ -1,5 +1,5 @@
 // 非交互模式（-p）—— 执行一条消息后退出
-import { saveSession } from '../core/SessionStore.js'
+import { saveSessionMeta, extractSessionTitle } from '../core/SessionStore.js'
 import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
@@ -44,7 +44,8 @@ export async function runPrintMode(
   }
 
   process.stdout.write('\n')
-  saveSession(opts.sessionId, engine.getHistory(), opts.model, opts.initialCwd)
+  const { title, lastUserMessage } = extractSessionTitle(engine.store.getEventLog())
+  saveSessionMeta(opts.sessionId, { model: opts.model, workDir: opts.initialCwd, eventCount: engine.store.getEventCount(), title, lastUserMessage })
   void autoExtractMemories(engine, opts.sessionId, provider, opts.memoryCondense)
   void autoDistillSkill(engine, provider, opts.skillDistill)
   await disconnectAllMcp()

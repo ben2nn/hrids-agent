@@ -34,6 +34,7 @@ export interface DisplayMessage {
   id: string
   type: string
   content?: string
+  thinking?: string
   toolId?: string
   toolName?: string
   toolInput?: unknown
@@ -84,6 +85,7 @@ function convertToServerDisplayMessages(
           type: 'assistant',
           content: dm.content,
           timestamp: dm.timestamp,
+          ...(dm.thinking ? { thinking: dm.thinking } : {}),
           ...(dm.requestId ? { requestId: dm.requestId } : {}),
         })
       }
@@ -355,7 +357,7 @@ export function createGateway(config: GatewayConfig = {}) {
       // 返回完整的 SessionInfo，前端直接使用 session.id 等字段
       res.json(session.info)
     } catch (err) {
-      log.error('创建会话失败', { error: String(err) })
+      log.error('创建会话失败', { error: String(err), stack: err instanceof Error ? err.stack : undefined })
       res.status(500).json({ error: String(err) })
     }
   })
@@ -520,8 +522,9 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
-    // 旧格式归档（transcript.*.archive.jsonl）已不再支持，返回空
-    res.json([])
+    // 归档消息读取：事件格式归档文件由 projectForDisplay 投影
+    const events = loadSessionEvents(req.params.id)
+    res.json(events ? convertToServerDisplayMessages(projectForDisplay(events)) : [])
   })
 
   // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）

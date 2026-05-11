@@ -3,10 +3,10 @@
 // 所有工具统一从这里 import，避免对 BashTool 的隐性依赖。
 
 import { AsyncLocalStorage } from 'async_hooks'
-import { existsSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
+import { execSync } from 'child_process'
 import { join } from 'path'
 import { getConfigDir } from './Config.js'
-import { ensureWorkDir } from './ContextBuilder.js'
 
 const DEFAULT_CWD = join(getConfigDir(), 'work')
 
@@ -27,6 +27,18 @@ export function runWithCwd<T>(cwd: string, fn: () => T): T {
  */
 export function getGlobalCwd(): string {
   return cwdStorage.getStore()?.cwd ?? _fallbackCwd
+}
+
+// 确保目录存在（含 git init），供需要写入时按需调用
+export function ensureWorkDir(dir: string): void {
+  if (existsSync(dir)) return
+  mkdirSync(dir, { recursive: true })
+  try {
+    execSync('git init', { cwd: dir, stdio: 'ignore' })
+    execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'ignore' })
+  } catch {
+    // git 不可用时静默忽略
+  }
 }
 
 /**

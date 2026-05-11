@@ -67,6 +67,8 @@ export class AnthropicProvider implements LLMProvider {
       for await (const event of stream) {
         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
           yield { type: 'text_delta', delta: event.delta.text }
+        } else if (event.type === 'content_block_delta' && event.delta.type === 'thinking_delta') {
+          yield { type: 'thinking_delta', delta: event.delta.thinking }
         } else if (event.type === 'message_stop') {
           const final = await stream.finalMessage()
           for (const block of final.content) {

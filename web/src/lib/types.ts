@@ -182,7 +182,7 @@ export type DisplayMessage =
   | { id: string; type: 'user'; content: string; timestamp: number; images?: string[] }
   | { id: string; type: 'request_start'; requestId: string; trigger: 'user' | 'cron'; description?: string; timestamp: number }
   | { id: string; type: 'cron_trigger'; requestId: string; description: string; timestamp: number }
-  | { id: string; type: 'assistant'; requestId: string; content: string; timestamp: number; usage?: CostInfo; isCron?: boolean; cronDescription?: string }
+  | { id: string; type: 'assistant'; requestId: string; content: string; thinking?: string; timestamp: number; usage?: CostInfo; isCron?: boolean; cronDescription?: string }
   | {
       id: string; type: 'tool'; requestId: string; toolId: string; toolName: string; timestamp: number
       /** 历史消息加载时携带，用于重建 toolCard */

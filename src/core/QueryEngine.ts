@@ -8,7 +8,7 @@ import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
-import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent, createRequestCompleteEvent } from './ConversationStore.js'
+import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent, createRequestCompleteEvent, createSystemEvent, createToolExecutionEvent } from './ConversationStore.js'
 import { projectForDisplay, projectForLLM, estimateEventTokens } from './projections.js'
 
 const log = logger.child({ component: 'query-engine' })
@@ -191,28 +191,17 @@ export class QueryEngine {
 
   // ── 优先级 3：结构化摘要 + 迭代更新 ─────────────────────────────────────────
   // 序列化历史消息为摘要器可读的文本（工具调用保留名称和参数摘要）
-  private serializeForSummary(messages: Message[]): string {
-    return messages.map(m => {
-      if (typeof m.content === 'string') {
-        const role = m.role === 'user' ? '用户' : '助手'
-        return `[${role}]: ${m.content.slice(0, 3000)}`
-      }
-      const blocks = m.content as ContentBlock[]
+  private serializeForSummary(displayMsgs: import('./ConversationStore.js').DisplayMessage[]): string {
+    return displayMsgs.map(dm => {
+      const role = dm.role === 'user' ? '用户' : '助手'
       const parts: string[] = []
-      for (const b of blocks) {
-        if (b.type === 'text') {
-          parts.push(b.text.slice(0, 2000))
-        } else if (b.type === 'tool_use') {
-          const args = JSON.stringify(b.input)
-          parts.push(`[工具调用: ${b.name}(${args.length > 400 ? args.slice(0, 400) + '...' : args})]`)
-        } else if (b.type === 'tool_result') {
-          const content = b.content.length > 3000
-            ? b.content.slice(0, 2000) + '\n...[截断]...\n' + b.content.slice(-800)
-            : b.content
-          parts.push(`[工具结果 ${b.tool_use_id}]: ${content}`)
+      if (dm.content) parts.push(dm.content.slice(0, 3000))
+      if (dm.toolCards) {
+        for (const tc of dm.toolCards) {
+          const args = JSON.stringify(tc.input)
+          parts.push(`[工具调用: ${tc.name}(${args.length > 400 ? args.slice(0, 400) + '...' : args})]`)
         }
       }
-      const role = m.role === 'user' ? '用户' : '助手'
       return `[${role}]: ${parts.join('\n')}`
     }).join('\n\n')
   }
@@ -220,7 +209,7 @@ export class QueryEngine {
   // 调用 LLM 生成对话摘要，用于自动压缩（公开方法，供 UI 层 /compact 命令调用）
   async generateCompactSummary(): Promise<string> {
     // prune 已在投影层处理，此处直接用事件日志序列化
-    const contentToSummarize = this.serializeForSummary(this.projectToMessages())
+    const contentToSummarize = this.serializeForSummary(projectForDisplay(this.store.getEventLog()))
 
     // Phase 2: 结构化摘要 prompt，支持迭代更新
     let summaryPrompt: string
@@ -326,8 +315,9 @@ ${contentToSummarize}
   private async *streamOneTurn(
     turns: number,
     maxBudgetUsd: number | undefined,
-  ): AsyncGenerator<StreamEvent | { type: '__llm_result__'; fullText: string; toolCalls: Array<{ id: string; name: string; input: unknown }>; hitMaxOutputTokens: boolean }> {
+  ): AsyncGenerator<StreamEvent | { type: '__llm_result__'; fullText: string; thinkingText: string; toolCalls: Array<{ id: string; name: string; input: unknown }>; hitMaxOutputTokens: boolean }> {
     let fullText = ''
+    let thinkingText = ''
     const toolCalls: Array<{ id: string; name: string; input: unknown }> = []
     let hitMaxOutputTokens = false
 
@@ -369,7 +359,9 @@ ${contentToSummarize}
       for await (const chunk of streamFn()) {
         if (this.abortController.signal.aborted) break
 
-        if (chunk.type === 'text_delta' && chunk.delta) {
+        if (chunk.type === 'thinking_delta' && chunk.delta) {
+          thinkingText += chunk.delta
+        } else if (chunk.type === 'text_delta' && chunk.delta) {
           fullText += chunk.delta
           // dsml 模式：检测到 DSML invoke 标记后停止流式发出，等流结束后统一解析。
           // native 模式：直接流式发出，不做 DSML 检测（避免误判正常文本中的 DSML 字样）。
@@ -409,29 +401,39 @@ ${contentToSummarize}
       log.error('LLM 请求失败', { turn: turns, error: errMsg })
       yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` }
       yield { type: 'error', message: errMsg }
-      this.store.appendEvents(createUserMessageEvent(
+      this.store.appendEvents(createSystemEvent(
+        'error_recovery',
         `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。`,
         this.currentRequestId ?? undefined,
       ))
       return
     }
 
-    yield { type: '__llm_result__', fullText, toolCalls, hitMaxOutputTokens }
+    yield { type: '__llm_result__', fullText, thinkingText, toolCalls, hitMaxOutputTokens }
   }
 
   // ── 执行单个工具调用，返回 tool_result ContentBlock ──────────────────────────
   private async *executeOneTool(
     tc: { id: string; name: string; input: unknown },
   ): AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: ContentBlock }> {
+    const startTime = Date.now()
+    let execStatus: 'success' | 'error' | 'denied' | 'aborted' = 'success'
+    let outputPreview: string | undefined
+    let errorSummary: string | undefined
+
     const logQueue: string[] = []
     const onLog = (line: string) => { logQueue.push(line) }
+
+    try {
 
     // 查找工具
     const tool = this.config.tools.find(t => t.name === tc.name)
     if (!tool) {
+      execStatus = 'error'
+      errorSummary = `未找到工具: ${tc.name}`
       yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description: tc.name }
-      yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: `未找到工具: ${tc.name}` } }
-      yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: `错误: 未找到工具: ${tc.name}`, is_error: true } }
+      yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errorSummary } }
+      yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: `错误: ${errorSummary}`, is_error: true } }
       return
     }
 
@@ -444,6 +446,8 @@ ${contentToSummarize}
     if (tool.checkPermission) {
       const hardCheck = await tool.checkPermission(tc.input as never)
       if (!hardCheck.granted) {
+        execStatus = 'denied'
+        errorSummary = hardCheck.reason
         log.info('工具硬拦截', { toolName: tc.name, reason: hardCheck.reason })
         auditLog({
           action: 'permission_denied',
@@ -479,6 +483,8 @@ ${contentToSummarize}
         permissionMode: this.config.permissions.getMode(),
         details: { description },
       })
+      execStatus = 'denied'
+      errorSummary = `权限拒绝: ${description}`
       yield { type: 'permission_denied', id: tc.id, toolName: tc.name, description }
 
       // 构建拒绝原因，根据模式和拒绝追踪状态给出不同提示
@@ -532,6 +538,8 @@ ${contentToSummarize}
           .map(i => `  - ${i.path.join('.')}: ${i.message}`)
           .join('\n')
         const errMsg = `工具参数校验失败 [${tc.name}]:\n${issues}`
+        execStatus = 'error'
+        errorSummary = errMsg.slice(0, 200)
         log.warn('工具参数校验失败', { toolName: tc.name, issues: parseResult.error.issues })
         yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errMsg } }
         yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: `错误: ${errMsg}`, is_error: true } }
@@ -591,6 +599,8 @@ ${contentToSummarize}
     }
 
     if (this.abortController.signal.aborted) {
+      execStatus = 'aborted'
+      errorSummary = '任务已被中止'
       yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: '任务已被中止' } }
       return
     }
@@ -613,6 +623,7 @@ ${contentToSummarize}
     }
 
     const resultContent = finalResult.type === 'success' ? finalResult.output : `错误: ${finalResult.message}`
+    outputPreview = resultContent.slice(0, 500)
     // tool_result 内容截上限（写入事件时），与 projections.ts 中的常量保持一致
     const MAX_TOOL_RESULT_CHARS = 12000
     // 截断过长的工具输出，防止单条结果撑爆 history
@@ -623,6 +634,19 @@ ${contentToSummarize}
       : resultContent
 
     yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: truncatedContent, is_error: finalResult.type === 'error' } }
+
+    } finally {
+      // 写入工具执行记录事件（审计用）
+      this.store.appendEvents(createToolExecutionEvent(
+        tc.id,
+        tc.name,
+        Date.now() - startTime,
+        execStatus,
+        this.currentRequestId ?? undefined,
+        outputPreview,
+        errorSummary,
+      ))
+    }
   }
 
   // 图片扩展名 → MIME 类型映射
@@ -818,6 +842,7 @@ ${contentToSummarize}
 
         // ── 调用 LLM（委托给 streamOneTurn）────────────────────────────────
         let fullText = ''
+        let thinkingText = ''
         let toolCalls: Array<{ id: string; name: string; input: unknown }> = []
         let hitMaxOutputTokens = false
         let llmError = false
@@ -826,6 +851,7 @@ ${contentToSummarize}
           if ('type' in ev && ev.type === '__llm_result__') {
             // 内部结果信号，不向外 yield
             fullText = ev.fullText
+            thinkingText = ev.thinkingText
             toolCalls = ev.toolCalls
             hitMaxOutputTokens = ev.hitMaxOutputTokens
           } else if (ev.type === 'error') {
@@ -855,6 +881,7 @@ ${contentToSummarize}
             fullText,
             toolCallEvents,
             this.currentRequestId ?? undefined,
+            thinkingText || undefined,
           ))
         }
 
@@ -980,7 +1007,8 @@ ${contentToSummarize}
         exitStatus = 'turn_limit'
         yield { type: 'interrupted', reason: 'turn_limit', message: `已达到最大执行轮次 ${maxTurns}，任务可能未完成。发送"继续"可恢复执行。` }
         yield { type: 'turn_limit', turns }
-        this.store.appendEvents(createUserMessageEvent(
+        this.store.appendEvents(createSystemEvent(
+          'turn_limit',
           `[系统提示] 任务因达到最大轮次限制（${maxTurns} 轮）而中断，尚未完成。请继续执行剩余工作。`,
           this.currentRequestId ?? undefined,
         ))
@@ -989,7 +1017,8 @@ ${contentToSummarize}
       if (this.abortController.signal.aborted) {
         exitStatus = 'aborted'
         yield { type: 'interrupted', reason: 'aborted', message: '任务已被中止。发送"继续"可恢复执行。' }
-        this.store.appendEvents(createUserMessageEvent(
+        this.store.appendEvents(createSystemEvent(
+          'user_abort',
           '[系统提示] 任务被用户中止。如需继续，请发送指令。',
           this.currentRequestId ?? undefined,
         ))
@@ -1038,35 +1067,9 @@ ${contentToSummarize}
     this.activeTodoSnapshot = null
   }
 
-  /** 向后兼容：返回由事件投影出的 Message[] */
-  getHistory(): readonly Message[] {
-    return this.projectToMessages()
-  }
-
   /** 返回前端展示用的 DisplayMessage[]（直接从事件投影，含工具卡片） */
   getDisplayMessages(): import('./ConversationStore.js').DisplayMessage[] {
     return projectForDisplay(this.store.getEventLog())
-  }
-
-  /** 向后兼容：清空并重新加载历史消息 */
-  setHistory(messages: Message[]) {
-    this.store.clear()
-    const events = messages.map(msg => {
-      if (msg.role === 'user') {
-        return createUserMessageEvent(
-          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-          msg.requestId,
-          msg.trigger,
-          msg.cronDescription,
-        )
-      }
-      return createAssistantMessageEvent(
-        typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-        undefined,
-        msg.requestId,
-      )
-    })
-    this.store.appendEventsNoSave(...events)
   }
 
   private chatMode = false
@@ -1074,20 +1077,6 @@ ${contentToSummarize}
   setSystemPrompt(prompt: string[]) { this.config.systemPrompt = prompt }
   setProvider(provider: LLMProvider) { this.config.provider = provider }
   getTools(): readonly ToolDef[] { return this.config.tools }
-
-  /**
-   * 将事件日志投影为旧格式 Message[]（向后兼容）。
-   * 用于 saveSession、postRunHooks 等仍依赖 Message[] 的调用方。
-   */
-  private projectToMessages(): Message[] {
-    const displayMsgs = projectForDisplay(this.store.getEventLog())
-    return displayMsgs.map(dm => ({
-      role: dm.role as 'user' | 'assistant',
-      content: dm.content,
-      timestamp: dm.timestamp,
-      requestId: dm.requestId,
-    }))
-  }
 
   compactHistory(summary: string) {
     // 追压缩事件到事件日志（不删除原始事件）

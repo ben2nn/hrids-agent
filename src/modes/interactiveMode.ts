@@ -1,7 +1,7 @@
 // 交互模式 —— Ink React UI
 import React from 'react'
 import { render } from 'ink'
-import { saveSession, archiveSession } from '../core/SessionStore.js'
+import { saveSessionMeta, extractSessionTitle, archiveSession } from '../core/SessionStore.js'
 import { CommandRegistry, createBuiltinCommands } from '../core/CommandRegistry.js'
 import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
@@ -40,7 +40,7 @@ export async function runInteractiveMode(
 
   // 注册压缩前归档回调
   engine.onBeforeCompact = async (summary: string) => {
-    saveSession(sessionId, engine.getHistory(), model, initialCwd)
+    engine.store.saveToDisk()
     archiveSession(sessionId, summary)
   }
 
@@ -51,7 +51,8 @@ export async function runInteractiveMode(
 
   // 每次 send 后：保存会话 + 后台钩子
   engine.onAfterSend = () => {
-    saveSession(sessionId, engine.getHistory(), model, initialCwd)
+    const { title, lastUserMessage } = extractSessionTitle(engine.store.getEventLog())
+    saveSessionMeta(sessionId, { model, workDir: initialCwd, eventCount: engine.store.getEventCount(), title, lastUserMessage })
     void autoExtractMemories(engine, sessionId, provider, memoryCondense)
     void autoDistillSkill(engine, provider, skillDistill)
   }

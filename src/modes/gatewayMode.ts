@@ -72,15 +72,15 @@ export async function runGatewayMode(opts: GatewayModeOpts): Promise<void> {
           logger.error('[cron] 目标会话恢复后仍不存在', { jobId: job.id, sessionId: targetSessionId })
           return
         }
-        logger.info('[cron] 触发定时任务，发送提醒到目标会话', {
+        logger.info('[cron] 触发定时任务，发送到目标会话让 LLM 处理', {
           jobId: job.id,
           sessionId: targetSessionId,
           task: job.task.slice(0, 80),
         })
-        await gateway.manager.sendCronReminder(targetSessionId, {
+        // 将 task 作为用户消息发送给 LLM 处理（而不是直接发送提醒）
+        await gateway.manager.runMessage(targetSessionId, job.task, undefined, {
           id: job.id,
           description: job.description,
-          task: job.task,
         })
       } catch (err) {
         logger.error('[cron] 触发定时任务失败', { jobId: job.id, error: String(err) })

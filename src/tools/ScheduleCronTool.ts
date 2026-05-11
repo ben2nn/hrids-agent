@@ -348,7 +348,7 @@ const createSchema = z.object({
   expression: z.string().describe('cron 表达式（5位：分 时 日 月 周），例如 "0 9 * * 1-5" 表示工作日早9点'),
   description: z.string().describe('任务的人类可读描述，例如"每天早9点汇报昨日进展"'),
   task: z.string().describe('触发时注入给工作者的任务 prompt，应自包含、无需额外上下文'),
-  once: z.boolean().optional().describe(
+  once: z.preprocess(v => v === 'true' || v === true ? true : v === 'false' || v === false ? false : v, z.boolean().optional()).describe(
     '是否为一次性任务，触发后自动删除。\n' +
     '判断规则（必须严格遵守）：\n' +
     '- once=false（默认）：周期性任务，cron 表达式中含有 * 或 */n 通配符，如"每小时"、"每天"、"每周"、"每30分钟"等\n' +
@@ -370,7 +370,7 @@ const listSchema = z.object({
 const toggleSchema = z.object({
   action: z.literal('toggle'),
   id: z.string().describe('要启用/禁用的 cron 任务 ID'),
-  enabled: z.boolean().describe('true 启用，false 禁用'),
+  enabled: z.preprocess(v => v === 'true' || v === true ? true : v === 'false' || v === false ? false : v, z.boolean()).describe('true 启用，false 禁用'),
 })
 
 const inputSchema = z.discriminatedUnion('action', [

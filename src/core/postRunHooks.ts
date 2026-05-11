@@ -6,7 +6,8 @@ import { join } from 'path'
 import { runMemoryPipeline } from '../memory/index.js'
 import { logger } from './logger.js'
 import { getConfigDir } from './Config.js'
-import type { QueryEngine, ContentBlock } from './QueryEngine.js'
+import type { QueryEngine } from './QueryEngine.js'
+import { projectForDisplay } from './projections.js'
 import type { LLMProvider } from './providers/types.js'
 
 const log = logger.child({ component: 'post-run-hooks' })
@@ -24,10 +25,11 @@ export async function autoExtractMemories(
   condense = false,
 ): Promise<void> {
   try {
-    const history = engine.getHistory()
+    const displayMsgs = projectForDisplay(engine.store.getEventLog())
+    const messages = displayMsgs.map(dm => ({ role: dm.role, content: dm.content }))
     if (condense) log.info('记忆总结：开始 LLM 提炼', { sessionId, caller: 'memory-pipeline' })
     // Gateway 模式下 runWithSession 上下文已存在，pipeline 内部通过 getCurrentSessionId 获取会话级 store
-    await runMemoryPipeline(history as never, {
+    await runMemoryPipeline(messages, {
       condense,
       provider: condense ? provider : undefined,
       sessionId,
@@ -52,34 +54,28 @@ export async function autoDistillSkill(
 ): Promise<void> {
   if (!enabled) return
   try {
-    const history = engine.getHistory()
+    const eventLog = engine.store.getEventLog()
 
-    // 统计工具调用次数
+    // 从事件日志直接统计工具调用次数
     let toolCallCount = 0
-    for (const msg of history) {
-      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
-      for (const b of msg.content as ContentBlock[]) {
-        if (b.type === 'tool_use') toolCallCount++
-      }
+    for (const ev of eventLog) {
+      if (ev.type === 'assistant_message' && ev.toolCalls) toolCallCount += ev.toolCalls.length
     }
 
     // 门槛：工具调用 < 5 次，不值得沉淀
     if (toolCallCount < 5) return
 
-    // 序列化对话历史（只保留文本和工具调用摘要，控制 token）
+    // 序列化对话历史（从事件投影，只保留文本和工具调用摘要，控制 token）
+    const displayMsgs = projectForDisplay(eventLog)
     const lines: string[] = []
-    for (const msg of history) {
-      if (typeof msg.content === 'string') {
-        lines.push(`[${msg.role === 'user' ? '用户' : '助手'}]: ${msg.content.slice(0, 500)}`)
-        continue
-      }
-      const parts: string[] = []
-      for (const b of msg.content as ContentBlock[]) {
-        if (b.type === 'text') parts.push(b.text.slice(0, 300))
-        else if (b.type === 'tool_use') parts.push(`[调用工具: ${b.name}]`)
-      }
-      if (parts.length > 0) {
-        lines.push(`[${msg.role === 'user' ? '用户' : '助手'}]: ${parts.join(' ')}`)
+    for (const dm of displayMsgs) {
+      const prefix = dm.role === 'user' ? '用户' : '助手'
+      const text = dm.content.slice(0, 500)
+      if (text) lines.push(`[${prefix}]: ${text}`)
+      if (dm.toolCards) {
+        for (const tc of dm.toolCards) {
+          lines.push(`[${prefix}]: [调用工具: ${tc.name}]`)
+        }
       }
     }
     const condensed = lines.join('\n').slice(0, 6000)

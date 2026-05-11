@@ -71,6 +71,7 @@ export function projectForDisplay(events: readonly ConversationEvent[]): Display
             content: ev.text,
             timestamp: ev.timestamp,
           }
+          if (ev.thinking) dm.thinking = ev.thinking
           if (ev.requestId) dm.requestId = ev.requestId
           messages.push(dm)
         }
@@ -123,6 +124,27 @@ export function projectForDisplay(events: readonly ConversationEvent[]): Display
 
       // request_complete 不生成展示消息（持久化用，不影响前端消息列表）
       case 'request_complete':
+        break
+
+      case 'system_event': {
+        // cron_trigger 展示为 cron 用户消息
+        if (ev.kind === 'cron_trigger') {
+          const dm: DisplayMessage = {
+            role: 'user',
+            content: ev.content,
+            timestamp: ev.timestamp,
+            isCron: true,
+          }
+          if (ev.cronDescription) dm.cronDescription = ev.cronDescription
+          if (ev.requestId) dm.requestId = ev.requestId
+          messages.push(dm)
+        }
+        // 其他系统事件（error_recovery / turn_limit / user_abort）不展示
+        break
+      }
+
+      // tool_execution 不生成展示消息（审计用）
+      case 'tool_execution':
         break
     }
   }
@@ -270,6 +292,15 @@ export function projectForLLM(
 
       // request_complete 不参与 LLM 投影
       case 'request_complete':
+        break
+
+      // system_event 注入为 user 消息，LLM 需要感知这些上下文
+      case 'system_event':
+        messages.push({ role: 'user', content: ev.content })
+        break
+
+      // tool_execution 不参与 LLM 投影（审计用）
+      case 'tool_execution':
         break
     }
   }
@@ -440,6 +471,13 @@ export function estimateEventTokens(events: readonly ConversationEvent[]): numbe
         break
       case 'compact':
         tokens += estimateStringTokens(ev.summary)
+        break
+      case 'system_event':
+        tokens += estimateStringTokens(ev.content)
+        break
+      case 'tool_execution':
+        if (ev.outputPreview) tokens += estimateStringTokens(ev.outputPreview)
+        if (ev.errorSummary) tokens += estimateStringTokens(ev.errorSummary)
         break
     }
   }

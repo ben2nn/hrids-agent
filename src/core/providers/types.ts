@@ -41,7 +41,7 @@ export interface ToolCall {
 }
 
 export interface StreamChunk {
-  type: 'text_delta' | 'tool_call' | 'usage' | 'stop_reason' | 'done'
+  type: 'text_delta' | 'thinking_delta' | 'tool_call' | 'usage' | 'stop_reason' | 'done'
   delta?: string
   toolCall?: ToolCall
   stopReason?: string  // 'end_turn' | 'max_tokens' | 'tool_use' | 'stop_sequence'

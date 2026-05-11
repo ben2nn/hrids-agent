@@ -28,6 +28,7 @@ export interface AssistantMessageEvent {
   timestamp: number
   requestId?: string
   text: string             // 助手文本回复
+  thinking?: string        // 扩展思考内容（extended thinking）
   toolCalls?: ToolCallEvent[]
 }
 
@@ -74,6 +75,36 @@ export interface RequestCompleteEvent {
   error?: string            // status=error 时的错误信息
 }
 
+/** 系统事件 —— 系统注入的消息（不混用 user_message / assistant_message） */
+export interface SystemEvent {
+  type: 'system_event'
+  id: string
+  timestamp: number
+  requestId?: string
+  kind: 'error_recovery' | 'cron_trigger' | 'vision_inject' | 'turn_limit' | 'user_abort'
+  content: string
+  /** cron 触发时的任务描述 */
+  cronDescription?: string
+}
+
+/** 工具执行记录事件 —— 记录工具执行的元数据（不含完整日志） */
+export interface ToolExecutionEvent {
+  type: 'tool_execution'
+  id: string
+  timestamp: number
+  requestId?: string
+  toolCallId: string
+  toolName: string
+  /** 执行耗时（毫秒） */
+  durationMs: number
+  /** 执行状态 */
+  status: 'success' | 'error' | 'denied' | 'aborted'
+  /** 输出摘要（截断后的前 500 字符） */
+  outputPreview?: string
+  /** 错误摘要 */
+  errorSummary?: string
+}
+
 /** 所有事件类型的联合 */
 export type ConversationEvent =
   | UserMessageEvent
@@ -81,12 +112,15 @@ export type ConversationEvent =
   | ToolResultEvent
   | CompactEvent
   | RequestCompleteEvent
+  | SystemEvent
+  | ToolExecutionEvent
 
 // ── 事件工厂函数 ────────────────────────────────────────────────
 
-let _nextId = 0
+import { randomUUID } from 'crypto'
+
 function genId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${++_nextId}`
+  return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`
 }
 
 export function createUserMessageEvent(
@@ -112,6 +146,7 @@ export function createAssistantMessageEvent(
   text: string,
   toolCalls?: ToolCallEvent[],
   requestId?: string,
+  thinking?: string,
 ): AssistantMessageEvent {
   return {
     type: 'assistant_message',
@@ -119,6 +154,7 @@ export function createAssistantMessageEvent(
     timestamp: Date.now(),
     requestId,
     text,
+    ...(thinking ? { thinking } : {}),
     ...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
   }
 }
@@ -179,6 +215,46 @@ export function createRequestCompleteEvent(
   }
 }
 
+export function createSystemEvent(
+  kind: SystemEvent['kind'],
+  content: string,
+  requestId?: string,
+  cronDescription?: string,
+): SystemEvent {
+  return {
+    type: 'system_event',
+    id: genId('sys'),
+    timestamp: Date.now(),
+    requestId,
+    kind,
+    content,
+    ...(cronDescription ? { cronDescription } : {}),
+  }
+}
+
+export function createToolExecutionEvent(
+  toolCallId: string,
+  toolName: string,
+  durationMs: number,
+  status: ToolExecutionEvent['status'],
+  requestId?: string,
+  outputPreview?: string,
+  errorSummary?: string,
+): ToolExecutionEvent {
+  return {
+    type: 'tool_execution',
+    id: genId('texc'),
+    timestamp: Date.now(),
+    requestId,
+    toolCallId,
+    toolName,
+    durationMs,
+    status,
+    ...(outputPreview ? { outputPreview } : {}),
+    ...(errorSummary ? { errorSummary } : {}),
+  }
+}
+
 // ── 持久化接口 ──────────────────────────────────────────────────
 
 export interface EventStorage {
@@ -201,6 +277,7 @@ export interface DisplayToolCard {
 export interface DisplayMessage {
   role: 'user' | 'assistant'
   content: string
+  thinking?: string       // 扩展思考内容
   images?: string[]
   isCron?: boolean
   cronDescription?: string
@@ -238,7 +315,11 @@ export class ConversationStore {
   /** 追加事件但不持久化（用于批量导入后手动调用 saveToDisk） */
   appendEventsNoSave(...events: ConversationEvent[]): void {
     if (events.length === 0) return
-    this.eventLog.push(...events)
+    // 分批 push，避免展开运算符在事件量大时超出调用栈限制
+    const BATCH = 5000
+    for (let i = 0; i < events.length; i += BATCH) {
+      this.eventLog.push(...events.slice(i, i + BATCH))
+    }
   }
 
   /** 替换整个事件日志（用于会话切换），并全量重写磁盘 */
@@ -262,13 +343,13 @@ export class ConversationStore {
     return this.eventLog.length
   }
 
-  /** 清空所有事件 */
+  /** 清空所有事件（内存 + 磁盘） */
   clear(): void {
     this.eventLog = []
     this.latestPreprocessed = null
     this.prunedToolCallIds.clear()
     this.savedEventCount = 0
-    this.saveToDisk()
+    this.forceRewriteDisk()
   }
 
   // ── LLM 投影预处理状态 ────────────────────────────────────────
@@ -297,7 +378,7 @@ export class ConversationStore {
 
   // ── 持久化 ────────────────────────────────────────────────────
 
-  /** 加载事件：优先从 events.jsonl，降级到 transcript.jsonl */
+  /** 加载事件：从 events.jsonl */
   loadFromDisk(sessionDir: string): void {
     if (!this.storage) {
       this.storage = new JsonlEventStorage(sessionDir)
@@ -334,8 +415,11 @@ export class ConversationStore {
 
 // ── JSONL 事件存储实现 ──────────────────────────────────────────
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
 import { join } from 'path'
+
+const CURRENT_SCHEMA = 'hrids-events/v1'
+const SCHEMA_MARKER = JSON.stringify({ $schema: CURRENT_SCHEMA }) + '\n'
 
 export class JsonlEventStorage implements EventStorage {
   private eventsPath: string
@@ -349,28 +433,64 @@ export class JsonlEventStorage implements EventStorage {
 
   saveEvents(events: ConversationEvent[]): void {
     const lines = events.map(e => JSON.stringify(e)).join('\n') + '\n'
-    appendFileSync(this.eventsPath, lines, 'utf-8')
+
+    // 首次写入：文件不存在时先写 schema marker
+    if (!existsSync(this.eventsPath)) {
+      writeFileSync(this.eventsPath, SCHEMA_MARKER + lines, 'utf-8')
+      return
+    }
+
+    // 大块写入：使用 tmp + append 模式（保持 append-only 语义）
+    if (lines.length > 4096) {
+      const tmp = this.eventsPath + '.tmp'
+      writeFileSync(tmp, lines, 'utf-8')
+      appendFileSync(this.eventsPath, readFileSync(tmp, 'utf-8'), 'utf-8')
+      unlinkSync(tmp)
+    } else {
+      appendFileSync(this.eventsPath, lines, 'utf-8')
+    }
   }
 
   loadEvents(): ConversationEvent[] {
-    // 优先加载新格式
-    if (existsSync(this.eventsPath)) {
-      const content = readFileSync(this.eventsPath, 'utf-8')
-      if (!content.trim()) return []
-      return content
-        .split('\n')
-        .filter(line => line.trim())
-        .map(line => JSON.parse(line) as ConversationEvent)
+    if (!existsSync(this.eventsPath)) return []
+    const content = readFileSync(this.eventsPath, 'utf-8')
+    if (!content.trim()) return []
+
+    const lines = content.split('\n')
+    const events: ConversationEvent[] = []
+
+    // 检测并跳过 schema marker 行
+    let startIdx = 0
+    const firstLine = lines[0]?.trim()
+    if (firstLine) {
+      try {
+        const marker = JSON.parse(firstLine)
+        if (marker.$schema) {
+          startIdx = 1
+          // 未来可按 marker.$schema 做版本分支
+        }
+      } catch { /* 不是 marker，按 v0 处理 */ }
     }
 
-    return []
+    for (let i = startIdx; i < lines.length; i++) {
+      const line = lines[i].trim()
+      if (!line) continue
+      try {
+        events.push(JSON.parse(line) as ConversationEvent)
+      } catch {
+        // 跳过损坏行，记录到 stderr
+        process.stderr.write(`[events.jsonl] 第 ${i + 1} 行 JSON 解析失败，已跳过: ${line.slice(0, 80)}...\n`)
+      }
+    }
+
+    return events
   }
 
-  /** 全量重写事件文件 */
+  /** 全量重写事件文件（原子写入 + schema marker） */
   rewrite(events: ConversationEvent[]): void {
     const tmp = this.eventsPath + '.tmp'
-    const content = events.map(e => JSON.stringify(e)).join('\n') + '\n'
-    writeFileSync(tmp, content, 'utf-8')
+    const body = events.map(e => JSON.stringify(e)).join('\n') + '\n'
+    writeFileSync(tmp, SCHEMA_MARKER + body, 'utf-8')
     renameSync(tmp, this.eventsPath)
   }
 }
