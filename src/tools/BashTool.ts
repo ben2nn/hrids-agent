@@ -6,6 +6,7 @@ import type { ToolDef, ToolContext } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { logger } from '../core/logger.js'
 import { isDangerousRemovalPath } from '../core/pathSafety.js'
+import { checkCommandSafetyPermission } from '../core/CommandSafety.js'
 
 // cwd 管理已迁移到 src/core/cwd.ts，此处重新导出保持向后兼容
 export { getGlobalCwd, setGlobalCwd, runWithCwd } from '../core/cwd.js'
@@ -68,6 +69,7 @@ export const BashTool: ToolDef<typeof inputSchema> = {
              问候/闲聊/简单问答 → 不需要任何工具，直接回复`,
   inputSchema,
   readonly: false,
+  capabilities: { requiresShell: true, parallelSafe: false, maxExecutionTimeMs: 120_000 },
 
   describe(input) {
     return `执行命令: ${input.command}`
@@ -78,7 +80,7 @@ export const BashTool: ToolDef<typeof inputSchema> = {
   },
 
   async checkPermission(input) {
-    // 危险命令黑名单
+    // 危险命令黑名单（硬编码，始终生效）
     for (const pattern of BLOCKED_PATTERNS) {
       if (pattern.test(input.command)) {
         return { granted: false, reason: `命令包含危险模式: ${pattern}` }
@@ -89,7 +91,9 @@ export const BashTool: ToolDef<typeof inputSchema> = {
     if (removalTarget && isDangerousRemovalPath(removalTarget)) {
       return { granted: false, reason: `危险的删除目标路径: ${removalTarget}` }
     }
-    return { granted: true }
+
+    // 命令安全分析（可配置，补充规则覆盖 high/medium 级别）
+    return checkCommandSafetyPermission(input.command)
   },
 
   async execute(input, ctx?: ToolContext) {

@@ -158,6 +158,7 @@ export const SkillHubConfigTool: ToolDef<typeof configSchema> = {
 - apiBase    SkillHub API 基础地址（默认 https://api.skillhub.cn）`,
   inputSchema: configSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
 
   describe(input) {
     return input.action === 'get' ? '查看 SkillHub 配置' : '修改 SkillHub 配置'
@@ -334,6 +335,7 @@ export const SkillHubSearchTool: ToolDef<typeof searchSchema> = {
 搜索后可用 skillhub_install 安装技能到 ~/.hrids/skills/。`,
   inputSchema: searchSchema,
   readonly: true,
+  capabilities: { requiresNetwork: true, parallelSafe: true },
 
   describe(input) {
     return `搜索 SkillHub 技能: "${input.query}"`
@@ -439,6 +441,7 @@ export const SkillHubInstallTool: ToolDef<typeof installSchema> = {
 - project：.agent/skills/<技能名>/SKILL.md`,
   inputSchema: installSchema,
   readonly: false,
+  capabilities: { requiresNetwork: true, parallelSafe: false },
 
   describe(input) {
     return `从 SkillHub 安装技能: ${input.skill_id} → ${input.scope === 'user' ? '~/.hrids/skills/' : '.agent/skills/'}`
@@ -580,6 +583,7 @@ export const SkillHubSetupTool: ToolDef<typeof setupSchema> = {
 使用前请确认：confirm=true`,
   inputSchema: setupSchema,
   readonly: false,
+  capabilities: { requiresNetwork: true, requiresShell: true, parallelSafe: false },
 
   describe() {
     return '安装 skillhub CLI'
@@ -616,6 +620,7 @@ export const SkillHubRecommendTool: ToolDef<typeof recommendSchema> = {
   description: `根据任务描述，推荐合适的 SkillHub 技能并给出安装建议。`,
   inputSchema: recommendSchema,
   readonly: true,
+  capabilities: { requiresNetwork: true, parallelSafe: true },
 
   describe(input) {
     return `为任务推荐 SkillHub 技能: "${input.task.slice(0, 40)}"`
@@ -976,6 +981,7 @@ export const SkillHubListTool: ToolDef<typeof listSchema> = {
 显示技能 slug、版本、来源和安装路径。`,
   inputSchema: listSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   describe(input) {
     return `列出已安装技能（${input.scope}）`
@@ -1041,6 +1047,8 @@ export const SkillHubUninstallTool: ToolDef<typeof uninstallSchema> = {
 删除技能目录并从 lockfile 中移除记录。`,
   inputSchema: uninstallSchema,
   readonly: false,
+  isDestructive: true,
+  capabilities: { parallelSafe: false },
 
   describe(input) {
     return `卸载技能: ${input.skill_id}（${input.scope}）`
@@ -1123,6 +1131,7 @@ export const SkillHubUpgradeTool: ToolDef<typeof upgradeSchema> = {
 - check_only=true：仅检查可用更新，不实际安装`,
   inputSchema: upgradeSchema,
   readonly: false,
+  capabilities: { requiresNetwork: true, parallelSafe: false },
 
   describe(input) {
     const target = input.skill_id ? `技能 "${input.skill_id}"` : '所有技能'

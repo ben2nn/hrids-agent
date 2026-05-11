@@ -1,11 +1,13 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { resolve } from 'path'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { checkWritePath } from '../core/pathSafety.js'
 import { getGlobalCwd } from '../core/cwd.js'
+import { getCurrentAgentName } from '../core/coordinator/agentContext.js'
+import { getFileLeaseManager } from '../core/FileLeaseManager.js'
 
 const inputSchema = z.object({
   path: z.string().describe('要编辑的文件路径'),
@@ -20,6 +22,7 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
 不适用场景：创建新文件 → 用 file_write | 整个文件重写 → 用 file_write`,
   inputSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
 
   describe(input) {
     return `编辑文件: ${input.path}`
@@ -35,6 +38,19 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
 
   async execute(input) {
     const cwd = getGlobalCwd()
+
+    // 文件租约检查（仅子智能体需要，主智能体跳过）
+    const agentName = getCurrentAgentName()
+    if (agentName) {
+      const lease = getFileLeaseManager()
+      const result = lease.acquire(agentName, input.path, '编辑文件')
+      if (!result.granted) {
+        return {
+          type: 'error',
+          message: `文件 "${input.path}" 正被智能体 "${result.holder!.agentId}" 占用（${result.holder!.operation ?? '写入中'}），请稍后重试或协调任务分工`,
+        }
+      }
+    }
 
     // 路径安全检查
     const safety = checkWritePath(input.path, cwd)
@@ -64,17 +80,19 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
 
       // 写入前先将当前状态提交到 git，使 HEAD 保留修改前内容
       try {
-        execSync(`git add "${input.path}"`, { cwd, stdio: 'ignore' })
-        execSync(`git commit -m "file_edit: ${input.path}"`, { cwd, stdio: 'ignore' })
+        execFileSync('git', ['add', input.path], { cwd, stdio: 'ignore' })
+        execFileSync('git', ['commit', '-m', `file_edit: ${input.path}`], { cwd, stdio: 'ignore' })
       } catch {
         // 非 git 仓库或无变更时静默忽略
       }
 
       writeFileSync(filePath, updated, 'utf-8')
       auditLog({ action: 'file_edit', resource: filePath, result: 'allowed' })
+      if (agentName) getFileLeaseManager().release(agentName, input.path)
       return { type: 'success', output: `文件已更新: ${filePath}` }
     } catch (err) {
       auditLog({ action: 'file_edit', resource: filePath, result: 'error', details: { error: String(err) } })
+      if (agentName) getFileLeaseManager().release(agentName, input.path)
       return { type: 'error', message: `编辑失败: ${String(err)}` }
     }
   },

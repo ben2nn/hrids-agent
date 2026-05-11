@@ -12,6 +12,7 @@ import { getGlobalCwd, setGlobalCwd } from '../core/cwd.js'
 const log = logger.child({ component: 'powershell-tool' })
 
 import { isDangerousRemovalPath } from '../core/pathSafety.js'
+import { checkCommandSafetyPermission } from '../core/CommandSafety.js'
 
 const inputSchema = z.object({
   command: z.string().describe('要执行的 PowerShell 命令'),
@@ -47,6 +48,7 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
              问候/闲聊/简单问答 → 不需要任何工具，直接回复`,
   inputSchema,
   readonly: false,
+  capabilities: { requiresShell: true, parallelSafe: false, maxExecutionTimeMs: 60_000 },
 
   describe(input) {
     return `执行 PowerShell 命令: ${input.command}`
@@ -57,6 +59,7 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
   },
 
   async checkPermission(input) {
+    // 危险命令黑名单（硬编码，始终生效）
     for (const pattern of BLOCKED_PATTERNS) {
       if (pattern.test(input.command)) {
         return { granted: false, reason: `命令包含危险模式: ${pattern}` }
@@ -67,7 +70,9 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
     if (removalTarget && isDangerousRemovalPath(removalTarget)) {
       return { granted: false, reason: `危险的删除目标路径: ${removalTarget}` }
     }
-    return { granted: true }
+
+    // 命令安全分析（可配置，补充规则覆盖 high/medium 级别）
+    return checkCommandSafetyPermission(input.command)
   },
 
   async execute(input, ctx?: ToolContext) {

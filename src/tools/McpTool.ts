@@ -17,16 +17,49 @@ export interface McpToolInfo {
   inputSchema: Record<string, unknown>
 }
 
-// ── 连接管理 ──────────────────────────────────────────────────────────────────
+// ── 连接池管理 ────────────────────────────────────────────────────────────────
 // CLI 模式：进程级全局缓存（单会话，生命周期与进程相同）
 // Gateway 模式：会话级缓存（key = sessionId，destroySession 时精确清理）
 //
-// 结构：sessionId → serverName → Client
+// 结构：sessionId → serverName → PooledClient
 // CLI 模式使用固定 key '__cli__'，避免与 Gateway 会话 ID 冲突
-const _clientsBySession = new Map<string, Map<string, Client>>()
+
+interface PooledClient {
+  client: Client
+  config: McpServerConfig
+  createdAt: number
+  lastUsedAt: number
+  /** 标记连接是否可能已失效（调用失败后置 true，下次使用时重连） */
+  unhealthy: boolean
+}
+
+const _clientsBySession = new Map<string, Map<string, PooledClient>>()
 const CLI_SESSION_KEY = '__cli__'
 
-function getSessionClients(sessionId: string): Map<string, Client> {
+/** 空闲超时：30 分钟未使用的连接自动关闭 */
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000
+
+/** 定期清理空闲连接的定时器（进程级单例） */
+let _cleanupTimer: ReturnType<typeof setInterval> | null = null
+
+function ensureCleanupTimer(): void {
+  if (_cleanupTimer) return
+  _cleanupTimer = setInterval(() => {
+    const now = Date.now()
+    for (const [sid, clients] of _clientsBySession) {
+      for (const [name, pooled] of clients) {
+        if (now - pooled.lastUsedAt > IDLE_TIMEOUT_MS) {
+          pooled.client.close().catch(() => {})
+          clients.delete(name)
+        }
+      }
+      if (clients.size === 0) _clientsBySession.delete(sid)
+    }
+  }, 60_000)
+  _cleanupTimer.unref()
+}
+
+function getSessionClients(sessionId: string): Map<string, PooledClient> {
   let map = _clientsBySession.get(sessionId)
   if (!map) {
     map = new Map()
@@ -35,12 +68,8 @@ function getSessionClients(sessionId: string): Map<string, Client> {
   return map
 }
 
-async function getOrConnectClient(config: McpServerConfig, sessionId: string): Promise<Client> {
-  const clients = getSessionClients(sessionId)
-  if (clients.has(config.name)) {
-    return clients.get(config.name)!
-  }
-
+/** 创建新连接并封装为 PooledClient */
+async function createPooledClient(config: McpServerConfig): Promise<PooledClient> {
   const transport = new StdioClientTransport({
     command: config.command,
     args: config.args ?? [],
@@ -49,8 +78,47 @@ async function getOrConnectClient(config: McpServerConfig, sessionId: string): P
 
   const client = new Client({ name: 'hrids-agent', version: '0.1.0' })
   await client.connect(transport)
-  clients.set(config.name, client)
-  return client
+  return {
+    client,
+    config,
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+    unhealthy: false,
+  }
+}
+
+/**
+ * 获取或创建 MCP 连接（带健康检查 + 自动重连）。
+ * 1. 缓存命中且健康 → 直接复用
+ * 2. 缓存命中但标记为 unhealthy → 关闭旧连接，重新创建
+ * 3. 缓存未命中 → 创建新连接
+ */
+async function getOrConnectClient(config: McpServerConfig, sessionId: string): Promise<Client> {
+  ensureCleanupTimer()
+  const clients = getSessionClients(sessionId)
+  const existing = clients.get(config.name)
+
+  if (existing) {
+    if (existing.unhealthy) {
+      // 连接已标记为不健康，关闭后重建
+      existing.client.close().catch(() => {})
+      clients.delete(config.name)
+    } else {
+      existing.lastUsedAt = Date.now()
+      return existing.client
+    }
+  }
+
+  const pooled = await createPooledClient(config)
+  clients.set(config.name, pooled)
+  return pooled.client
+}
+
+/** 将连接标记为不健康（调用失败时由 execute 调用） */
+function markUnhealthy(sessionId: string, serverName: string): void {
+  const clients = _clientsBySession.get(sessionId)
+  const pooled = clients?.get(serverName)
+  if (pooled) pooled.unhealthy = true
 }
 
 /**
@@ -74,7 +142,8 @@ export async function loadMcpTools(configs: McpServerConfig[], sessionId?: strin
           name: toolName,
           description: `[MCP:${config.name}] ${mcpTool.description ?? mcpTool.name}`,
           inputSchema,
-          readonly: false, // MCP 工具默认视为非只读
+          readonly: false,
+          capabilities: { requiresNetwork: true, parallelSafe: false },
 
           describe() {
             return `MCP ${config.name}/${mcpTool.name}`
@@ -99,6 +168,8 @@ export async function loadMcpTools(configs: McpServerConfig[], sessionId?: strin
               }
               return { type: 'success', output: JSON.stringify(result) }
             } catch (err) {
+              // 调用失败 → 标记连接为不健康，下次使用时自动重连
+              markUnhealthy(sid, config.name)
               return { type: 'error', message: `MCP 调用失败: ${String(err)}` }
             }
           },
@@ -120,10 +191,16 @@ export async function disconnectAllMcp(sessionId?: string): Promise<void> {
   const sid = sessionId ?? CLI_SESSION_KEY
   const clients = _clientsBySession.get(sid)
   if (!clients) return
-  for (const [, client] of clients) {
-    try { await client.close() } catch { /* 忽略关闭错误 */ }
+  for (const [, pooled] of clients) {
+    try { await pooled.client.close() } catch { /* 忽略关闭错误 */ }
   }
   _clientsBySession.delete(sid)
+
+  // 所有会话都清理后，停止定时器
+  if (_clientsBySession.size === 0 && _cleanupTimer) {
+    clearInterval(_cleanupTimer)
+    _cleanupTimer = null
+  }
 }
 
 // 将 JSON Schema 转换为 Zod schema（简化版）

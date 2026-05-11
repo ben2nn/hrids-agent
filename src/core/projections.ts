@@ -182,9 +182,11 @@ export function projectForLLM(
 
   // 找到最后一个 compact 事件的位置，只投影其后的事件
   let startIdx = 0
+  let hasCompact = false
   for (let i = events.length - 1; i >= 0; i--) {
     if (events[i].type === 'compact') {
       startIdx = i
+      hasCompact = true
       break
     }
   }
@@ -193,7 +195,7 @@ export function projectForLLM(
   const messages: ChatMessage[] = []
 
   // 如果有 compact 事件，先注入摘要
-  if (startIdx > 0 && events[startIdx].type === 'compact') {
+  if (hasCompact && events[startIdx].type === 'compact') {
     const compactEv = events[startIdx] as import('./ConversationStore.js').CompactEvent
     messages.push({
       role: 'user',

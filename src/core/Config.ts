@@ -98,6 +98,8 @@ export interface AgentBehaviorConfig {
   memoryCondense?: boolean
   /** 自动将成功任务提炼为可复用技能（实验性） */
   autoDistillSkill?: boolean
+  /** 自动压缩上下文的 token 阈值，超过后触发 LLM 摘要压缩。默认 100000 */
+  autoCompactThreshold?: number
   /** 启动时自动清理过期会话，false 可完全禁用。默认 true */
   autoPruneSessions?: boolean
   /** 自动清理时至少保留的最近会话数，默认 50 */
@@ -182,6 +184,30 @@ export interface ToolPermissionPolicy {
   allowMcpTools?: boolean
 }
 
+// ── 命令安全配置 ────────────────────────────────────────────────
+
+export interface CommandSafetyConfig {
+  /** 是否启用命令安全分析（默认 true） */
+  enabled?: boolean
+  /** 最低风险等级时拦截执行：low | medium | high | critical（默认 'high'） */
+  blockLevel?: 'low' | 'medium' | 'high' | 'critical'
+  /** 额外的危险命令正则（追加到内置规则） */
+  extraPatterns?: string[]
+}
+
+// ── 网络策略配置 ────────────────────────────────────────────────
+
+export interface NetPolicyConfig {
+  /** 是否启用网络策略（默认 true） */
+  enabled?: boolean
+  /** 白名单域名（设置后仅允许访问这些域名） */
+  allowedDomains?: string[]
+  /** 黑名单域名（默认阻止云平台 metadata 和 localhost） */
+  blockedDomains?: string[]
+  /** 白名单和黑名单都未设置时的默认行为（默认 'allow'） */
+  defaultAction?: 'allow' | 'deny'
+}
+
 // ── 主配置接口 ────────────────────────────────────────────────
 
 export interface AgentConfig {
@@ -223,6 +249,12 @@ export interface AgentConfig {
   // ── 多智能体 ───────────────────────────────────────────────
   multiAgent?: MultiAgentConfig
   toolPermissions?: ToolPermissionPolicy
+
+  // ── 安全 ──────────────────────────────────────────────────
+  /** 命令安全分析配置 */
+  commandSafety?: CommandSafetyConfig
+  /** 网络访问策略配置 */
+  networkPolicy?: NetPolicyConfig
 
   // ── 向后兼容：旧版扁平字段（已迁移到 agent / logging 分组） ──
   /** @deprecated 请使用 agent.permissionMode */
@@ -353,18 +385,19 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
   }
 
   // 合并 agent 分组（新格式优先，旧字段兜底）
-  const agent: Required<AgentBehaviorConfig> = {
+  const agent: Omit<Required<AgentBehaviorConfig>, 'maxBudgetUsd'> & { maxBudgetUsd?: number } = {
     model:          clean.agent?.model           ?? clean.model           ?? DEFAULTS.agent.model,
     permissionMode: clean.agent?.permissionMode ?? clean.permissionMode ?? DEFAULTS.agent.permissionMode,
     maxTokens:      clean.agent?.maxTokens      ?? clean.maxTokens      ?? DEFAULTS.agent.maxTokens,
     maxTurns:       clean.agent?.maxTurns        ?? clean.maxTurns        ?? DEFAULTS.agent.maxTurns,
-    maxBudgetUsd:   clean.agent?.maxBudgetUsd    ?? clean.maxBudgetUsd    ?? 0,
+    maxBudgetUsd:   clean.agent?.maxBudgetUsd    ?? clean.maxBudgetUsd    ?? undefined,
     cwd:            clean.agent?.cwd             ?? clean.agentCwd        ?? '',
     memoryCondense: clean.agent?.memoryCondense  ?? clean.memoryCondense  ?? DEFAULTS.agent.memoryCondense,
     autoDistillSkill: clean.agent?.autoDistillSkill ?? clean.autoDistillSkill ?? DEFAULTS.agent.autoDistillSkill,
     autoPruneSessions: clean.agent?.autoPruneSessions ?? DEFAULTS.agent.autoPruneSessions,
     pruneKeepCount:    clean.agent?.pruneKeepCount    ?? DEFAULTS.agent.pruneKeepCount,
     pruneMaxAgeDays:   clean.agent?.pruneMaxAgeDays   ?? DEFAULTS.agent.pruneMaxAgeDays,
+    autoCompactThreshold: clean.agent?.autoCompactThreshold ?? 100000,
   }
 
   // 合并 logging 分组
@@ -427,10 +460,11 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     permissionMode:   agent.permissionMode,
     maxTokens:        agent.maxTokens,
     maxTurns:         agent.maxTurns,
-    maxBudgetUsd:     agent.maxBudgetUsd || undefined,
+    maxBudgetUsd:     agent.maxBudgetUsd ?? undefined,
     agentCwd:         agent.cwd || undefined,
     memoryCondense:   agent.memoryCondense,
     autoDistillSkill: agent.autoDistillSkill,
+    autoCompactThreshold: agent.autoCompactThreshold,
     logLevel:         logging.level,
     theme:            logging.theme,
   }

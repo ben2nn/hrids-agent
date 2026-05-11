@@ -88,10 +88,36 @@ agent:
   maxTokens: 8096
   maxTurns: 50
   memoryCondense: true
+  # 自动压缩上下文的 token 阈值（超过后用 LLM 生成摘要，替换早期历史）
+  # 设为 0 可禁用自动压缩，手动用 /compact 命令触发
+  autoCompactThreshold: 100000
   autoDistillSkill: false
   autoPruneSessions: true
   pruneKeepCount: 50
   pruneMaxAgeDays: 90
+
+# 命令安全分析（在 bash/PowerShell 执行前检测危险模式）
+commandSafety:
+  enabled: true
+  # 阻断等级：low | medium | high | critical
+  # 等于或高于此等级的命令将被拒绝执行
+  blockLevel: high
+  # 额外的自定义危险正则（匹配则拒绝）
+  # extraPatterns:
+  #   - "rm\\s+-rf\\s+/tmp/important"
+
+# 网络访问策略（控制 web_fetch / web_search 可访问的域名）
+networkPolicy:
+  enabled: true
+  # 默认动作：allow（仅拦截黑名单）| deny（仅放行白名单）
+  defaultAction: allow
+  # 白名单（defaultAction=deny 时生效，仅允许这些域名）
+  # allowedDomains:
+  #   - "*.example.com"
+  #   - "api.github.com"
+  # 黑名单（defaultAction=allow 时生效，拒绝这些域名）
+  # blockedDomains:
+  #   - "malicious-site.com"
 
 # Gateway 模式（HTTP + WebSocket 服务）。启动：hrids-agent --gateway
 gateway:

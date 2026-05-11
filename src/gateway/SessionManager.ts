@@ -188,7 +188,7 @@ export class SessionManager {
 
     const tools = [
       ...ALL_TOOLS,
-      createAgentTool(req.apiKey ?? agentConfig.apiKey ?? '', actualModel),
+      createAgentTool(),
       ...mcpTools,
     ]
 

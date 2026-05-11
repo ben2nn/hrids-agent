@@ -32,7 +32,8 @@ skill 是预定义的任务模板，封装了常用工作流的 prompt。
 - 用户可以自定义 skill 覆盖内置行为
 - 保持工作流一致性`,
   inputSchema,
-  readonly: true, // skill 本身只是注入 prompt，实际写操作由后续工具调用决定
+  readonly: true,
+  capabilities: { parallelSafe: true },
 
   describe(input) {
     return `调用 skill: /${input.skill_name}${input.args ? ' ' + input.args : ''}`
@@ -83,6 +84,7 @@ export const SkillListTool: ToolDef<typeof listSchema> = {
   description: '列出所有可用的 skill（内置 + 用户自定义 + 项目级），并报告加载失败的 skill',
   inputSchema: listSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   async execute() {
     ensureBundledSkillsRegistered()
@@ -145,6 +147,7 @@ export const SkillSaveTool: ToolDef<typeof saveSchema> = {
 保存后可通过 skill 工具直接调用，也可用 skill_list 查看。`,
   inputSchema: saveSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
 
   describe(input) {
     return `提炼 skill: ${input.name} → ${input.scope === 'project' ? '.agent/skills/' : '~/.hrids/skills/'}`

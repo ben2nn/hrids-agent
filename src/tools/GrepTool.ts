@@ -87,6 +87,7 @@ export const GrepTool: ToolDef<typeof inputSchema> = {
 不适用场景：查找文件路径 → 用 glob | 读取整个文件 → 用 file_read`,
   inputSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   describe(input) {
     return `搜索内容: ${input.pattern}`

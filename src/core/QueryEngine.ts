@@ -10,6 +10,7 @@ import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
 import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent, createRequestCompleteEvent, createSystemEvent, createToolExecutionEvent } from './ConversationStore.js'
 import { projectForDisplay, projectForLLM, estimateEventTokens } from './projections.js'
+import { withRetryStream } from './retry.js'
 
 const log = logger.child({ component: 'query-engine' })
 
@@ -110,7 +111,7 @@ export interface QueryEngineConfig {
   maxTokens?: number
   maxTurns?: number
   maxBudgetUsd?: number          // 成本预算上限（USD），超出后停止执行
-  autoCompactThreshold?: number  // 历史消息数超过此值时自动触发压缩（默认 80）
+  autoCompactThreshold?: number  // 自动压缩 token 阈值（默认 100000）
   sessionCwd?: string            // 会话工作目录，用于图片预处理
   uploadsDir?: string            // 会话上传目录，用于 @引用 搜索
 }
@@ -356,7 +357,8 @@ ${contentToSummarize}
         this.config.maxTokens ?? 8096,
         this.abortController.signal,
       )
-      for await (const chunk of streamFn()) {
+      // 流式重试：网络中断时自动重试最多 3 次，不中断用户交互
+      for await (const chunk of withRetryStream(streamFn, { maxAttempts: 3 }, `LLM turn ${turns}`)) {
         if (this.abortController.signal.aborted) break
 
         if (chunk.type === 'thinking_delta' && chunk.delta) {
@@ -1067,6 +1069,43 @@ ${contentToSummarize}
     this.activeTodoSnapshot = null
   }
 
+  /** 返回消息历史（仅 user/assistant 消息，供测试和外部查询） */
+  getHistory(): Message[] {
+    const events = this.store.getEventLog()
+    const msgs: Message[] = []
+    for (const ev of events) {
+      if (ev.type === 'user_message') {
+        msgs.push({ role: 'user', content: ev.content, timestamp: ev.timestamp, requestId: ev.requestId })
+      } else if (ev.type === 'assistant_message') {
+        msgs.push({ role: 'assistant', content: ev.text, timestamp: ev.timestamp, requestId: ev.requestId })
+      } else if (ev.type === 'compact') {
+        msgs.push({ role: 'user', content: ev.summary, timestamp: ev.timestamp, requestId: ev.requestId })
+      }
+    }
+    return msgs
+  }
+
+  /** 替换消息历史（清空后写入新消息） */
+  setHistory(messages: Message[]) {
+    this.store.clear()
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        this.store.appendEvents(createUserMessageEvent(
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+          msg.requestId,
+          msg.trigger,
+          msg.cronDescription,
+        ))
+      } else {
+        this.store.appendEvents(createAssistantMessageEvent(
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+          undefined,
+          msg.requestId,
+        ))
+      }
+    }
+  }
+
   /** 返回前端展示用的 DisplayMessage[]（直接从事件投影，含工具卡片） */
   getDisplayMessages(): import('./ConversationStore.js').DisplayMessage[] {
     return projectForDisplay(this.store.getEventLog())
@@ -1079,8 +1118,10 @@ ${contentToSummarize}
   getTools(): readonly ToolDef[] { return this.config.tools }
 
   compactHistory(summary: string) {
-    // 追压缩事件到事件日志（不删除原始事件）
+    // 清空历史后写入 CompactEvent（供投影层识别）+ 空 assistant（保持事件对完整）
+    this.store.clear()
     this.store.appendEvents(createCompactEvent(summary, this.currentRequestId ?? undefined))
+    this.store.appendEvents(createAssistantMessageEvent('', undefined, this.currentRequestId ?? undefined))
     // 压缩后重新从文件读取快照确保状态同步
     try {
       this.activeTodoSnapshot = loadTodos()

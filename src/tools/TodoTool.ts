@@ -270,6 +270,7 @@ export const TodoWriteTool: ToolDef<typeof todoWriteInputSchema> = {
 - 不要在输入中传入 id 字段，系统会忽略并自动分配`,
   inputSchema: todoWriteInputSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
 
   describe(input) {
     const count = Array.isArray(input.todos) ? input.todos.length : 0
@@ -475,6 +476,7 @@ export const TodoUpdateTool: ToolDef<typeof todoUpdateInputSchema> = {
 - 完成后自动推进下一个满足依赖条件的 pending 任务为 in_progress`,
   inputSchema: todoUpdateInputSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
 
   describe(input) {
     return `更新任务 ${input.id} → ${input.status}`
@@ -758,6 +760,7 @@ export const TodoAppendTool: ToolDef<typeof todoAppendInputSchema> = {
 - dependsOn 只能引用已存在于当前列表的任务 id
 - 追加成功后请继续执行当前任务，不要切换到新追加的任务`,
   inputSchema: todoAppendInputSchema,
+  capabilities: { parallelSafe: false },
   readonly: false,
 
   describe(input) {
@@ -934,6 +937,7 @@ export const TodoResetTool: ToolDef<typeof todoResetInputSchema> = {
 - 用户批准后，调用 todo_write 建立新计划`,
   inputSchema: todoResetInputSchema,
   readonly: false,
+  capabilities: { isInteractive: true, parallelSafe: false },
 
   describe(input) {
     return `请求重置任务计划：${input.reason.slice(0, 50)}`
@@ -1122,6 +1126,7 @@ export const TodoReadTool: ToolDef<typeof todoReadInputSchema> = {
 不适用场景：建立新计划 → 用 todo_write | 问候/闲聊 | 没有任务时自动调用`,
   inputSchema: todoReadInputSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   describe(_input) {
     return '读取当前任务状态'

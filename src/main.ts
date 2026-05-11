@@ -12,7 +12,7 @@ import { initProfileLoader, listProfiles } from './core/coordinator/ProfileLoade
 import { ALL_TOOLS } from './tools/index.js'
 import { getGlobalCwd } from './core/cwd.js'
 import { restoreScheduledJobs } from './tools/ScheduleCronTool.js'
-import { createAgentTool } from './tools/AgentTool.js'
+import { createAgentTool, createAgentSpawnTool, createAgentWaitTool, createAgentCancelTool, createAgentListTool } from './tools/AgentTool.js'
 import { loadMcpTools } from './tools/McpTool.js'
 import { TeamManager } from './core/coordinator/TeamManager.js'
 import { resetEmbeddingProvider, migrateOldMemoryStore } from './memory/index.js'
@@ -251,7 +251,11 @@ async function main() {
 
       const tools = [
         ...ALL_TOOLS,
-        createAgentTool(opts.apiKey ?? config.apiKey ?? '', model),
+        createAgentTool(),
+        createAgentSpawnTool(),
+        createAgentWaitTool(),
+        createAgentCancelTool(),
+        createAgentListTool(),
         ...mcpTools,
       ]
 

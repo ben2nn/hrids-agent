@@ -21,6 +21,7 @@ export const FileReadTool: ToolDef<typeof inputSchema> = {
 不适用场景：搜索文件中的文本 → 用 grep | 查找文件路径 → 用 glob`,
   inputSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   describe(input) {
     const range = input.startLine

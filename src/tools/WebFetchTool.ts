@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
+import { NetworkPolicyDecider } from '../core/NetworkPolicy.js'
+import { loadConfig } from '../core/Config.js'
 
 const inputSchema = z.object({
   url: z.string().describe('要获取的 URL'),
@@ -44,6 +46,31 @@ function extractTextFromHtml(html: string): string {
   return text
 }
 
+/** 从 config.yaml 构建 NetworkPolicyDecider（带缓存） */
+let _decider: NetworkPolicyDecider | null = null
+function getDecider(): NetworkPolicyDecider {
+  if (!_decider) {
+    const config = loadConfig()
+    const policyConfig = config.networkPolicy
+    if (policyConfig?.enabled === false) {
+      // 策略禁用：允许所有
+      _decider = new NetworkPolicyDecider({ defaultAction: 'allow' })
+    } else {
+      _decider = new NetworkPolicyDecider({
+        allowedDomains: policyConfig?.allowedDomains,
+        blockedDomains: policyConfig?.blockedDomains,
+        defaultAction: policyConfig?.defaultAction ?? 'allow',
+      })
+    }
+  }
+  return _decider
+}
+
+/** 重置缓存（供测试或配置热更新使用） */
+export function resetNetworkPolicyCache(): void {
+  _decider = null
+}
+
 export const WebFetchTool: ToolDef<typeof inputSchema> = {
   name: 'web_fetch',
   description: `获取指定 URL 的网页内容，自动提取正文。
@@ -51,12 +78,20 @@ export const WebFetchTool: ToolDef<typeof inputSchema> = {
 不适用场景：搜索未知信息 → 用 web_search | 本地文件 → 用 file_read`,
   inputSchema,
   readonly: true,
+  capabilities: { requiresNetwork: true, parallelSafe: true, maxExecutionTimeMs: 20_000 },
 
   describe(input) {
     return `获取网页: ${input.url}`
   },
 
   async execute(input) {
+    // 网络策略检查
+    const decider = getDecider()
+    const { decision, reason } = decider.decide(input.url)
+    if (decision === 'deny') {
+      return { type: 'error', message: `网络策略拒绝访问: ${reason}` }
+    }
+
     try {
       const res = await fetch(input.url, {
         headers: {

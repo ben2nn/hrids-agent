@@ -34,6 +34,7 @@ export const VisionTool: ToolDef<typeof inputSchema> = {
     '如果用户对图片有具体问题，通过 prompt 参数传递。',
   inputSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   describe(input) {
     const label = input.image_path ?? input.image_url ?? `base64(${(input.image_data?.length ?? 0)} 字符)`

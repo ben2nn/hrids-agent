@@ -1,21 +1,18 @@
 // Web 搜索工具 —— 优先使用 Anthropic 原生 web_search 能力，降级到 DuckDuckGo
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
+import { NetworkPolicyDecider } from '../core/NetworkPolicy.js'
+import { loadConfig, getApiKey } from '../core/Config.js'
 
 const inputSchema = z.object({
   query: z.string().describe('搜索查询词'),
 })
 
-// 获取 fetch 配置（代理由 proxySetup.ts 在启动时注入为全局 dispatcher，无需手动传）
-function getFetchOptions(options: RequestInit = {}): RequestInit {
-  return { ...options }
-}
-
 // ── 降级方案：DuckDuckGo HTML 搜索（无需 API Key）────────────────────────────
 async function searchViaDuckDuckGo(query: string): Promise<string> {
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
-  
-  const fetchOptions = getFetchOptions({
+
+  const fetchOptions: RequestInit = {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -25,7 +22,7 @@ async function searchViaDuckDuckGo(query: string): Promise<string> {
     },
     signal: AbortSignal.timeout(20000),
     redirect: 'follow',
-  })
+  }
 
   const res = await fetch(url, fetchOptions)
 
@@ -85,7 +82,7 @@ async function searchViaDuckDuckGo(query: string): Promise<string> {
 
 // ── 主方案：Anthropic 原生 web_search beta ────────────────────────────────────
 async function searchViaAnthropic(query: string, apiKey: string): Promise<string> {
-  const fetchOptions = getFetchOptions({
+  const fetchOptions: RequestInit = {
     method: 'POST',
     headers: {
       'x-api-key': apiKey,
@@ -100,7 +97,7 @@ async function searchViaAnthropic(query: string, apiKey: string): Promise<string
       messages: [{ role: 'user', content: `搜索并总结: ${query}` }],
     }),
     signal: AbortSignal.timeout(30000),
-  })
+  }
 
   const res = await fetch('https://api.anthropic.com/v1/messages', fetchOptions)
 
@@ -153,14 +150,30 @@ export const WebSearchTool: ToolDef<typeof inputSchema> = {
 不适用场景：查询已有知识能回答的问题 → 直接回答 | 问候/闲聊`,
   inputSchema,
   readonly: true,
+  capabilities: { requiresNetwork: true, parallelSafe: true, maxExecutionTimeMs: 30_000 },
 
   describe(input) {
     return `搜索: ${input.query}`
   },
 
   async execute(input) {
-    const { loadConfig, getApiKey } = await import('../core/Config.js')
-    void loadConfig()
+    // 网络策略检查：搜索工具访问 DuckDuckGo / Anthropic API
+    const config = loadConfig()
+    const policyConfig = config.networkPolicy
+    if (policyConfig?.enabled !== false) {
+      const decider = new NetworkPolicyDecider({
+        allowedDomains: policyConfig?.allowedDomains,
+        blockedDomains: policyConfig?.blockedDomains,
+        defaultAction: policyConfig?.defaultAction ?? 'allow',
+      })
+      const searchEndpoints = ['https://html.duckduckgo.com', 'https://api.anthropic.com']
+      for (const endpoint of searchEndpoints) {
+        const { decision, reason } = decider.decide(endpoint)
+        if (decision === 'deny') {
+          return { type: 'error', message: `网络策略拒绝搜索端点: ${reason}` }
+        }
+      }
+    }
     const anthropicKey = getApiKey('anthropic')
 
     try {

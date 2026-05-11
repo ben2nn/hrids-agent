@@ -20,6 +20,7 @@ export const WorkdirInitTool: ToolDef<typeof initSchema> = {
 纯对话类任务无需调用此工具。`,
   inputSchema: initSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
 
   async execute(_input, _ctx?: ToolContext): Promise<ToolResult> {
     const cwd = getGlobalCwd()
@@ -46,6 +47,7 @@ export const WorkdirDeliverTool: ToolDef<typeof deliverSchema> = {
 在任务完成时调用，将结果汇总呈现给用户。`,
   inputSchema: deliverSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   async execute(input, _ctx?: ToolContext): Promise<ToolResult> {
     const cwd = getGlobalCwd()
@@ -73,6 +75,7 @@ export const WorkdirCleanupTool: ToolDef<typeof cleanupSchema> = {
   inputSchema: cleanupSchema,
   readonly: false,
   isDestructive: true,
+  capabilities: { parallelSafe: false },
 
   async execute(_input, _ctx?: ToolContext): Promise<ToolResult> {
     const cwd = getGlobalCwd()
@@ -106,6 +109,7 @@ export const WorkdirListTool: ToolDef<typeof listSchema> = {
   description: `列出所有工作目录及其信息，方便用户管理和查找历史工作空间。`,
   inputSchema: listSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   async execute(_input, _ctx?: ToolContext): Promise<ToolResult> {
     const workRoot = join(getConfigDir(), 'work')

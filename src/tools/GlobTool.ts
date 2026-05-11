@@ -16,6 +16,7 @@ export const GlobTool: ToolDef<typeof inputSchema> = {
              问候/闲聊 → 不需要任何工具`,
   inputSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
 
   describe(input) {
     return `搜索文件: ${input.pattern}`

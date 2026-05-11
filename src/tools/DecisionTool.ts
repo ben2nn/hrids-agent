@@ -73,6 +73,7 @@ export const DecisionTool: ToolDef<typeof inputSchema> = {
 - 可以通过 ask_user 解决的简单信息收集`,
   inputSchema,
   readonly: true,
+  capabilities: { isInteractive: true, parallelSafe: false },
 
   describe(input) {
     return `请求决策: ${input.title}`

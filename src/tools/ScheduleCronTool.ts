@@ -407,6 +407,7 @@ cron 表达式格式（5位）：分 时 日 月 周
   "0 15 15 4 *"   4月15日下午3点（一次性，once=true）`,
   inputSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
 
   describe(input) {
     if (input.action === 'create') return `创建定时任务: ${input.description}`

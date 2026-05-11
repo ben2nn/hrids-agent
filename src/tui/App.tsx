@@ -6,7 +6,7 @@ import type { CommandRegistry } from '../core/CommandRegistry.js'
 import type { CommandContext } from '../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js'
 import type { CronJob } from '../tools/ScheduleCronTool.js'
-import { listSessions, loadSessionEvents, generateSessionId, saveSessionMeta, archiveSession, listArchives } from '../core/SessionStore.js'
+import { listSessions, loadSessionEvents, generateSessionId, archiveSession, listArchives } from '../core/SessionStore.js'
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js'
@@ -20,6 +20,8 @@ interface Props {
   providerName: string
   // 可选：动态获取最新 provider 名称（用于 fallback 切换后刷新显示）
   getProviderName?: () => { name: string; model: string }
+  // 可选：stderr 拦截回调注册（由 interactiveMode 注入，将 stderr 输出显示为系统消息）
+  onStderrReady?: (callback: (text: string) => void) => void
 }
 
 type MsgRole = 'user' | 'assistant' | 'tool' | 'system' | 'error'
@@ -124,7 +126,7 @@ function formatToolOutput(toolName: string, out: string, toolInput?: Record<stri
   return out.length > 500 ? out.slice(0, 500) + `\n…（共 ${out.length} 字符）` : out
 }
 
-export function App({ engine, commands, sessionId: initialSessionId, onModelChange, currentModel, providerName, getProviderName }: Props) {
+export function App({ engine, commands, sessionId: initialSessionId, onModelChange, currentModel, providerName, getProviderName, onStderrReady }: Props) {
   const { exit } = useApp()
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState(initialSessionId)
@@ -327,6 +329,19 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     }
     return () => { engine.onBeforeCompact = null }
   }, [engine, sessionId])
+
+  // 注册 stderr 拦截回调：将 process.stderr 输出显示为系统消息，避免破坏 Ink 渲染
+  useEffect(() => {
+    if (!onStderrReady) return
+    onStderrReady((text: string) => {
+      // 过滤空行和纯空白
+      const clean = text.trim()
+      if (!clean) return
+      // 截断过长的 stderr 输出
+      const display = clean.length > 500 ? clean.slice(0, 500) + '…' : clean
+      push({ role: 'system', text: display, color: 'gray' })
+    })
+  }, [onStderrReady, push])
 
   // 构建命令上下文
   const cmdCtx: CommandContext = {

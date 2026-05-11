@@ -16,6 +16,20 @@ export interface ToolContext {
   onLog?: (line: string) => void
 }
 
+// 工具能力声明 —— 描述工具的运行时需求和特征
+export interface ToolCapabilities {
+  /** 是否需要网络访问（WebFetch、WebSearch 等） */
+  requiresNetwork?: boolean
+  /** 是否依赖 shell 执行（Bash、PowerShell） */
+  requiresShell?: boolean
+  /** 是否需要用户交互（AskUser 等） */
+  isInteractive?: boolean
+  /** 是否可以并行执行（无副作用的只读工具通常可以） */
+  parallelSafe?: boolean
+  /** 建议超时时间（ms），覆盖默认值 */
+  maxExecutionTimeMs?: number
+}
+
 // 工具定义接口 —— 每个工具必须实现这个接口
 export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   // 工具名称，用于 LLM 调用
@@ -32,6 +46,8 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
    * 默认 false。
    */
   isDestructive?: boolean
+  /** 工具能力声明（可选），用于智能调度和安全检查 */
+  capabilities?: ToolCapabilities
   // 执行工具（ctx 可选，用于传递日志回调）
   execute(input: z.infer<TInput>, ctx?: ToolContext): Promise<ToolResult>
   // 权限检查（可选，默认允许）

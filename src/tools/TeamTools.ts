@@ -22,6 +22,7 @@ export const TeamCreateTool: ToolDef<typeof teamCreateSchema> = {
   description: '创建一个智能体团队，用于并行执行多个子任务',
   inputSchema: teamCreateSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
   describe: (i) => `创建团队: ${i.name}`,
   async execute(input) {
     const mgr = getTeamManager()
@@ -45,6 +46,8 @@ export const TeamDeleteTool: ToolDef<typeof teamDeleteSchema> = {
   description: '删除团队并中止其所有任务',
   inputSchema: teamDeleteSchema,
   readonly: false,
+  isDestructive: true,
+  capabilities: { parallelSafe: false },
   describe: (i) => `删除团队: ${i.name}`,
   async execute(input) {
     const mgr = getTeamManager()
@@ -74,6 +77,7 @@ export const AgentSpawnTool: ToolDef<typeof agentSpawnSchema> = {
   description: '向团队派生一个子智能体。可后台运行（并行）或等待完成（串行）',
   inputSchema: agentSpawnSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
   describe: (i) => `派生智能体: ${i.name} → ${i.description}`,
   async execute(input) {
     const mgr = getTeamManager()
@@ -135,6 +139,7 @@ export const TeamStatusTool: ToolDef<typeof teamStatusSchema> = {
   description: '查看团队中所有智能体的运行状态',
   inputSchema: teamStatusSchema,
   readonly: true,
+  capabilities: { parallelSafe: true },
   describe: (i) => `查看团队状态: ${i.team}`,
   async execute(input) {
     const mgr = getTeamManager()
@@ -175,6 +180,7 @@ export const TeamWaitTool: ToolDef<typeof teamWaitSchema> = {
   description: '等待团队所有智能体完成，返回汇总结果',
   inputSchema: teamWaitSchema,
   readonly: true,
+  capabilities: { parallelSafe: false },
   describe: (i) => `等待团队完成: ${i.team}`,
   async execute(input) {
     const mgr = getTeamManager()
@@ -205,6 +211,7 @@ export const SendMessageTool: ToolDef<typeof sendMessageSchema> = {
   description: '向其他智能体发送消息（需要知道自己的名称）',
   inputSchema: sendMessageSchema,
   readonly: false,
+  capabilities: { parallelSafe: false },
   describe: (i) => `发消息给 ${i.to}`,
   async execute(input) {
     const mgr = getTeamManager()
@@ -229,6 +236,7 @@ export const ReceiveMessageTool: ToolDef<typeof receiveMessageSchema> = {
   description: '接收其他智能体发来的消息',
   inputSchema: receiveMessageSchema,
   readonly: true,
+  capabilities: { parallelSafe: false },
   describe: () => '接收消息',
   async execute(input) {
     const mgr = getTeamManager()
@@ -252,11 +260,10 @@ export const ReceiveMessageTool: ToolDef<typeof receiveMessageSchema> = {
   },
 }
 
-// 导出所有团队工具
+// 导出所有团队工具（AgentSpawnTool 已由 AgentTool.ts 的 createAgentSpawnTool() 替代，避免同名冲突）
 export const TEAM_TOOLS: ToolDef[] = [
   TeamCreateTool,
   TeamDeleteTool,
-  AgentSpawnTool,
   TeamStatusTool,
   TeamWaitTool,
   SendMessageTool,
