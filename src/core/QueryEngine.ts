@@ -12,7 +12,7 @@ import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
 import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent, createRequestCompleteEvent, createSystemEvent, createToolExecutionEvent } from './ConversationStore.js'
 import { projectForDisplay, projectForLLM, estimateEventTokens, MAX_TOOL_RESULT_CHARS, truncateToolResult } from './projections.js'
-import { withRetryStream } from './retry.js'
+
 import { StormBreaker } from './StormBreaker.js'
 import { partitionToolCalls, type ToolCall } from './ToolScheduler.js'
 
@@ -355,15 +355,14 @@ ${contentToSummarize}
         prunedToolCallIds: this.store.isToolCallPruned('__budget__') ? undefined : undefined, // 由 applyToolResultBudget 管理
       })
 
-      const streamFn = () => this.config.provider.stream(
+      // 重试 + 故障转移由 FallbackProvider 内部统一处理
+      for await (const chunk of this.config.provider.stream(
         projectedMessages as never,
         toolsForLLM,
         systemPromptForThisTurn,
         this.config.maxTokens ?? 8096,
         this.abortController.signal,
-      )
-      // 流式重试：网络中断时自动重试最多 3 次，不中断用户交互
-      for await (const chunk of withRetryStream(streamFn, { maxAttempts: 3 }, `LLM turn ${turns}`)) {
+      )) {
         if (this.abortController.signal.aborted) break
 
         if (chunk.type === 'thinking_delta' && chunk.delta) {

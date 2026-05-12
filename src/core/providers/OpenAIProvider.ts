@@ -2,7 +2,7 @@
 // 任何实现了 OpenAI Chat Completions API 的服务都可以使用
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
-import { withRetry } from '../retry.js'
+
 import { logger } from '../logger.js'
 import { zodToJsonSchema } from '../schema.js'
 
@@ -226,20 +226,16 @@ export class OpenAIProvider implements LLMProvider {
       //process.stderr.write(`[DEBUG] apiKey=${keyPreview}\n`)
     }
 
-    // 带重试的 fetch（网络错误/429/5xx 自动退避重试）
-    const res = await withRetry(
-      () => fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.config.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(600000),
-      }),
-      { maxAttempts: 3 },
-      `${this.name} API [${this.model}]`,
-    )
+    // 重试由外层 FallbackProvider 统一处理
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.config.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(600000),
+    })
 
     if (!res.ok) {
       const err = await res.text()

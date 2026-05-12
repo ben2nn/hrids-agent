@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { toAnthropicTool } from '../Tool.js'
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
-import { withRetry } from '../retry.js'
+
 import { logger } from '../logger.js'
 import { STATIC_SECTION_COUNT } from '../coordinator/coordinatorPrompt.js'
 
@@ -50,18 +50,14 @@ export class AnthropicProvider implements LLMProvider {
         : { type: 'text', text }
     })
 
-    // 用 withRetry 包装 stream 创建（网络错误/限流时自动退避重试）
-    const stream = await withRetry(
-      () => Promise.resolve(this.client.messages.stream({
-        model: this.model,
-        max_tokens: maxTokens,
-        system: systemBlocks,
-        tools: tools.length > 0 ? tools.map(toAnthropicTool) as Anthropic.Tool[] : undefined,
-        messages: anthropicMessages,
-      })),
-      { maxAttempts: 3 },
-      `Anthropic stream [${this.model}]`,
-    )
+    // 重试由外层 FallbackProvider 统一处理
+    const stream = this.client.messages.stream({
+      model: this.model,
+      max_tokens: maxTokens,
+      system: systemBlocks,
+      tools: tools.length > 0 ? tools.map(toAnthropicTool) as Anthropic.Tool[] : undefined,
+      messages: anthropicMessages,
+    })
 
     try {
       for await (const event of stream) {

@@ -79,25 +79,4 @@ export async function withRetry<T>(
   throw lastErr
 }
 
-// 对 AsyncGenerator 的重试包装（用于流式 API）
-// 注意：流式重试会从头重新发起请求，已 yield 的内容不会重复
-export async function* withRetryStream<T>(
-  fn: () => AsyncGenerator<T>,
-  opts: RetryOptions = {},
-  context = '流式请求',
-): AsyncGenerator<T> {
-  const { maxAttempts, baseDelayMs, maxDelayMs, jitter, retryIf } = resolveOpts(opts)
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      yield* fn()
-      return
-    } catch (err) {
-      if (attempt === maxAttempts || !retryIf(err)) {
-        throw err
-      }
-      const delay = calcRetryDelay(err, attempt, baseDelayMs, maxDelayMs, jitter, context, maxAttempts)
-      await sleep(delay)
-    }
-  }
-}

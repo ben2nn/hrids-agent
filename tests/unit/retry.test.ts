@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { withRetry, withRetryStream } from '../../src/core/retry.js'
+import { withRetry } from '../../src/core/retry.js'
 
 describe('withRetry', () => {
   it('成功时直接返回结果', async () => {
@@ -39,36 +39,5 @@ describe('withRetry', () => {
       withRetry(fn, { maxAttempts: 3, baseDelayMs: 1, retryIf: () => true })
     ).rejects.toThrow()
     expect(fn).toHaveBeenCalledTimes(3)
-  })
-})
-
-describe('withRetryStream', () => {
-  async function* successGen() {
-    yield 1
-    yield 2
-    yield 3
-  }
-
-  it('成功时正常 yield 所有值', async () => {
-    const results: number[] = []
-    for await (const v of withRetryStream(() => successGen())) {
-      results.push(v)
-    }
-    expect(results).toEqual([1, 2, 3])
-  })
-
-  it('失败时重试并最终成功', async () => {
-    let attempt = 0
-    async function* flakyGen() {
-      attempt++
-      if (attempt < 2) throw new Error('fetch failed')
-      yield 'done'
-    }
-    const results: string[] = []
-    for await (const v of withRetryStream(() => flakyGen(), { maxAttempts: 3, baseDelayMs: 1 })) {
-      results.push(v)
-    }
-    expect(results).toEqual(['done'])
-    expect(attempt).toBe(2)
   })
 })

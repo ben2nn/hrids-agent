@@ -12,6 +12,12 @@ import type { LLMProvider } from './providers/types.js'
 
 const log = logger.child({ component: 'post-run-hooks' })
 
+// ── 并发控制 ──────────────────────────────────────────────────
+
+// per-session 的并发锁，防止同一会话同时触发多次记忆总结
+const memoryRunningSessions = new Set<string>()
+const skillRunningSessions = new Set<string>()
+
 // ── 记忆自动提炼 ──────────────────────────────────────────────
 
 /**
@@ -24,6 +30,12 @@ export async function autoExtractMemories(
   provider: LLMProvider,
   condense = false,
 ): Promise<void> {
+  // 并发控制：同一会话只允许一个记忆总结在执行
+  if (memoryRunningSessions.has(sessionId)) {
+    log.debug('记忆总结已在执行中，跳过', { sessionId })
+    return
+  }
+  memoryRunningSessions.add(sessionId)
   try {
     const displayMsgs = projectForDisplay(engine.store.getEventLog())
     const messages = displayMsgs.map(dm => ({ role: dm.role, content: dm.content }))
@@ -37,6 +49,8 @@ export async function autoExtractMemories(
     if (condense) log.info('记忆总结：LLM 提炼完成', { sessionId, caller: 'memory-pipeline' })
   } catch {
     // 静默失败，不影响主流程
+  } finally {
+    memoryRunningSessions.delete(sessionId)
   }
 }
 
