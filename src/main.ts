@@ -10,6 +10,7 @@ import { buildSystemContext } from './core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt, classifyTask } from './core/coordinator/coordinatorPrompt.js'
 import { initProfileLoader, listProfiles } from './core/coordinator/ProfileLoader.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { ToolRegistry } from './core/ToolRegistry.js'
 import { getGlobalCwd } from './core/cwd.js'
 import { restoreScheduledJobs } from './tools/ScheduleCronTool.js'
 import { createAgentTool, createAgentSpawnTool, createAgentWaitTool, createAgentCancelTool, createAgentListTool } from './tools/AgentTool.js'
@@ -158,7 +159,7 @@ async function main() {
         const profiles = listProfiles(config.multiAgent?.profiles)
         if (profiles.length === 0) {
           console.log('没有可用的 agent profiles。')
-          console.log('在 config.yaml 的 multiAgent.profiles 中定义，或将 .yaml 文件放入 ~/.hrids/agents.d/')
+          console.log('在 config.yaml 的 multiAgent.profiles 中定义，或将 .yaml 文件放入 ~/.hrids/specialists/')
         } else {
           console.log('可用的 agent profiles:')
           profiles.forEach(p => {
@@ -272,10 +273,11 @@ async function main() {
       const initialPrompt = getCoordinatorSystemPrompt(undefined, tools, undefined, availableProfiles)
       const systemPrompt = await buildSystemContext(initialPrompt)
 
+      const registry = new ToolRegistry().registerAll(tools)
       const engine = new QueryEngine({
         provider,
         systemPrompt,
-        tools,
+        registry,
         permissions,
         maxTokens: config.maxTokens,
         maxTurns: config.maxTurns,

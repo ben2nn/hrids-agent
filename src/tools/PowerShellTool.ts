@@ -13,11 +13,15 @@ const log = logger.child({ component: 'powershell-tool' })
 
 import { isDangerousRemovalPath } from '../core/pathSafety.js'
 import { checkCommandSafetyPermission } from '../core/CommandSafety.js'
+import { clearFileCache } from './FileReadTool.js'
 
 const inputSchema = z.object({
   command: z.string().describe('要执行的 PowerShell 命令'),
   timeout: z.number().optional().describe('超时时间（毫秒），默认 60000。长时间任务（如编译、爬虫）可设置更大的值，例如 1800000（30分钟）'),
 })
+
+// 只读命令白名单（plan-mode 下允许执行，Windows/PowerShell 版本）
+const READONLY_COMMANDS = /^(Get-|Select-|Where-|Measure-|Test-|Find-|Search-|Resolve-|Compare-|Format-|Out-|Write-Host|Write-Output|echo|ls|dir|cat|type|cd|pwd|whoami|hostname|ipconfig|ping|tracert|nslookup|git|npm|pip|docker|kubectl)\b/i
 
 // 危险命令黑名单（Windows/PowerShell）
 const BLOCKED_PATTERNS = [
@@ -49,6 +53,11 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
   inputSchema,
   readonly: false,
   capabilities: { requiresShell: true, parallelSafe: false, maxExecutionTimeMs: 60_000 },
+
+  readOnlyCheck(input) {
+    const cmd = input.command.trim()
+    return READONLY_COMMANDS.test(cmd)
+  },
 
   describe(input) {
     return `执行 PowerShell 命令: ${input.command}`
@@ -204,6 +213,10 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
         const output = Buffer.concat(outputChunks).toString('utf-8')
         const stderrOutput = Buffer.concat(stderrChunks).toString('utf-8')
         if (code === 0) {
+          // 写命令成功后清除文件缓存（shell 可能修改了任意文件）
+          if (!READONLY_COMMANDS.test(input.command.trim())) {
+            clearFileCache()
+          }
           resolve({ type: 'success', output: output || '（命令执行成功，无输出）' })
         } else {
           // 非零退出码时优先用 stderr 作为错误信息，stdout 作为补充

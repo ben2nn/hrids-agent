@@ -1,19 +1,20 @@
 import { writeFileSync, mkdirSync } from 'fs'
 import { dirname, resolve } from 'path'
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import { buildTool } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { checkWritePath } from '../core/pathSafety.js'
 import { getGlobalCwd } from '../core/cwd.js'
 import { getCurrentAgentName } from '../core/coordinator/agentContext.js'
 import { getFileLeaseManager } from '../core/FileLeaseManager.js'
+import { invalidateFileCache } from './FileReadTool.js'
 
 const inputSchema = z.object({
   path: z.string().describe('要写入的文件路径'),
   content: z.string().describe('文件内容'),
 })
 
-export const FileWriteTool: ToolDef<typeof inputSchema> = {
+export const FileWriteTool = buildTool({
   name: 'file_write',
   description: `创建新文件或覆盖已有文件。用这个而不是 bash echo > file。
 适用场景：创建新文件、生成报告、导出数据
@@ -63,6 +64,8 @@ export const FileWriteTool: ToolDef<typeof inputSchema> = {
     try {
       mkdirSync(dirname(filePath), { recursive: true })
       writeFileSync(filePath, input.content, 'utf-8')
+      // 写入成功，清除文件读取缓存
+      invalidateFileCache(filePath)
       auditLog({ action: 'file_write', resource: filePath, result: 'allowed' })
       if (agentName) getFileLeaseManager().release(agentName, input.path)
       return { type: 'success', output: `文件已写入: ${filePath}` }
@@ -72,4 +75,4 @@ export const FileWriteTool: ToolDef<typeof inputSchema> = {
       return { type: 'error', message: `写入失败: ${String(err)}` }
     }
   },
-}
+})

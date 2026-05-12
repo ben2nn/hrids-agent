@@ -17,7 +17,7 @@
 ├── config.yaml              # 主配置（YAML 优先，JSON 降级兼容）
 ├── config.json              # [兼容] 旧格式，YAML 不存在时降级读取
 ├── mcp.json                 # [已有] MCP 服务器配置
-├── agents.d/                # 全局 Agent Profile 目录
+├── specialists/                # 全局 Agent Profile 目录
 │   ├── code-reviewer.yaml
 │   ├── test-runner.yaml
 │   └── researcher.yaml
@@ -32,7 +32,7 @@
 ```
 <project>/.hrids/
 ├── config.yaml              # 项目级配置覆盖
-├── agents.d/                # 项目级 Agent Profile
+├── specialists/                # 项目级 Agent Profile
 │   └── project-architect.yaml
 └── roles/                   # 项目级角色模板
     └── project-architect.md
@@ -223,7 +223,7 @@ logging:
   theme: default
 ```
 
-独立的 Agent Profile 示例（`agents.d/code-reviewer.yaml`）：
+独立的 Agent Profile 示例（`specialists/code-reviewer.yaml`）：
 ```yaml
 name: code-reviewer
 description: 审查代码质量、安全性和最佳实践

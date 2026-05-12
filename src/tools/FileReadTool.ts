@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, statSync } from 'fs'
 import { resolve } from 'path'
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import { buildTool } from '../core/Tool.js'
 import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
@@ -14,13 +14,70 @@ const inputSchema = z.object({
 const MAX_LINES = 2000
 const MAX_FILE_SIZE = 1024 * 1024 // 1MB
 
-export const FileReadTool: ToolDef<typeof inputSchema> = {
+// 大文件自动预览常量（参考 DeepSeek-Reasonix read_file 设计）
+const AUTO_PREVIEW_THRESHOLD = 200  // 超过此行数触发自动预览
+const PREVIEW_HEAD_LINES = 80
+const PREVIEW_TAIL_LINES = 40
+const OUTLINE_MAX_ENTRIES = 30
+
+const EXPORT_RE = /^export\s+(default\s+)?(async\s+)?(function|class|const|let|var|interface|type|enum)\s+(\w+)/
+
+function extractExportOutline(lines: string[]): string | null {
+  const entries: Array<{ line: number; text: string }> = []
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(EXPORT_RE)
+    if (match) {
+      entries.push({ line: i + 1, text: match[0].replace(/\s*\{.*/, '').replace(/\s*=\s*.*/, '') })
+    }
+  }
+  if (entries.length === 0) return null
+
+  const display = entries.length > OUTLINE_MAX_ENTRIES
+    ? [...entries.slice(0, 25), { line: -1, text: `... ${entries.length - 25} more ...` }, ...entries.slice(-5)]
+    : entries
+
+  return display
+    .map(e => e.line === -1 ? e.text : `  L${String(e.line).padStart(4)}: ${e.text}`)
+    .join('\n')
+}
+
+/**
+ * 文件读取缓存（参考 claude-code-main 的 readFileState 设计）
+ *
+ * 缓存已读取的文件内容和 mtime，避免重复读取相同文件浪费 token。
+ * 写操作（FileWriteTool、FileEditTool）应调用 invalidateCache() 清除缓存。
+ */
+interface FileCacheEntry {
+  content: string
+  timestamp: number  // mtime (ms)
+  totalLines: number
+}
+
+const readFileState = new Map<string, FileCacheEntry>()
+
+/**
+ * 使文件缓存失效（供写操作调用）
+ * @param filePath 文件路径（绝对路径）
+ */
+export function invalidateFileCache(filePath: string): void {
+  readFileState.delete(filePath)
+}
+
+/**
+ * 使所有缓存失效（会话切换时调用）
+ */
+export function clearFileCache(): void {
+  readFileState.clear()
+}
+
+export const FileReadTool = buildTool({
   name: 'file_read',
   description: `读取文件内容。用这个而不是 bash cat。
 适用场景：查看代码、配置文件、日志、数据文件
 不适用场景：搜索文件中的文本 → 用 grep | 查找文件路径 → 用 glob`,
   inputSchema,
   readonly: true,
+  stormExempt: true,  // 只读操作，豁免风暴检测
   capabilities: { parallelSafe: true },
 
   describe(input) {
@@ -47,9 +104,52 @@ export const FileReadTool: ToolDef<typeof inputSchema> = {
         }
       }
 
+      const currentMtime = Math.floor(stat.mtimeMs)
+
+      // 检查缓存：文件未变化且无范围参数时返回缓存提示
+      const cached = readFileState.get(filePath)
+      if (cached && cached.timestamp === currentMtime && !input.startLine && !input.endLine) {
+        return {
+          type: 'success',
+          output: `[文件未变化，使用缓存]\n${cached.content.slice(0, 200)}${cached.content.length > 200 ? '...' : ''}`,
+        }
+      }
+
       const content = readFileSync(filePath, 'utf-8')
       const allLines = content.split('\n')
       const totalLines = allLines.length
+
+      // 更新缓存（仅完整读取时）
+      if (!input.startLine && !input.endLine) {
+        readFileState.set(filePath, {
+          content,
+          timestamp: currentMtime,
+          totalLines,
+        })
+      }
+
+      // 大文件自动预览：head+tail+outline，节省 token
+      if (!input.startLine && !input.endLine && totalLines > AUTO_PREVIEW_THRESHOLD) {
+        const lineNumWidth = String(totalLines).length
+        const fmtLine = (num: number, text: string) =>
+          `${String(num).padStart(lineNumWidth, ' ')} │ ${text}`
+
+        const head = allLines.slice(0, PREVIEW_HEAD_LINES)
+        const tail = allLines.slice(-PREVIEW_TAIL_LINES)
+        const outline = extractExportOutline(allLines)
+        const omitted = totalLines - PREVIEW_HEAD_LINES - PREVIEW_TAIL_LINES
+
+        const preview = [
+          `# 文件预览: ${input.path} (${totalLines} 行)`,
+          `# 使用 startLine/endLine 参数读取特定范围\n`,
+          ...head.map((line, i) => fmtLine(i + 1, line)),
+          `\n... 省略 ${omitted} 行 ...\n`,
+          ...tail.map((line, i) => fmtLine(totalLines - PREVIEW_TAIL_LINES + i + 1, line)),
+          outline ? `\n# 导出符号轮廓\n${outline}` : '',
+        ].join('\n')
+
+        return { type: 'success', output: preview }
+      }
 
       // 确定读取范围
       const startIdx = input.startLine !== undefined ? Math.max(0, input.startLine - 1) : 0
@@ -86,4 +186,4 @@ export const FileReadTool: ToolDef<typeof inputSchema> = {
       return { type: 'error', message: `读取失败: ${String(err)}` }
     }
   },
-}
+})

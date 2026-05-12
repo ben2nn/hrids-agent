@@ -781,7 +781,7 @@ CLI 参数 > config.yaml > 默认值
 ├── crons.json             # 定时任务 (持久化)
 ├── skills-disabled.json   # 禁用技能列表
 ├── zhile-session.json     # 知了专属会话绑定
-├── agents.d/              # Agent Profile 目录 (YAML/Markdown)
+├── specialists/              # Agent Profile 目录 (YAML/Markdown)
 ├── roles/                 # 角色 Prompt 模板目录 (Markdown)
 ├── sessions/              # 会话历史
 ├── memory/                # 长期记忆 (SQLite)

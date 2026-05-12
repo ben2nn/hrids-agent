@@ -8,6 +8,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, cpSync, rmSync } fr
 import { resolve, join } from 'path'
 import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
+import { invalidateFileCache } from './FileReadTool.js'
 import { getGlobalCwd } from '../core/cwd.js'
 import { getConfigDir } from '../core/Config.js'
 
@@ -515,6 +516,7 @@ export const SkillHubInstallTool: ToolDef<typeof installSchema> = {
 
         mkdirSync(targetDir, { recursive: true })
         writeFileSync(targetMd, content, 'utf-8')
+        invalidateFileCache(targetMd)
 
         // 写入 lockfile
         const lock = loadLockfile(skillsDir)
@@ -882,6 +884,7 @@ function saveLockfile(skillsDir: string, lock: LockFile): void {
   mkdirSync(skillsDir, { recursive: true })
   const lockPath = join(skillsDir, LOCKFILE_NAME)
   writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n', 'utf-8')
+  invalidateFileCache(lockPath)
 }
 
 /** 版本比较：candidate 是否比 current 更新 */

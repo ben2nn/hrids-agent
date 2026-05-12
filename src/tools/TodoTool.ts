@@ -6,6 +6,7 @@ import type { ToolDef } from '../core/Tool.js'
 import { getConfigDir } from '../core/Config.js'
 import { auditLog } from '../core/audit.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
+import { invalidateFileCache } from './FileReadTool.js'
 
 // ─── 数据类型定义 ────────────────────────────────────────────────────────────
 
@@ -104,6 +105,7 @@ function saveTodos(todos: Todo[], filePath?: string): void {
   // 先写临时文件，再原子替换
   writeFileSync(tmpPath, JSON.stringify(todos, null, 2), 'utf-8')
   renameSync(tmpPath, targetPath)
+  invalidateFileCache(targetPath)
 }
 
 // ─── 系统自增 id 分配 ─────────────────────────────────────────────────────────

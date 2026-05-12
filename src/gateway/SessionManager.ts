@@ -6,6 +6,8 @@ import { QueryEngine } from '../core/QueryEngine.js'
 import type { Message, ContentBlock, ImageSource } from '../core/QueryEngine.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { ALL_TOOLS } from '../tools/index.js'
+import { ToolRegistry } from '../core/ToolRegistry.js'
+import { clearFileCache } from '../tools/FileReadTool.js'
 import { createAgentTool } from '../tools/AgentTool.js'
 import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
@@ -83,6 +85,7 @@ export class SessionManager {
     if (this.sessions.size >= this.config.maxSessions!) {
       throw new Error(`已达到最大会话数限制（${this.config.maxSessions}）`)
     }
+    clearFileCache()
 
     const agentConfig = loadConfig()
     const model = req.model ?? agentConfig.model
@@ -208,10 +211,11 @@ export class SessionManager {
 
     const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd, sessionId)
 
+    const registry = new ToolRegistry().registerAll(tools)
     session.engine = new QueryEngine({
       provider,
       systemPrompt,
-      tools,
+      registry,
       permissions,
       maxTokens: agentConfig.maxTokens,
       maxTurns: agentConfig.maxTurns,
@@ -313,6 +317,7 @@ export class SessionManager {
     destroyMemoryStackForSession(id)
     destroyMemoryStoreForSession(id)
     this.sessions.delete(id)
+    clearFileCache()
   }
 
   // 优雅关闭：等待所有进行中的任务完成后再销毁

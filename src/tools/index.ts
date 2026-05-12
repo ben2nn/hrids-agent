@@ -17,6 +17,7 @@ import { TEAM_TOOLS } from './TeamTools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
 import { WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListTool } from './WorkdirTools.js'
 import type { ToolDef } from '../core/Tool.js'
+import { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
 
 // 根据平台选择 shell 工具：Windows 使用 PowerShellTool，其他平台使用 BashTool
 const shellTool = process.platform === 'win32' ? PowerShellTool : BashTool
@@ -32,6 +33,7 @@ export {
 }
 export { TEAM_TOOLS } from './TeamTools.js'
 export { MEMORY_TOOLS } from '../memory/index.js'
+export { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
 
 export const ALL_TOOLS: ToolDef[] = [
   shellTool,  // Windows → PowerShellTool，Linux/macOS → BashTool
@@ -67,3 +69,114 @@ export const ALL_TOOLS: ToolDef[] = [
   ...TEAM_TOOLS,
   ...MEMORY_TOOLS,
 ]
+
+/**
+ * 注册文件系统工具到 ToolRegistry
+ *
+ * 使用方式：
+ * ```typescript
+ * import { ToolRegistry, registerFilesystemTools } from './tools/index.js'
+ *
+ * const registry = new ToolRegistry()
+ * registerFilesystemTools(registry)
+ * ```
+ */
+export const registerFilesystemTools = createBatchRegistrar((registry: ToolRegistry) => {
+  registry.register(FileReadTool)
+  registry.register(FileWriteTool)
+  registry.register(FileEditTool)
+  registry.register(GlobTool)
+  registry.register(GrepTool)
+})
+
+/**
+ * 注册 Shell 工具到 ToolRegistry
+ *
+ * 使用方式：
+ * ```typescript
+ * import { ToolRegistry, registerShellTools } from './tools/index.js'
+ *
+ * const registry = new ToolRegistry()
+ * registerShellTools(registry)
+ * ```
+ */
+export const registerShellTools = createBatchRegistrar((registry: ToolRegistry) => {
+  registry.register(shellTool)
+})
+
+/**
+ * 注册 Web 工具到 ToolRegistry
+ *
+ * 使用方式：
+ * ```typescript
+ * import { ToolRegistry, registerWebTools } from './tools/index.js'
+ *
+ * const registry = new ToolRegistry()
+ * registerWebTools(registry)
+ * ```
+ */
+export const registerWebTools = createBatchRegistrar((registry: ToolRegistry) => {
+  registry.register(WebFetchTool)
+  registry.register(WebSearchTool)
+})
+
+/**
+ * 注册任务管理工具到 ToolRegistry
+ *
+ * 使用方式：
+ * ```typescript
+ * import { ToolRegistry, registerTodoTools } from './tools/index.js'
+ *
+ * const registry = new ToolRegistry()
+ * registerTodoTools(registry)
+ * ```
+ */
+export const registerTodoTools = createBatchRegistrar((registry: ToolRegistry) => {
+  registry.register(TodoWriteTool)
+  registry.register(TodoUpdateTool)
+  registry.register(TodoAppendTool)
+  registry.register(TodoResetTool)
+  registry.register(TodoReadTool)
+})
+
+/**
+ * 注册所有核心工具到 ToolRegistry
+ *
+ * 使用方式：
+ * ```typescript
+ * import { ToolRegistry, registerAllCoreTools } from './tools/index.js'
+ *
+ * const registry = new ToolRegistry()
+ * registerAllCoreTools(registry)
+ * ```
+ */
+export const registerAllCoreTools = createBatchRegistrar((registry: ToolRegistry) => {
+  // 文件系统工具
+  registerFilesystemTools(registry)
+  // Shell 工具
+  registerShellTools(registry)
+  // Web 工具
+  registerWebTools(registry)
+  // 任务管理工具
+  registerTodoTools(registry)
+  // 其他核心工具
+  registry.register(AskUserTool)
+  registry.register(DecisionTool)
+  registry.register(ScheduleCronTool)
+  registry.register(SkillTool)
+  registry.register(SkillListTool)
+  registry.register(SkillSaveTool)
+  registry.register(SkillHubConfigTool)
+  registry.register(SkillHubSearchTool)
+  registry.register(SkillHubInstallTool)
+  registry.register(SkillHubRecommendTool)
+  registry.register(SkillHubSetupTool)
+  registry.register(WorkdirInitTool)
+  registry.register(WorkdirDeliverTool)
+  registry.register(WorkdirCleanupTool)
+  registry.register(WorkdirListTool)
+  // 团队工具
+  registry.registerAll(TEAM_TOOLS)
+  // 记忆工具
+  registry.registerAll(MEMORY_TOOLS)
+})

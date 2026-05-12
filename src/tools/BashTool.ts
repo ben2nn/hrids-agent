@@ -7,6 +7,7 @@ import { auditLog } from '../core/audit.js'
 import { logger } from '../core/logger.js'
 import { isDangerousRemovalPath } from '../core/pathSafety.js'
 import { checkCommandSafetyPermission } from '../core/CommandSafety.js'
+import { clearFileCache } from './FileReadTool.js'
 
 // cwd 管理已迁移到 src/core/cwd.ts，此处重新导出保持向后兼容
 export { getGlobalCwd, setGlobalCwd, runWithCwd } from '../core/cwd.js'
@@ -25,6 +26,9 @@ const inputSchema = z.object({
     '  - 不确定时宁可设大，超时会强制终止进程'
   ),
 })
+
+// 只读命令白名单（plan-mode 下允许执行）
+const READONLY_COMMANDS = /^(ls|cat|head|tail|wc|file|stat|which|whereis|type|echo|printf|date|whoami|hostname|uname|pwd|env|printenv|set|alias|history|df|du|free|uptime|id|groups|finger|last|lastlog|w|who|ps|top|htop|pgrep|lsof|netstat|ss|ip|ifconfig|ping|traceroute|dig|nslookup|host|curl|wget|git|npm|pip|docker|kubectl)\b/
 
 // 危险命令黑名单（Linux/macOS）
 const BLOCKED_PATTERNS = [
@@ -70,6 +74,15 @@ export const BashTool: ToolDef<typeof inputSchema> = {
   inputSchema,
   readonly: false,
   capabilities: { requiresShell: true, parallelSafe: false, maxExecutionTimeMs: 120_000 },
+
+  /**
+   * 动态只读检查：白名单命令在 plan-mode 下视为只读
+   *  readOnlyCheck 设计
+   */
+  readOnlyCheck(input) {
+    const cmd = input.command.trim()
+    return READONLY_COMMANDS.test(cmd)
+  },
 
   describe(input) {
     return `执行命令: ${input.command}`
@@ -180,6 +193,10 @@ export const BashTool: ToolDef<typeof inputSchema> = {
         const output = Buffer.concat(outputChunks).toString('utf-8')
         const stderrOutput = Buffer.concat(stderrChunks).toString('utf-8')
         if (code === 0) {
+          // 写命令成功后清除文件缓存（shell 可能修改了任意文件）
+          if (!READONLY_COMMANDS.test(input.command.trim())) {
+            clearFileCache()
+          }
           resolve({ type: 'success', output: output || '（命令执行成功，无输出）' })
         } else {
           // 非零退出码时优先用 stderr 作为错误信息，stdout 作为补充

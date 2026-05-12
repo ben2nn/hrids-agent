@@ -1,6 +1,6 @@
 ﻿import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { Box, Text, useInput, useApp } from 'ink'
-import TextInput from 'ink-text-input'
+import { SimpleTextInput } from './SimpleTextInput.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { CommandRegistry } from '../core/CommandRegistry.js'
 import type { CommandContext } from '../core/CommandRegistry.js'
@@ -499,12 +499,11 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             <Box flexDirection="column">
               <Text color="yellow">{askUserPrompt}</Text>
               <Box>
-                <Text color="cyan">{'› '}</Text>
-                <TextInput
+                <SimpleTextInput
                   value={input}
                   onChange={setInput}
                   onSubmit={handleSubmit}
-                  placeholder="输入回答..."
+                  prefix="› "
                 />
               </Box>
             </Box>
@@ -513,12 +512,11 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           ? <Text color="yellow" dimColor>▸ 思考中...</Text>
           : (
             <Box>
-              <Text color="cyan">{'› '}</Text>
-              <TextInput
+              <SimpleTextInput
                 value={input}
                 onChange={setInput}
                 onSubmit={handleSubmit}
-                placeholder="输入消息或 /命令..."
+                prefix="› "
               />
             </Box>
           )

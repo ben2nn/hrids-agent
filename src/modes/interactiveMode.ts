@@ -83,6 +83,12 @@ export async function runInteractiveMode(
     void autoDistillSkill(engine, provider, skillDistill)
   }
 
+  // ── 禁用终端回显 ──
+  // 必须在 render() 前设置，防止击键被终端直接回显到光标位置（与 InkRenderer 冲突导致光标漂移）
+  if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+    process.stdin.setRawMode(true)
+  }
+
   // ── 进入 alternate screen（参考 claude-code 的 DEC 1049 方案）──
   // 必须在 render() 前发送，确保 Ink 的第一帧渲染到独立缓冲区
   process.stdout.write('\x1b[?1049h\x1b[H')
@@ -119,9 +125,12 @@ export async function runInteractiveMode(
 
     await waitUntilExit()
   } finally {
-    // ── 清理：恢复光标 + stderr + 退出 alternate screen ──
+    // ── 清理：恢复光标 + stderr + raw mode + 退出 alternate screen ──
     renderer.showCursor()
     restoreStderr()
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+      process.stdin.setRawMode(false)
+    }
     process.stdout.write('\x1b[?1049l')
     await disconnectAllMcp()
   }

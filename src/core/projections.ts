@@ -14,7 +14,21 @@ import type { ChatMessage } from './providers/types.js'
 // ── 常量 ────────────────────────────────────────────────────────
 
 /** 单条 tool_result 内容截断上限 */
-const MAX_TOOL_RESULT_CHARS = 12000
+export const MAX_TOOL_RESULT_CHARS = 12000
+
+/**
+ * 截断工具结果：head+tail 策略
+ * 保留前 90% 和尾部 1KB，确保错误信息（通常在末尾）不丢失。
+ *  truncateForModel 设计。
+ */
+export function truncateToolResult(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content
+  const tailReserve = 1024
+  const headChars = maxChars - tailReserve
+  const head = content.slice(0, headChars)
+  const tail = content.slice(-tailReserve)
+  return `${head}\n\n... [已截断 ${content.length - maxChars} 字符] ...\n\n${tail}`
+}
 /** 旧 tool_result 超过此字符数时替换为占位符 */
 const PRUNE_THRESHOLD = 800
 const PRUNED_PLACEHOLDER = '[旧工具输出已清除以节省上下文空间]'
@@ -331,7 +345,7 @@ export function applyToolResultBudget(
       if (block.type !== 'tool_result') return block
       if (block.content.length <= MAX_TOOL_RESULT_CHARS) return block
       changed = true
-      return { ...block, content: block.content.slice(0, MAX_TOOL_RESULT_CHARS) + '\n...[已截断]' }
+      return { ...block, content: truncateToolResult(block.content, MAX_TOOL_RESULT_CHARS) }
     })
     return changed ? { ...msg, content: newContent } : msg
   })

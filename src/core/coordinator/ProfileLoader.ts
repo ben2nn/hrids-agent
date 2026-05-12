@@ -1,6 +1,6 @@
 // Agent Profile 加载器 —— 从多目录加载智能体角色模板
 // 支持 YAML 文件和 Markdown Frontmatter 两种格式
-// 优先级：项目级 .hrids/agents.d/ > 全局 ~/.hrids/agents.d/ > config.yaml 内联 profiles
+// 优先级：项目级 .hrids/specialists/ > 全局 ~/.hrids/specialists/ > config.yaml 内联 profiles
 
 import { existsSync, readFileSync, readdirSync } from 'fs'
 import { join, resolve as resolvePath } from 'path'
@@ -11,7 +11,7 @@ import { homedir } from 'os'
 
 // ── 默认扫描目录 ──────────────────────────────────────────────
 
-const GLOBAL_AGENTS_DIR = join(getConfigDir(), 'agents.d')
+const GLOBAL_AGENTS_DIR = join(getConfigDir(), 'specialists')
 const GLOBAL_ROLES_DIR = join(getConfigDir(), 'roles')
 
 // ── Markdown Frontmatter 解析 ─────────────────────────────────
@@ -154,20 +154,20 @@ export function loadProfilesFromDir(dir: string): AgentProfile[] {
  * 应在 main.ts 启动时调用一次。
  *
  * @param extraDirs 额外扫描的目录（如 config.multiAgent.profileDirs）
- * @param projectRoot 项目根目录，用于查找项目级 .hrids/agents.d/
+ * @param projectRoot 项目根目录，用于查找项目级 .hrids/specialists/
  */
 export function initProfileLoader(extraDirs?: string[], projectRoot?: string) {
   const dirs: string[] = []
 
-  // 项目级 .hrids/agents.d/（优先级最高）
+  // 项目级 .hrids/specialists/（优先级最高）
   if (projectRoot) {
-    const projectDir = resolvePath(projectRoot, '.hrids', 'agents.d')
+    const projectDir = resolvePath(projectRoot, '.hrids', 'specialists')
     if (existsSync(projectDir)) {
       dirs.push(projectDir)
     }
   }
 
-  // 全局 ~/.hrids/agents.d/
+  // 全局 ~/.hrids/specialists/
   if (existsSync(GLOBAL_AGENTS_DIR)) {
     dirs.push(GLOBAL_AGENTS_DIR)
   }

@@ -1,16 +1,20 @@
 import type { LLMProvider } from './providers/index.js'
 import type { ToolDef, ToolResult } from './Tool.js'
+import { isReadOnlyCall } from './Tool.js'
+import type { ToolRegistry } from './ToolRegistry.js'
 import type { PermissionManager } from './PermissionManager.js'
 import { CostTracker } from './CostTracker.js'
 import { logger } from './logger.js'
 import { auditLog } from './audit.js'
-import { parseDsml, hasDsmlMarker } from './DsmlParser.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
+import { clearFileCache } from '../tools/FileReadTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
 import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent, createRequestCompleteEvent, createSystemEvent, createToolExecutionEvent } from './ConversationStore.js'
-import { projectForDisplay, projectForLLM, estimateEventTokens } from './projections.js'
+import { projectForDisplay, projectForLLM, estimateEventTokens, MAX_TOOL_RESULT_CHARS, truncateToolResult } from './projections.js'
 import { withRetryStream } from './retry.js'
+import { StormBreaker } from './StormBreaker.js'
+import { partitionToolCalls, type ToolCall } from './ToolScheduler.js'
 
 const log = logger.child({ component: 'query-engine' })
 
@@ -106,7 +110,7 @@ export interface ImageSource {
 export interface QueryEngineConfig {
   provider: LLMProvider
   systemPrompt: string[]
-  tools: ToolDef[]
+  registry: ToolRegistry
   permissions: PermissionManager
   maxTokens?: number
   maxTurns?: number
@@ -167,6 +171,14 @@ export class QueryEngine {
    * 刷新时机：executeOneTool 检测到 todo_* 工具调用成功后立即调用 loadTodos() 更新。
    */
   private activeTodoSnapshot: Todo[] | null = null
+  /** Storm Breaker — 防重复调用风暴 */
+  private stormBreaker = new StormBreaker()
+  /** 工具调用计数器（用于 Storm Breaker 滑动窗口） */
+  private totalToolCalls = 0
+  /** max_output_tokens 恢复重试上限 */
+  private static readonly MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
+  /** todo 工具集合（postExecution 刷新快照用） */
+  private static readonly TODO_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset', 'todo_read'])
 
   constructor(config: QueryEngineConfig, store?: ConversationStore) {
     this.config = config
@@ -327,14 +339,7 @@ ${contentToSummarize}
     const isPlanMode = this.config.permissions.getMode() === 'plan'
     const toolsForLLM = this.chatMode
       ? []  // chat 模式：不传任何工具，模型只能直接回复
-      : isPlanMode
-        ? this.config.tools.map(t =>
-            t.readonly ? t : {
-              ...t,
-              description: t.description + '\n[Plan 模式：此工具当前不可用，调用将被拒绝]',
-            }
-          )
-        : this.config.tools
+      : this.config.registry.getToolsForLLM(isPlanMode)
 
     log.debug('调用 LLM stream', { model: this.config.provider.model, turn: turns })
 
@@ -365,14 +370,7 @@ ${contentToSummarize}
           thinkingText += chunk.delta
         } else if (chunk.type === 'text_delta' && chunk.delta) {
           fullText += chunk.delta
-          // dsml 模式：检测到 DSML invoke 标记后停止流式发出，等流结束后统一解析。
-          // native 模式：直接流式发出，不做 DSML 检测（避免误判正常文本中的 DSML 字样）。
-          // TODO: DSML 解析暂时关闭，强制走 native 模式
-          const isDsmlMode = false // this.config.provider.toolMode === 'dsml'
-          if (!isDsmlMode || !hasDsmlMarker(fullText)) {
-            yield { type: 'text_delta', delta: chunk.delta }
-          }
-          // dsml 模式且已出现 DSML invoke 标记：停止发出后续 delta，等流结束后统一处理
+          yield { type: 'text_delta', delta: chunk.delta }
         } else if (chunk.type === 'tool_call' && chunk.toolCall) {
           toolCalls.push(chunk.toolCall)
         } else if (chunk.type === 'usage' && chunk.usage) {
@@ -414,53 +412,43 @@ ${contentToSummarize}
     yield { type: '__llm_result__', fullText, thinkingText, toolCalls, hitMaxOutputTokens }
   }
 
-  // ── 执行单个工具调用，返回 tool_result ContentBlock ──────────────────────────
-  private async *executeOneTool(
+  // ── 工具执行辅助方法 ──────────────────────────────────────────────────────
+
+  /**
+   * 阶段 1：工具查找 + 权限检查 + Zod 校验 + Storm Breaker。
+   * 成功返回 { ok: true, ... }，失败返回 { ok: false, ... }。
+   * 调用方负责 yield 事件（通过返回的 events 数组）。
+   */
+  private async validateAndPrepareTool(
     tc: { id: string; name: string; input: unknown },
-  ): AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: ContentBlock }> {
-    const startTime = Date.now()
-    let execStatus: 'success' | 'error' | 'denied' | 'aborted' = 'success'
-    let outputPreview: string | undefined
-    let errorSummary: string | undefined
+  ): Promise<
+    | { ok: true; tool: ToolDef; effectiveInput: unknown; events: StreamEvent[] }
+    | { ok: false; execStatus: 'error' | 'denied'; errorSummary: string; resultContent: string; events: StreamEvent[] }
+  > {
+    const events: StreamEvent[] = []
 
-    const logQueue: string[] = []
-    const onLog = (line: string) => { logQueue.push(line) }
-
-    try {
-
-    // 查找工具
-    const tool = this.config.tools.find(t => t.name === tc.name)
+    const tool = this.config.registry.get(tc.name)
     if (!tool) {
-      execStatus = 'error'
-      errorSummary = `未找到工具: ${tc.name}`
-      yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description: tc.name }
-      yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errorSummary } }
-      yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: `错误: ${errorSummary}`, is_error: true } }
-      return
+      const errorSummary = `未找到工具: ${tc.name}`
+      events.push(
+        { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description: tc.name },
+        { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errorSummary } },
+      )
+      return { ok: false, execStatus: 'error', errorSummary, resultContent: `错误: ${errorSummary}`, events }
     }
 
     const description = tool.describe?.(tc.input) ?? tc.name
-    yield { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description }
+    events.push({ type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description })
     log.debug('工具开始执行', { toolName: tc.name, toolId: tc.id, description })
 
     // 第一道：工具级硬拦截（checkPermission）
-    // 在询问用户之前先做硬检查，避免用户被询问无论如何都会被拦截的危险操作。
     if (tool.checkPermission) {
       const hardCheck = await tool.checkPermission(tc.input as never)
       if (!hardCheck.granted) {
-        execStatus = 'denied'
-        errorSummary = hardCheck.reason
         log.info('工具硬拦截', { toolName: tc.name, reason: hardCheck.reason })
-        auditLog({
-          action: 'permission_denied',
-          resource: tc.name,
-          result: 'denied',
-          permissionMode: this.config.permissions.getMode(),
-          details: { reason: hardCheck.reason, stage: 'hard_check' },
-        })
-        yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: hardCheck.reason } }
-        yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: `错误: ${hardCheck.reason}`, is_error: true } }
-        return
+        auditLog({ action: 'permission_denied', resource: tc.name, result: 'denied', permissionMode: this.config.permissions.getMode(), details: { reason: hardCheck.reason, stage: 'hard_check' } })
+        events.push({ type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: hardCheck.reason } })
+        return { ok: false, execStatus: 'denied', errorSummary: hardCheck.reason, resultContent: `错误: ${hardCheck.reason}`, events }
       }
     }
 
@@ -468,28 +456,12 @@ ${contentToSummarize}
     const filePath = tool.getFilePath?.(tc.input as never)
     const ruleContent = tool.getRuleContent?.(tc.input as never)
     const allowed = await this.config.permissions.check({
-      toolName: tc.name,
-      description,
-      isReadonly: tool.readonly,
-      isDestructive: tool.isDestructive,
-      filePath,
-      ruleContent,
+      toolName: tc.name, description, isReadonly: isReadOnlyCall(tool, tc.input),
+      isDestructive: tool.isDestructive, filePath, ruleContent,
     })
-
     if (!allowed) {
       log.info('权限拒绝', { toolName: tc.name, description })
-      auditLog({
-        action: 'permission_denied',
-        resource: tc.name,
-        result: 'denied',
-        permissionMode: this.config.permissions.getMode(),
-        details: { description },
-      })
-      execStatus = 'denied'
-      errorSummary = `权限拒绝: ${description}`
-      yield { type: 'permission_denied', id: tc.id, toolName: tc.name, description }
-
-      // 构建拒绝原因，根据模式和拒绝追踪状态给出不同提示
+      auditLog({ action: 'permission_denied', resource: tc.name, result: 'denied', permissionMode: this.config.permissions.getMode(), details: { description } })
       let denyReason: string
       if (this.config.permissions.getMode() === 'plan') {
         denyReason = '[Plan 模式] 此操作在规划模式下被禁止。请继续完成规划，不要尝试执行写操作。'
@@ -499,8 +471,8 @@ ${contentToSummarize}
       } else {
         denyReason = '用户拒绝了此操作'
       }
-      yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: denyReason, is_error: true } }
-      return
+      events.push({ type: 'permission_denied', id: tc.id, toolName: tc.name, description })
+      return { ok: false, execStatus: 'denied', errorSummary: `权限拒绝: ${description}`, resultContent: denyReason, events }
     }
 
     // 写操作记录审计日志
@@ -508,22 +480,13 @@ ${contentToSummarize}
       auditLog({ action: tc.name as never, resource: description, result: 'allowed', details: { toolName: tc.name } })
     }
 
-    // Zod 参数校验：在执行前验证 LLM 传入的参数格式，避免运行时崩溃
-    // effectiveInput 可能在自动修复后与 tc.input 不同，后续 execute 统一用 effectiveInput
+    // Zod 参数校验 + 自动修复
     let effectiveInput: unknown = tc.input
     if (tool.inputSchema) {
-      // 自动修复：LLM 传单个对象而非数组时（如 todos: {...} 而非 todos: [{...}]），
-      // 尝试将对象包装成数组后重新校验，避免因格式错误浪费一轮重试。
       const inputObj = tc.input as Record<string, unknown>
       if (inputObj && typeof inputObj === 'object' && !Array.isArray(inputObj)) {
-        const arrayFields = ['todos'] // 已知需要数组的字段名
-        for (const field of arrayFields) {
-          if (
-            field in inputObj &&
-            inputObj[field] !== null &&
-            typeof inputObj[field] === 'object' &&
-            !Array.isArray(inputObj[field])
-          ) {
+        for (const field of ['todos']) {
+          if (field in inputObj && inputObj[field] !== null && typeof inputObj[field] === 'object' && !Array.isArray(inputObj[field])) {
             const patched = { ...inputObj, [field]: [inputObj[field]] }
             if (tool.inputSchema.safeParse(patched).success) {
               log.info('自动修复工具参数：将单个对象包装为数组', { toolName: tc.name, field })
@@ -533,121 +496,305 @@ ${contentToSummarize}
           }
         }
       }
-
       const parseResult = tool.inputSchema.safeParse(effectiveInput)
       if (!parseResult.success) {
-        const issues = parseResult.error.issues
-          .map(i => `  - ${i.path.join('.')}: ${i.message}`)
-          .join('\n')
+        const issues = parseResult.error.issues.map(i => `  - ${i.path.join('.')}: ${i.message}`).join('\n')
         const errMsg = `工具参数校验失败 [${tc.name}]:\n${issues}`
-        execStatus = 'error'
-        errorSummary = errMsg.slice(0, 200)
         log.warn('工具参数校验失败', { toolName: tc.name, issues: parseResult.error.issues })
-        yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errMsg } }
-        yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: `错误: ${errMsg}`, is_error: true } }
-        return
+        events.push({ type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errMsg } })
+        return { ok: false, execStatus: 'error', errorSummary: errMsg.slice(0, 200), resultContent: `错误: ${errMsg}`, events }
       }
     }
 
-    // 工具执行：用 Promise.race 统一处理超时、abort、正常完成三种情况
-    // 优先使用工具输入中指定的 timeout（如 bash 工具的 timeout 参数），否则用默认值 60 分钟
-    const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
-    const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
-      ? inputTimeout + 5000  // 比工具自身超时多 5s，确保工具先超时并返回错误信息
-      : 60 * 60 * 1000       // 默认 60 分钟（兜底，工具自身 timeout 是主要控制手段）
-
-    const toolPromise: Promise<ToolResult> = tool.execute(effectiveInput as never, { onLog })
-      .then(r => r)
-      .catch((e: unknown) => ({
-        type: 'error' as const,
-        message: `工具执行异常 [${tc.name}]: ${e instanceof Error ? e.message : String(e)}`,
-      }))
-
-    const timeoutPromise: Promise<ToolResult> = new Promise(resolve =>
-      setTimeout(() => resolve({
-        type: 'error',
-        message: `工具执行超时（超过 ${TOOL_TIMEOUT_MS / 1000}s）：${tc.name}`,
-      }), TOOL_TIMEOUT_MS)
-    )
-
-    const abortPromise: Promise<ToolResult> = new Promise(resolve => {
-      this.abortController.signal.addEventListener('abort', () =>
-        resolve({ type: 'error', message: '任务已被中止' }), { once: true }
-      )
-    })
-
-    // 用 Promise.race 竞争：工具完成 / 超时 / abort
-    // 每 30ms tick 一次 flush 日志，同时等待 race 结果
-    const racePromise = Promise.race([toolPromise, timeoutPromise, abortPromise])
-
-    let finalResult: ToolResult | undefined = undefined
-    while (true) {
-      const raceOrTick = await Promise.race([
-        racePromise,
-        new Promise<'tick'>(r => setTimeout(() => r('tick'), 30)),
-      ])
-      while (logQueue.length > 0) {
-        yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
-      }
-      if (raceOrTick !== 'tick') {
-        finalResult = raceOrTick
-        break
-      }
+    // Storm Breaker
+    this.totalToolCalls++
+    const stormError = this.stormBreaker.check(tc.name, effectiveInput, this.totalToolCalls, tool.stormExempt)
+    if (stormError) {
+      events.push({ type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: stormError } })
+      return { ok: false, execStatus: 'error', errorSummary: 'Storm Breaker 拦截', resultContent: stormError, events }
     }
 
-    // 刷新工具完成后残留的日志
-    while (logQueue.length > 0) {
-      yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
+    return { ok: true, tool, effectiveInput, events }
+  }
+
+  /**
+   * 阶段 3：执行后处理（Storm Breaker 清理、todo 快照刷新、结果截断）。
+   * 返回截断后的 __tool_result__ block 和 outputPreview。
+   */
+  private postExecution(
+    tc: { id: string; name: string; input: unknown },
+    tool: ToolDef,
+    finalResult: ToolResult,
+  ): { block: ContentBlock; outputPreview: string } {
+    if (finalResult.type === 'success' && !tool.readonly) {
+      this.stormBreaker.clearOnMutation()
     }
 
-    if (this.abortController.signal.aborted) {
-      execStatus = 'aborted'
-      errorSummary = '任务已被中止'
-      yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: '任务已被中止' } }
-      return
-    }
-
-    yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult }
-    log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type })
-
-    // todo 工具执行成功后刷新会话级任务快照。
-    // 只在成功时刷新（失败不改变任务状态，快照无需更新）。
-    // 覆盖所有会修改任务列表的工具：write / update / append / reset。
-    // todo_read 是只读工具，但也刷新快照，确保会话首次读取后快照不再为 null。
-    const TODO_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset', 'todo_read'])
-    if (TODO_TOOLS.has(tc.name) && finalResult.type === 'success') {
+    if (QueryEngine.TODO_TOOLS.has(tc.name) && finalResult.type === 'success') {
       try {
         this.activeTodoSnapshot = loadTodos()
         log.debug('任务快照已刷新', { toolName: tc.name, count: this.activeTodoSnapshot.length })
-      } catch {
-        // 读取失败不影响主流程，快照保持上次值
-      }
+      } catch { /* 读取失败不影响主流程 */ }
     }
 
     const resultContent = finalResult.type === 'success' ? finalResult.output : `错误: ${finalResult.message}`
-    outputPreview = resultContent.slice(0, 500)
-    // tool_result 内容截上限（写入事件时），与 projections.ts 中的常量保持一致
-    const MAX_TOOL_RESULT_CHARS = 12000
-    // 截断过长的工具输出，防止单条结果撑爆 history
-    const truncatedContent = resultContent.length > MAX_TOOL_RESULT_CHARS
-      ? resultContent.slice(0, MAX_TOOL_RESULT_CHARS)
-        + `\n...[输出过长，已截断，共 ${resultContent.length} 字符，当前仅显示前 ${MAX_TOOL_RESULT_CHARS} 字符。`
-        + `如需读取更多内容，请使用 file_read 工具并指定 startLine/endLine 参数分段读取。]...`
-      : resultContent
+    const outputPreview = resultContent.slice(0, 500)
+    const truncatedContent = truncateToolResult(resultContent, MAX_TOOL_RESULT_CHARS)
+    return {
+      block: { type: 'tool_result', tool_use_id: tc.id, content: truncatedContent, is_error: finalResult.type === 'error' },
+      outputPreview,
+    }
+  }
 
-    yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: truncatedContent, is_error: finalResult.type === 'error' } }
+  /**
+   * 无工具调用时的心跳协议判定。
+   * 返回 'break' 结束循环，'continue' 继续下一轮。
+   */
+  private resolveHeartbeat(
+    fullText: string,
+    hitMaxOutputTokens: boolean,
+    recoveryCount: number,
+    turns: number,
+    maxTurns: number,
+  ): { action: 'break' | 'continue'; newRecoveryCount: number } {
+    log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length })
+
+    // 输出被截断时注入继续指令，让 LLM 从中断处接着写，最多重试3次
+    if (hitMaxOutputTokens && recoveryCount < QueryEngine.MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
+      const newCount = recoveryCount + 1
+      log.info('输出被截断，注入继续指令', { turn: turns, recovery: newCount })
+      this.store.appendEvents(createUserMessageEvent(
+        '[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。',
+        this.currentRequestId ?? undefined,
+      ))
+      return { action: 'continue', newRecoveryCount: newCount }
+    }
+
+    // DONE 标记：立即结束
+    if (fullText.includes(HEARTBEAT_DONE)) {
+      log.debug('心跳协议：DONE，停止执行', { turn: turns })
+      return { action: 'break', newRecoveryCount: recoveryCount }
+    }
+
+    // 任务系统确认全部完成：结束
+    const allTasksDone = this.activeTodoSnapshot !== null &&
+      this.activeTodoSnapshot.length > 0 &&
+      this.activeTodoSnapshot.every(t => t.status === 'completed')
+    if (allTasksDone) {
+      log.debug('任务系统确认全部完成，停止执行', { turn: turns })
+      return { action: 'break', newRecoveryCount: recoveryCount }
+    }
+
+    // CONTINUE 标记但无工具调用：允许继续
+    if (fullText.includes(HEARTBEAT_CONTINUE)) {
+      if (turns < maxTurns) {
+        log.debug('心跳协议：CONTINUE（无工具调用），继续', { turn: turns })
+        return { action: 'continue', newRecoveryCount: recoveryCount }
+      }
+      log.debug('心跳协议：CONTINUE 但已达轮次上限，停止', { turn: turns })
+    }
+
+    // 无标记、无工具调用：自然结束
+    log.debug('无工具调用无心跳标记，自然结束', { turn: turns })
+    return { action: 'break', newRecoveryCount: recoveryCount }
+  }
+
+  /**
+   * 执行一批工具调用（按 parallelSafe 自动分区）。
+   * 通过 yield 流式产出事件，abort 时提前终止。
+   */
+  private async *executeToolBatches(
+    toolCalls: Array<{ id: string; name: string; input: unknown }>,
+  ): AsyncGenerator<StreamEvent> {
+    const batches = partitionToolCalls(toolCalls as ToolCall[], this.config.registry.getAll())
+    log.debug('本轮工具调用', {
+      tools: toolCalls.map(tc => tc.name),
+      batches: batches.map(b => ({ parallel: b.parallel, count: b.calls.length })),
+    })
+
+    for (const batch of batches) {
+      if (batch.parallel && batch.calls.length > 1) {
+        for await (const ev of this.executeBatch(batch.calls)) {
+          if (this.abortController.signal.aborted) return
+          yield ev
+        }
+      } else {
+        for (const tc of batch.calls) {
+          const gen = this.executeOneTool(tc)
+          let aborted = false
+          try {
+            for await (const ev of gen) {
+              if ('type' in ev && ev.type === '__tool_result__') {
+                const block = ev.block as { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+                this.store.appendEvents(createToolResultEvent(
+                  block.tool_use_id, tc.name, block.content,
+                  block.is_error === true, this.currentRequestId ?? undefined,
+                ))
+              } else {
+                yield ev as StreamEvent
+                if (this.abortController.signal.aborted) { aborted = true; break }
+              }
+            }
+          } finally {
+            if (aborted) await gen.return(undefined)
+          }
+          if (aborted) return
+        }
+      }
+    }
+  }
+
+  // ── 执行单个工具调用（主入口）──────────────────────────────────────────
+  private async *executeOneTool(
+    tc: { id: string; name: string; input: unknown },
+  ): AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: ContentBlock }> {
+    const startTime = Date.now()
+    let execStatus: 'success' | 'error' | 'denied' | 'aborted' = 'success'
+    let outputPreview: string | undefined
+    let errorSummary: string | undefined
+    const logQueue: string[] = []
+    const onLog = (line: string) => { logQueue.push(line) }
+
+    try {
+      // 阶段 1：校验 + 权限 + Storm Breaker
+      const prepared = await this.validateAndPrepareTool(tc)
+      for (const ev of prepared.events) yield ev
+
+      if (!prepared.ok) {
+        execStatus = prepared.execStatus
+        errorSummary = prepared.errorSummary
+        yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: prepared.resultContent, is_error: true } }
+        return
+      }
+
+      const { tool, effectiveInput } = prepared
+
+      // 阶段 2：工具执行（超时 + abort 竞争 + 日志 flush）
+      const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
+      const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
+        ? inputTimeout + 5000
+        : 60 * 60 * 1000
+
+      const toolPromise: Promise<ToolResult> = tool.execute(effectiveInput as never, { onLog })
+        .then(r => r)
+        .catch((e: unknown) => ({
+          type: 'error' as const,
+          message: `工具执行异常 [${tc.name}]: ${e instanceof Error ? e.message : String(e)}`,
+        }))
+
+      const timeoutPromise: Promise<ToolResult> = new Promise(resolve =>
+        setTimeout(() => resolve({ type: 'error', message: `工具执行超时（超过 ${TOOL_TIMEOUT_MS / 1000}s）：${tc.name}` }), TOOL_TIMEOUT_MS))
+
+      const abortPromise: Promise<ToolResult> = new Promise(resolve => {
+        this.abortController.signal.addEventListener('abort', () =>
+          resolve({ type: 'error', message: '任务已被中止' }), { once: true })
+      })
+
+      const racePromise = Promise.race([toolPromise, timeoutPromise, abortPromise])
+
+      let finalResult: ToolResult | undefined = undefined
+      while (true) {
+        const raceOrTick = await Promise.race([
+          racePromise,
+          new Promise<'tick'>(r => setTimeout(() => r('tick'), 30)),
+        ])
+        while (logQueue.length > 0) {
+          yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
+        }
+        if (raceOrTick !== 'tick') {
+          finalResult = raceOrTick
+          break
+        }
+      }
+
+      // flush 残留日志
+      while (logQueue.length > 0) {
+        yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
+      }
+
+      if (this.abortController.signal.aborted) {
+        execStatus = 'aborted'
+        errorSummary = '任务已被中止'
+        yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: '任务已被中止' } }
+        return
+      }
+
+      yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult }
+      log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type })
+
+      // 阶段 3：后处理
+      const post = this.postExecution(tc, tool, finalResult)
+      outputPreview = post.outputPreview
+      yield { type: '__tool_result__', block: post.block }
 
     } finally {
-      // 写入工具执行记录事件（审计用）
       this.store.appendEvents(createToolExecutionEvent(
-        tc.id,
-        tc.name,
-        Date.now() - startTime,
-        execStatus,
-        this.currentRequestId ?? undefined,
-        outputPreview,
-        errorSummary,
+        tc.id, tc.name, Date.now() - startTime, execStatus,
+        this.currentRequestId ?? undefined, outputPreview, errorSummary,
       ))
+    }
+  }
+
+  /**
+   * 并行执行一批 parallelSafe 工具调用，流式产出事件。
+   * 为每个 generator 维护独立的 pending promise，通过 Promise.race 竞争消费。
+   * 避免对同一 AsyncGenerator 并发调用 next() 导致 ERR_GENERATOR_ALREADY_EXECUTING。
+   */
+  private async *executeBatch(
+    calls: ToolCall[],
+  ): AsyncGenerator<StreamEvent> {
+    type GenResult = IteratorResult<StreamEvent | { type: '__tool_result__'; block: unknown }>
+    interface GenState {
+      tc: ToolCall
+      gen: AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: unknown }>
+      pending: Promise<GenResult>
+    }
+
+    // 启动所有 generator，为每个创建初始 next() promise
+    const gens: GenState[] = calls.map(tc => {
+      const gen = this.executeOneTool(tc)
+      const pending = gen.next()
+      return { tc, gen, pending }
+    })
+
+    const active = new Set(gens.map((_, i) => i))
+
+    try {
+      while (active.size > 0) {
+        // 竞争所有活跃 generator 的当前 pending promise
+        const racePromises = [...active].map(i =>
+          gens[i].pending.then(result => ({ i, done: result.done, value: result.value })),
+        )
+
+        const { i, done, value } = await Promise.race(racePromises)
+
+        if (done) {
+          active.delete(i)
+          continue
+        }
+
+        // 只对 winner generator 调用 next()，获取下一个 pending promise
+        // 其他 generator 的 pending 不变，避免并发 next() 问题
+        gens[i].pending = gens[i].gen.next()
+
+        const ev = value as StreamEvent | { type: '__tool_result__'; block: unknown }
+        if ('type' in ev && ev.type === '__tool_result__') {
+          const block = ev.block as { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+          this.store.appendEvents(createToolResultEvent(
+            block.tool_use_id, gens[i].tc.name, block.content,
+            block.is_error === true, this.currentRequestId ?? undefined,
+          ))
+        } else {
+          yield ev as StreamEvent
+        }
+
+        // abort 时跳出，由 finally 清理所有活跃 generator
+        if (this.abortController.signal.aborted) break
+      }
+    } finally {
+      // 确保所有活跃 generator 被正确关闭，触发其 finally 块（审计日志写入）
+      const cleanup = [...active].map(idx => gens[idx].gen.return(undefined))
+      await Promise.allSettled(cleanup)
     }
   }
 
@@ -721,7 +868,8 @@ ${contentToSummarize}
     const costBefore = this.costs.getCostUsd()
     const usageBefore = this.costs.getUsage()
     let exitStatus: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied' = 'completed'
-    let totalToolCalls = 0
+    this.totalToolCalls = 0  // 重置计数器（每个请求独立计数）
+    this.stormBreaker.reset()
     let errorMessage: string | undefined
 
     // 调用 onBeforeSend 钩子（动态更新 systemPrompt、保存会话等）
@@ -796,7 +944,6 @@ ${contentToSummarize}
     let lastKnownInputTokens = 0
     // max_output_tokens 恢复计数（最多重试3次，参考 claude-code）
     let maxOutputTokensRecoveryCount = 0
-    const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
 
     try {
       while (turns < maxTurns) {
@@ -892,116 +1039,19 @@ ${contentToSummarize}
           this.store.setLatestPreprocessed(null)
         }
 
-        // 没有工具调用：dsml 模式下尝试从文本中解析 DSML 格式工具调用
-        // native 模式下跳过，避免把正常文本中偶然出现的 DSML 字样误解析为工具调用
-        // TODO: DSML 解析暂时关闭，强制走 native 模式
-        const isDsmlMode = false // this.config.provider.toolMode === 'dsml'
-        if (isDsmlMode && toolCalls.length === 0 && hasDsmlMarker(fullText)) {
-          const dsmlResult = parseDsml(fullText)
-          if (dsmlResult.toolCalls.length > 0) {
-            log.info('从文本中解析到 DSML 工具调用', {
-              turn: turns,
-              count: dsmlResult.toolCalls.length,
-              tools: dsmlResult.toolCalls.map(t => t.name),
-            })
-            toolCalls.push(...dsmlResult.toolCalls)
-
-            // 补发清理后的正文 delta（之前在 streamOneTurn 中被缓冲了）
-            if (dsmlResult.cleanText) yield { type: 'text_delta', delta: dsmlResult.cleanText }
-
-            // DSML 解析出工具调用：追加新的 assistant 事件（包含解析出的工具调用）
-            // 注意：事件日志是 append-only，之前已追加的纯文本 assistant 事件保留
-            if (dsmlResult.cleanText || dsmlResult.toolCalls.length > 0) {
-              this.store.appendEvents(createAssistantMessageEvent(
-                dsmlResult.cleanText ?? '',
-                dsmlResult.toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input })),
-                this.currentRequestId ?? undefined,
-              ))
-            }
-          } else {
-            // 有 DSML invoke 标记但解析不出工具调用（格式不完整）：补发完整 fullText 给前端
-            yield { type: 'text_delta', delta: fullText }
-          }
-        }
-        // 注意：无 DSML 标记时 fullText 已在 streamOneTurn 中全部流式发出，无需补发
-
         // ── 无工具调用：心跳协议判定 ─────────────────────────────────
         if (toolCalls.length === 0) {
-          log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length })
-
-          // 输出被截断时注入继续指令，让 LLM 从中断处接着写，最多重试3次
-          if (hitMaxOutputTokens && maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
-            maxOutputTokensRecoveryCount++
-            log.info('输出被截断，注入继续指令', { turn: turns, recovery: maxOutputTokensRecoveryCount })
-            this.store.appendEvents(createUserMessageEvent(
-              '[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。',
-              this.currentRequestId ?? undefined,
-            ))
-            continue
-          }
-
-          // 心跳协议检测
-          const hasContinue = fullText.includes(HEARTBEAT_CONTINUE)
-          const hasDone = fullText.includes(HEARTBEAT_DONE)
-
-          // DONE 标记：立即结束
-          if (hasDone) {
-            log.debug('心跳协议：DONE，停止执行', { turn: turns })
-            break
-          }
-
-          // 任务系统确认全部完成：结束
-          const allTasksDone = this.activeTodoSnapshot !== null &&
-            this.activeTodoSnapshot.length > 0 &&
-            this.activeTodoSnapshot.every(t => t.status === 'completed')
-          if (allTasksDone) {
-            log.debug('任务系统确认全部完成，停止执行', { turn: turns })
-            break
-          }
-
-          // CONTINUE 标记但无工具调用：允许最多 2 次（LLM 可能在思考下一步）
-          if (hasContinue) {
-            if (turns < maxTurns) {
-              log.debug('心跳协议：CONTINUE（无工具调用），继续', { turn: turns })
-              continue
-            }
-            log.debug('心跳协议：CONTINUE 但已达轮次上限，停止', { turn: turns })
-          }
-
-          // 无标记、无工具调用：自然结束（chat/简单问答/任务完成）
-          log.debug('无工具调用无心跳标记，自然结束', { turn: turns })
+          const heartbeat = this.resolveHeartbeat(fullText, hitMaxOutputTokens, maxOutputTokensRecoveryCount, turns, maxTurns)
+          maxOutputTokensRecoveryCount = heartbeat.newRecoveryCount
+          if (heartbeat.action === 'continue') continue
           break
         }
 
-        // ── 执行工具调用（串行，委托给 executeOneTool）──────────────────────
-        log.debug('本轮工具调用', { turn: turns, tools: toolCalls.map(tc => tc.name) })
-
-        let toolAborted = false
-        for (const tc of toolCalls) {
-          totalToolCalls++
-          for await (const ev of this.executeOneTool(tc)) {
-            if ('type' in ev && ev.type === '__tool_result__') {
-              // 将工具结果写入事件日志
-              const block = ev.block as { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
-              this.store.appendEvents(createToolResultEvent(
-                block.tool_use_id,
-                tc.name,
-                block.content,
-                block.is_error === true,
-                this.currentRequestId ?? undefined,
-              ))
-            } else {
-              yield ev as StreamEvent
-              // abort 后用标志位跳出，不能直接 return（会跳过 finally 导致 running 永久锁死）
-              if (this.abortController.signal.aborted) {
-                toolAborted = true
-                break
-              }
-            }
-          }
-          if (toolAborted) break
+        // ── 执行工具调用（按 parallelSafe 自动分区：并行批次 + 串行批次）──────────
+        for await (const ev of this.executeToolBatches(toolCalls)) {
+          yield ev
         }
-        if (toolAborted) break
+        if (this.abortController.signal.aborted) break
       }
 
       // 达到最大轮次（仅 ask/plan 模式会触发，craft 模式 maxTurns = Infinity）
@@ -1036,7 +1086,7 @@ ${contentToSummarize}
         this.currentRequestId ?? undefined,
         exitStatus,
         turns,
-        totalToolCalls,
+        this.totalToolCalls,
         Date.now() - requestStartTime,
         usageAfter.inputTokens - usageBefore.inputTokens,
         usageAfter.outputTokens - usageBefore.outputTokens,
@@ -1067,6 +1117,8 @@ ${contentToSummarize}
     this.store.clear()
     // 清空历史时同步重置任务快照，确保新会话不会继承旧任务状态
     this.activeTodoSnapshot = null
+    // 清除文件读取缓存，防止跨会话脏读
+    clearFileCache()
   }
 
   /** 返回消息历史（仅 user/assistant 消息，供测试和外部查询） */
@@ -1115,7 +1167,7 @@ ${contentToSummarize}
   setChatMode(on: boolean) { this.chatMode = on }
   setSystemPrompt(prompt: string[]) { this.config.systemPrompt = prompt }
   setProvider(provider: LLMProvider) { this.config.provider = provider }
-  getTools(): readonly ToolDef[] { return this.config.tools }
+  getTools(): readonly ToolDef[] { return this.config.registry.getAll() }
 
   compactHistory(summary: string) {
     // 清空历史后写入 CompactEvent（供投影层识别）+ 空 assistant（保持事件对完整）

@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import { buildTool } from '../core/Tool.js'
 import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
@@ -80,13 +80,14 @@ function searchFiles(
   }
 }
 
-export const GrepTool: ToolDef<typeof inputSchema> = {
+export const GrepTool = buildTool({
   name: 'grep',
   description: `在文件中搜索文本模式，返回匹配行及行号。
 适用场景：在代码库中查找函数定义、配置项、错误信息等文本内容
 不适用场景：查找文件路径 → 用 glob | 读取整个文件 → 用 file_read`,
   inputSchema,
   readonly: true,
+  stormExempt: true,  // 只读操作，豁免风暴检测
   capabilities: { parallelSafe: true },
 
   describe(input) {
@@ -134,4 +135,4 @@ export const GrepTool: ToolDef<typeof inputSchema> = {
     const suffix = results.length >= maxResults ? `\n\n[已达到最大结果数 ${maxResults}，可能有更多匹配]` : ''
     return { type: 'success', output: output + suffix }
   },
-}
+})

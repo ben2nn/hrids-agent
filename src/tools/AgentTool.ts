@@ -13,6 +13,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import type { ToolDef } from '../core/Tool.js'
 import { QueryEngine } from '../core/QueryEngine.js'
+import { ToolRegistry } from '../core/ToolRegistry.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { AgentPool } from '../core/coordinator/AgentPool.js'
@@ -66,7 +67,7 @@ const agentSchema = z.object({
   description: z.string().describe('3-5 个词描述任务'),
   prompt: z.string().describe('给子智能体的完整任务指令'),
   profile: z.string().optional().describe(
-    '预定义的智能体角色名称（从 config.yaml 或 agents.d/ 中加载），传入后自动使用该角色的 systemPrompt/model/tools 配置'
+    '预定义的智能体角色名称（从 config.yaml 或 specialists/ 中加载），传入后自动使用该角色的 systemPrompt/model/tools 配置'
   ),
   allowed_tools: z.array(z.string()).optional().describe(
     '允许使用的工具列表，默认从配置的 toolPermissions.defaultDenyList 排除'
@@ -129,10 +130,11 @@ export function createAgentTool(): ToolDef<typeof agentSchema> {
 
       const maxTurns = profile?.maxTurns ?? 30
       const permissions = new PermissionManager('craft', async () => true)
+      const subRegistry = new ToolRegistry().registerAll(tools)
       const subEngine = new QueryEngine({
         provider: mgr.getProvider(),
         systemPrompt: [systemPrompt],
-        tools,
+        registry: subRegistry,
         permissions,
         maxTurns,
       })

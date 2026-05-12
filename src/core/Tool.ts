@@ -3,7 +3,7 @@ import { zodToJsonSchema } from './schema.js'
 
 // 工具执行结果
 export type ToolResult =
-  | { type: 'success'; output: string }
+  | { type: 'success'; output: string; structured?: unknown }
   | { type: 'error'; message: string }
 
 // 权限检查结果
@@ -46,6 +46,20 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
    * 默认 false。
    */
   isDestructive?: boolean
+  /**
+   * 是否豁免风暴检测。
+   * 轻量级只读工具（如 file_read、glob）通常豁免，避免连续读取触发风暴警告。
+   * 默认 false。
+   */
+  stormExempt?: boolean
+  /**
+   * 动态只读检查。
+   * 用于根据具体参数判断本次调用是否为只读操作。
+   * 例如：shell 工具可以检查命令内容，白名单命令视为只读。
+   * 优先级高于 readonly 静态字段。
+   *  readOnlyCheck 设计。
+   */
+  readOnlyCheck?(input: z.infer<TInput>): boolean
   /** 工具能力声明（可选），用于智能调度和安全检查 */
   capabilities?: ToolCapabilities
   // 执行工具（ctx 可选，用于传递日志回调）
@@ -64,6 +78,52 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   getRuleContent?(input: z.infer<TInput>): string | undefined
 }
 
+/**
+ * buildTool 默认值配置
+ *
+ * 参考 claude-code-main 的 buildTool 工厂函数设计，
+ * 为可选字段提供安全的默认值，减少工具定义的样板代码。
+ */
+const TOOL_DEFAULTS = {
+  readonly: false,
+  isDestructive: false,
+  stormExempt: false,
+  readOnlyCheck: undefined,
+  capabilities: {} as ToolCapabilities,
+  checkPermission: undefined,
+  describe: undefined,
+  getFilePath: undefined,
+  getRuleContent: undefined,
+}
+
+/**
+ * buildTool 工厂函数
+ *
+ * 从部分工具定义创建完整的 ToolDef，填充安全的默认值。
+ * 使用方式：
+ * ```typescript
+ * export const MyTool = buildTool({
+ *   name: 'my_tool',
+ *   description: '...',
+ *   inputSchema,
+ *   readonly: true,
+ *   async execute(input) { ... },
+ * })
+ * ```
+ *
+ * @param def 部分工具定义（必填字段：name, description, inputSchema, execute）
+ * @returns 完整的 ToolDef 对象
+ */
+export function buildTool<T extends z.ZodTypeAny>(
+  def: Omit<ToolDef<T>, 'readonly' | 'isDestructive' | 'stormExempt' | 'capabilities'> &
+    Partial<Pick<ToolDef<T>, 'readonly' | 'isDestructive' | 'stormExempt' | 'capabilities'>>
+): ToolDef<T> {
+  return {
+    ...TOOL_DEFAULTS,
+    ...def,
+  } as ToolDef<T>
+}
+
 // 将工具定义转换为 Anthropic API 所需的 tool 格式
 export function toAnthropicTool(tool: ToolDef): object {
   return {
@@ -71,4 +131,25 @@ export function toAnthropicTool(tool: ToolDef): object {
     description: tool.description,
     input_schema: zodToJsonSchema(tool.inputSchema),
   }
+}
+
+/**
+ * 检查工具调用是否为只读操作
+ *
+ * 优先使用 readOnlyCheck（动态检查），否则使用 readonly（静态标记）。
+ *  isReadOnlyCall 设计。
+ *
+ * @param tool 工具定义
+ * @param args 工具参数
+ * @returns 是否为只读操作
+ */
+export function isReadOnlyCall(tool: ToolDef, args: unknown): boolean {
+  if (tool.readOnlyCheck) {
+    try {
+      return Boolean(tool.readOnlyCheck(args as any))
+    } catch {
+      return false
+    }
+  }
+  return tool.readonly === true
 }

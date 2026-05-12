@@ -24,22 +24,24 @@ vi.mock('fs', async (importOriginal) => {
       }
     }),
     readdirSync: vi.fn(() => []),
+    rmSync: vi.fn(),
   }
 })
 
 import {
-  saveSession,
-  loadSession,
+  saveSessionMeta,
   loadSessionMeta,
+  loadSessionEvents,
   listSessions,
   generateSessionId,
+  extractSessionTitle,
 } from '../../src/core/SessionStore.js'
-import type { Message } from '../../src/core/QueryEngine.js'
+import type { ConversationEvent } from '../../src/core/ConversationStore.js'
 
 describe('SessionStore', () => {
-  const messages: Message[] = [
-    { role: 'user', content: '帮我写一个 hello world' },
-    { role: 'assistant', content: 'console.log("Hello World")' },
+  const events: ConversationEvent[] = [
+    { type: 'user_message', content: '帮我写一个 hello world', timestamp: '2026-05-12T10:00:00Z' },
+    { type: 'assistant_message', content: 'console.log("Hello World")', timestamp: '2026-05-12T10:00:01Z' },
   ]
 
   describe('generateSessionId', () => {
@@ -55,34 +57,44 @@ describe('SessionStore', () => {
     })
   })
 
-  describe('saveSession / loadSession', () => {
-    it('保存后可以读取消息', () => {
-      saveSession('test-session-1', messages, 'claude-sonnet-4-5')
-      const loaded = loadSession('test-session-1')
-      expect(loaded).not.toBeNull()
-      expect(loaded).toHaveLength(2)
-      expect(loaded![0].role).toBe('user')
-      expect(loaded![0].content).toBe('帮我写一个 hello world')
+  describe('extractSessionTitle', () => {
+    it('从首条用户消息提取标题', () => {
+      const { title, lastUserMessage } = extractSessionTitle(events)
+      expect(title).toBe('帮我写一个 hello world')
+      expect(lastUserMessage).toBe('帮我写一个 hello world')
     })
 
-    it('不存在的会话返回 null', () => {
-      const result = loadSession('nonexistent-session')
-      expect(result).toBeNull()
+    it('无用户消息时返回 undefined', () => {
+      const { title, lastUserMessage } = extractSessionTitle([
+        { type: 'assistant_message', content: 'hi', timestamp: '2026-05-12T10:00:00Z' },
+      ])
+      expect(title).toBeUndefined()
+      expect(lastUserMessage).toBeUndefined()
     })
   })
 
-  describe('loadSessionMeta', () => {
+  describe('saveSessionMeta / loadSessionMeta', () => {
     it('保存后可以读取元数据', () => {
-      saveSession('test-session-2', messages, 'gpt-4o')
-      const meta = loadSessionMeta('test-session-2')
+      saveSessionMeta('test-session-1', { model: 'claude-sonnet-4-5', eventCount: 2, title: '帮我写一个 hello world' })
+      const meta = loadSessionMeta('test-session-1')
       expect(meta).not.toBeNull()
-      expect(meta!.model).toBe('gpt-4o')
+      expect(meta!.model).toBe('claude-sonnet-4-5')
       expect(meta!.messageCount).toBe(2)
       expect(meta!.title).toBe('帮我写一个 hello world')
     })
 
     it('不存在的会话元数据返回 null', () => {
       expect(loadSessionMeta('no-such-session')).toBeNull()
+    })
+
+    it('更新已有元数据保留 createdAt', () => {
+      saveSessionMeta('test-session-update', { model: 'gpt-4o', eventCount: 1, title: '第一次' })
+      const first = loadSessionMeta('test-session-update')!
+      saveSessionMeta('test-session-update', { model: 'gpt-4o', eventCount: 3, title: '更新后' })
+      const second = loadSessionMeta('test-session-update')!
+      expect(second.createdAt).toBe(first.createdAt)
+      expect(second.title).toBe('更新后')
+      expect(second.messageCount).toBe(3)
     })
   })
 

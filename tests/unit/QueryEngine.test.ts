@@ -5,6 +5,7 @@ import type { QueryEngineConfig, StreamEvent } from '../../src/core/QueryEngine.
 import type { LLMProvider } from '../../src/core/providers/index.js'
 import type { ToolDef } from '../../src/core/Tool.js'
 import { PermissionManager } from '../../src/core/PermissionManager.js'
+import { ToolRegistry } from '../../src/core/ToolRegistry.js'
 
 // mock 文件系统（PermissionManager 需要）
 vi.mock('fs', async (importOriginal) => {
@@ -63,7 +64,7 @@ function makeConfig(provider: LLMProvider, tools: ToolDef<never>[] = []): QueryE
   return {
     provider,
     systemPrompt: ['你是一个测试助手'],
-    tools,
+    registry: new ToolRegistry().registerAll(tools),
     permissions: new PermissionManager('ask', async () => true),
     maxTokens: 1024,
     maxTurns: 5,

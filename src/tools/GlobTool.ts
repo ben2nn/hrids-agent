@@ -1,6 +1,6 @@
 import { glob } from 'glob'
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import { buildTool } from '../core/Tool.js'
 import { getGlobalCwd } from '../core/cwd.js'
 
 const inputSchema = z.object({
@@ -8,7 +8,7 @@ const inputSchema = z.object({
   cwd: z.string().optional().describe('搜索根目录，默认为当前工作目录'),
 })
 
-export const GlobTool: ToolDef<typeof inputSchema> = {
+export const GlobTool = buildTool({
   name: 'glob',
   description: `用 glob 模式搜索文件路径，返回匹配的文件列表。
 适用场景：查找特定类型/名称的文件（如 *.py、src/**/*.ts）
@@ -16,6 +16,7 @@ export const GlobTool: ToolDef<typeof inputSchema> = {
              问候/闲聊 → 不需要任何工具`,
   inputSchema,
   readonly: true,
+  stormExempt: true,  // 只读操作，豁免风暴检测
   capabilities: { parallelSafe: true },
 
   describe(input) {
@@ -40,4 +41,4 @@ export const GlobTool: ToolDef<typeof inputSchema> = {
       return { type: 'error', message: `搜索失败: ${String(err)}` }
     }
   },
-}
+})

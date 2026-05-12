@@ -1,5 +1,6 @@
 // 智能体池 —— 管理并发运行的多个子智能体
 import { QueryEngine } from '../QueryEngine.js'
+import { ToolRegistry } from '../ToolRegistry.js'
 import { PermissionManager } from '../PermissionManager.js'
 import { MessageBus } from './MessageBus.js'
 import { runWithAgentName } from './agentContext.js'
@@ -235,10 +236,11 @@ export class AgentPool {
 
     const permissions = new PermissionManager('craft', async () => true)
     const maxTurns = profile?.maxTurns ?? loadConfig().multiAgent?.defaultMaxTurns ?? 30
+    const subRegistry = new ToolRegistry().registerAll(tools)
     const engine = new QueryEngine({
       provider: this.provider,
       systemPrompt: finalSystemPrompt,
-      tools,
+      registry: subRegistry,
       permissions,
       maxTurns,
     })

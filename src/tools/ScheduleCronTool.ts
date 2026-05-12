@@ -6,6 +6,7 @@ import { join } from 'path'
 import type { ToolDef } from '../core/Tool.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 import { getConfigDir } from '../core/Config.js'
+import { invalidateFileCache } from './FileReadTool.js'
 
 const CRON_FILE = join(getConfigDir(), 'crons.json')
 
@@ -46,6 +47,7 @@ function saveCrons(crons: CronJob[]) {
   const tmp = CRON_FILE + '.tmp'
   writeFileSync(tmp, JSON.stringify(crons, null, 2), 'utf-8')
   renameSync(tmp, CRON_FILE)
+  invalidateFileCache(CRON_FILE)
 }
 
 // ── cron 表达式解析（计算下次执行时间）────────────────────────────────────

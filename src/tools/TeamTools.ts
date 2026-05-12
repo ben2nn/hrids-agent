@@ -66,7 +66,7 @@ const agentSpawnSchema = z.object({
   description: z.string().describe('3-5 词描述任务'),
   prompt: z.string().describe('完整的任务指令'),
   profile: z.string().optional().describe(
-    '预定义的智能体角色名称（从 agents.d/ 或 config.yaml 加载）'
+    '预定义的智能体角色名称（从 specialists/ 或 config.yaml 加载）'
   ),
   run_in_background: z.boolean().optional().describe('是否后台运行，默认 false（等待完成）'),
   allowed_tools: z.array(z.string()).optional().describe('允许的工具列表'),

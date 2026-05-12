@@ -390,10 +390,27 @@ export class InkRenderer {
 
     // 生成增量 ANSI 输出，包裹 DEC 2026
     const diffOutput = patchesToAnsi(patches)
-    this.realStdout.write(BSU + diffOutput + ESU)
+
+    // 定位光标到内容末尾（输入行），防止终端回显击键到错误位置
+    const lastContentRow = this.findLastContentRow(newGrid, rows, cols)
+    const cursorFix = cursorTo(0, lastContentRow)
+
+    this.realStdout.write(BSU + diffOutput + cursorFix + ESU)
 
     this.prevGrid = cloneGrid(newGrid)
     this.frameCount++
+  }
+
+  /** 找到 grid 中最后一行有内容的行号 */
+  private findLastContentRow(grid: CellGrid, rows: number, cols: number): number {
+    for (let y = rows - 1; y >= 0; y--) {
+      for (let x = 0; x < cols; x++) {
+        if (grid.cells[y][x].char && grid.cells[y][x].char !== ' ') {
+          return y
+        }
+      }
+    }
+    return 0
   }
 
   /** 隐藏光标 */

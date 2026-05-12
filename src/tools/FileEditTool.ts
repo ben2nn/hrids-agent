@@ -2,12 +2,13 @@ import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { resolve } from 'path'
 import { execFileSync } from 'child_process'
 import { z } from 'zod'
-import type { ToolDef } from '../core/Tool.js'
+import { buildTool } from '../core/Tool.js'
 import { auditLog } from '../core/audit.js'
 import { checkWritePath } from '../core/pathSafety.js'
 import { getGlobalCwd } from '../core/cwd.js'
 import { getCurrentAgentName } from '../core/coordinator/agentContext.js'
 import { getFileLeaseManager } from '../core/FileLeaseManager.js'
+import { invalidateFileCache } from './FileReadTool.js'
 
 const inputSchema = z.object({
   path: z.string().describe('要编辑的文件路径'),
@@ -15,7 +16,7 @@ const inputSchema = z.object({
   newStr: z.string().describe('替换后的新字符串'),
 })
 
-export const FileEditTool: ToolDef<typeof inputSchema> = {
+export const FileEditTool = buildTool({
   name: 'file_edit',
   description: `对已有文件做精确的字符串替换。用这个而不是 bash sed/awk。
 适用场景：修改代码中的函数、更新配置项、修复 bug
@@ -87,6 +88,8 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
       }
 
       writeFileSync(filePath, updated, 'utf-8')
+      // 编辑成功，清除文件读取缓存
+      invalidateFileCache(filePath)
       auditLog({ action: 'file_edit', resource: filePath, result: 'allowed' })
       if (agentName) getFileLeaseManager().release(agentName, input.path)
       return { type: 'success', output: `文件已更新: ${filePath}` }
@@ -96,4 +99,4 @@ export const FileEditTool: ToolDef<typeof inputSchema> = {
       return { type: 'error', message: `编辑失败: ${String(err)}` }
     }
   },
-}
+})
