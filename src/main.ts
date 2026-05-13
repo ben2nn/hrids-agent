@@ -40,9 +40,7 @@ function validateStartupConfig(config: import('./core/Config.js').AgentConfig, c
       || config.llm?.fallbacks?.some(g => g.apiKey)
     )
     if (!hasAnyKey) {
-      process.stderr.write(
-        `\x1b[33m[警告]\x1b[0m 未检测到任何 API Key，请在 config.yaml 的 llm.fallbacks 中为各提供商配置 apiKey\n`,
-      )
+      logger.warn('未检测到任何 API Key，请在 config.yaml 的 llm.fallbacks 中为各提供商配置 apiKey')
     }
   }
 }
@@ -120,11 +118,11 @@ async function main() {
 `)
     .action(async (opts) => {
       const config = loadConfig()
-      process.stderr.write(`[config] 配置目录: ${getConfigDir()}\n`)
+      logger.info(`配置目录: ${getConfigDir()}`)
 
       // 主智能体配置未初始化时提示
       if (!hasMainAgentConfig()) {
-        process.stderr.write('\x1b[33m[提示]\x1b[0m 主智能体提示词未初始化，请运行: hrids-agent init\n')
+        logger.warn('主智能体提示词未初始化，请运行: hrids-agent init')
       }
 
       // 旧记忆数据库迁移（palace.db → JSONL + index.db）

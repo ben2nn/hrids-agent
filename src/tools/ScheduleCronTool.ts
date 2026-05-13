@@ -316,22 +316,34 @@ function scheduleJob(job: CronJob) {
 
   const trigger = () => {
     activeTimers.delete(job.id)
-    const crons = loadCrons()
-    const idx = crons.findIndex(c => c.id === job.id)
-    if (idx >= 0) {
-      if (crons[idx]!.once) {
-        // 一次性任务：触发后直接删除，不再重新调度
-        crons.splice(idx, 1)
-        saveCrons(crons)
-      } else {
-        // 周期性任务：更新执行记录并重新调度
-        crons[idx]!.lastRunAt = Date.now()
-        crons[idx]!.nextRunAt = parseNextRun(job.expression)
-        saveCrons(crons)
-        scheduleJob(crons[idx]!)
+
+    // 纳入 cronLock 保护，与 create/delete/toggle 串行执行
+    let resolveTrigger!: () => void
+    const prevLockTrig = cronLock
+    cronLock = new Promise<void>(resolve => { resolveTrigger = resolve })
+    prevLockTrig.then(() => {
+      try {
+        const crons = loadCrons()
+        const idx = crons.findIndex(c => c.id === job.id)
+        if (idx >= 0) {
+          if (crons[idx]!.once) {
+            // 一次性任务：触发后直接删除，不再重新调度
+            crons.splice(idx, 1)
+            saveCrons(crons)
+          } else {
+            // 周期性任务：更新执行记录并重新调度
+            crons[idx]!.lastRunAt = Date.now()
+            crons[idx]!.nextRunAt = parseNextRun(job.expression)
+            saveCrons(crons)
+            scheduleJob(crons[idx]!)
+          }
+        }
+      } finally {
+        resolveTrigger()
       }
-    }
-    // 触发任务
+    })
+
+    // 触发任务（不阻塞锁链，onTrigger 在锁外执行）
     if (onTrigger) onTrigger(job)
   }
 

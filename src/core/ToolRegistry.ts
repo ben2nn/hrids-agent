@@ -287,7 +287,7 @@ export class ToolRegistry {
     // 执行工具
     let finalResult: ToolResult
     try {
-      const result = await tool.execute(args as any, opts.ctx)
+      const result = await tool.execute(args as any, opts.ctx) // eslint-disable-line @typescript-eslint/no-explicit-any -- ToolDef 泛型默认类型导致
 
       // 结果截断
       if (opts.maxResultChars !== undefined) {

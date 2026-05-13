@@ -1699,3 +1699,21 @@ BUG-2 (prune 未调用) → 上下文膨胀
 **累计修复：57 个问题（本轮 session）。剩余待修复：0 严重 + 0 高安全 + 0 高功能 + 0 中 + 19 低。**
 
 **19 个低优先级问题均为设计级优化（架构权衡、数据丰富度、边界场景），不影响核心功能和安全性。**
+
+---
+
+## 二十二、第十轮修复记录（2026-05-13）
+
+低优先级实际缺陷修复，348 个测试通过无回归。
+
+| 编号 | 修复内容 | 修改文件 |
+|------|---------|---------|
+| NEW-F43 | extractor.ts 从对话提取记忆时按角色分离：user 用 preference/decision/fact 模式，assistant 用 milestone/problem/decision 模式，避免混合拼接导致类型误判 | extractor.ts |
+| NEW-F50 | ScheduleCronTool trigger 回调纳入 cronLock 串行化保护，一次性任务删除和周期性任务更新不再与 create/delete/toggle 竞态 | ScheduleCronTool.ts |
+| NEW-F51 | SkillHubTool 下载 zip 后校验文件头 magic bytes（PK\x03\x04）和最小大小，防止损坏/伪造文件被解压 | SkillHubTool.ts |
+
+**本轮合计修复 3 个问题。**
+
+---
+
+**累计修复：60 个问题（本轮 session）。剩余低优先级均为非缺陷项（设计权衡或平台限制）。**

@@ -294,6 +294,16 @@ async function downloadAndExtractSkill(
   }
   if (lastErr) throw new Error(`下载失败: ${lastErr}`)
 
+  // 完整性校验：验证 zip 文件头（PK\x03\x04）和最小大小
+  const zipBuf = readFileSync(tmpZip)
+  if (zipBuf.length < 22) {
+    throw new Error(`下载的文件过小（${zipBuf.length} 字节），可能不是有效的 zip 文件`)
+  }
+  // PK\x03\x04 = 0x504B0304
+  if (zipBuf[0] !== 0x50 || zipBuf[1] !== 0x4B || zipBuf[2] !== 0x03 || zipBuf[3] !== 0x04) {
+    throw new Error('下载的文件不是有效的 zip 格式（magic bytes 不匹配）')
+  }
+
   try {
     mkdirSync(tmpDir, { recursive: true })
 

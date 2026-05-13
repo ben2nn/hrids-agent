@@ -8,6 +8,7 @@ import { resolveDecision } from '../tools/DecisionTool.js'
 import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js'
+import { loadConfig } from '../core/Config.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { LLMProvider } from '../core/providers/index.js'
 
@@ -108,6 +109,35 @@ export async function runServerMode(
             if (!events) return false
             engine.store.replaceEvents(events)
             return true
+          },
+          getAvailableModels: () => {
+            const config = loadConfig()
+            const models: Array<{ provider: string; model: string; isDefault?: boolean }> = []
+            const defaultModel = config.agent?.model
+
+            // 从 llm.fallbacks 中提取所有模型
+            if (config.llm?.fallbacks) {
+              for (const group of config.llm.fallbacks) {
+                for (const m of group.models) {
+                  models.push({
+                    provider: group.provider,
+                    model: m,
+                    isDefault: m === defaultModel,
+                  })
+                }
+              }
+            }
+
+            // 如果没有 fallbacks，使用默认模型
+            if (models.length === 0 && defaultModel) {
+              models.push({
+                provider: config.provider || 'unknown',
+                model: defaultModel,
+                isDefault: true,
+              })
+            }
+
+            return models
           },
         }
 

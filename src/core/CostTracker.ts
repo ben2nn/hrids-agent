@@ -69,8 +69,7 @@ export class CostTracker {
     const pricing = MODEL_PRICING[this.model]
       ?? (Object.entries(MODEL_PRICING)
         .filter(([k]) => this.model.startsWith(k))
-        .sort((a, b) => b[0].length - a[0].length)
-        [0]?.[1])
+        .sort((a, b) => b[0].length - a[0].length)[0]?.[1])
     if (!pricing) {
       // 未知模型：返回 0 但不静默，便于发现新模型需要添加定价
       return 0

@@ -146,7 +146,7 @@ export function toAnthropicTool(tool: ToolDef): object {
 export function isReadOnlyCall(tool: ToolDef, args: unknown): boolean {
   if (tool.readOnlyCheck) {
     try {
-      return Boolean(tool.readOnlyCheck(args as any))
+      return Boolean(tool.readOnlyCheck(args as any)) // eslint-disable-line @typescript-eslint/no-explicit-any -- ToolDef 泛型默认类型导致
     } catch {
       return false
     }

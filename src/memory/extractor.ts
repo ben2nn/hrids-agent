@@ -244,9 +244,9 @@ function splitByTurns(lines: string[], patterns: RegExp[]): string[] {
 
 /**
  * 从对话历史中自动提取记忆（供 QueryEngine 在会话结束后调用）
- * 同时扫描 user 和 assistant 消息：
- * - user 消息包含偏好、决策意图（"以后都用X"）
- * - assistant 消息包含里程碑、问题解决方案
+ * 分别扫描 user 和 assistant 消息，使用角色专用模式集：
+ * - user 消息重点提取 preference / decision / fact
+ * - assistant 消息重点提取 milestone / problem / decision
  */
 export function extractFromConversation(
   messages: Array<{ role: string; content: string | unknown[] }>
@@ -262,18 +262,70 @@ export function extractFromConversation(
     return ''
   }
 
-  // user 消息：重点提取 preference / decision / fact
-  const userTexts = messages
+  // 角色专用模式集：减少噪音，提高类型识别准确率
+  const USER_PATTERNS: Partial<Record<MemoryType, RegExp[]>> = {
+    decision: ALL_PATTERNS.decision,
+    preference: ALL_PATTERNS.preference,
+    fact: ALL_PATTERNS.fact,
+  }
+  const ASSISTANT_PATTERNS: Partial<Record<MemoryType, RegExp[]>> = {
+    decision: ALL_PATTERNS.decision,
+    milestone: ALL_PATTERNS.milestone,
+    problem: ALL_PATTERNS.problem,
+  }
+
+  const userText = messages
     .filter(m => m.role === 'user')
     .map(extractText)
     .filter(Boolean)
+    .join('\n\n')
 
-  // assistant 消息：重点提取 milestone / problem / decision
-  const assistantTexts = messages
+  const assistantText = messages
     .filter(m => m.role === 'assistant')
     .map(extractText)
     .filter(Boolean)
+    .join('\n\n')
 
-  const allText = [...userTexts, ...assistantTexts].join('\n\n')
-  return extractMemories(allText)
+  return [
+    ...extractMemoriesWithPatterns(userText, USER_PATTERNS),
+    ...extractMemoriesWithPatterns(assistantText, ASSISTANT_PATTERNS),
+  ]
+}
+
+/** 使用指定模式集从文本中提取记忆（供角色分离提取使用） */
+function extractMemoriesWithPatterns(
+  text: string,
+  patterns: Partial<Record<MemoryType, RegExp[]>>,
+  minConfidence = 0.3,
+): ExtractedMemory[] {
+  const segments = splitIntoSegments(text)
+  const results: ExtractedMemory[] = []
+
+  for (const seg of segments) {
+    if (seg.trim().length < 20) continue
+
+    const scores: Record<string, number> = {}
+    for (const [type, pats] of Object.entries(patterns)) {
+      if (!pats || pats.length === 0) continue
+      const s = scoreText(seg, pats)
+      if (s > 0) scores[type] = s
+    }
+
+    if (Object.keys(scores).length === 0) continue
+
+    const lengthBonus = seg.length > 500 ? 2 : seg.length > 200 ? 1 : 0
+
+    let bestType = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0] as MemoryType
+    const bestScore = scores[bestType] + lengthBonus
+
+    bestType = disambiguate(bestType, seg, scores)
+
+    const confidence = Math.min(1.0, bestScore / 5.0)
+    if (confidence < minConfidence) continue
+
+    const importance = calcImportance(bestType, seg, confidence)
+    results.push({ content: seg.trim(), type: bestType, confidence, importance })
+  }
+
+  return results
 }

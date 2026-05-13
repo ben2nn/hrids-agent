@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs'
-import { resolve, join } from 'path'
+import { resolve } from 'path'
 
 /** 检查目录是否在 git 仓库中（向上查找 .git 目录） */
 function isGitRepo(dir: string): boolean {

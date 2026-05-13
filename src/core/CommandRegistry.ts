@@ -26,6 +26,8 @@ export interface CommandContext {
   listArchives(): import('../core/SessionStore.js').CompactArchive[]  // 当前会话的归档段列表
   newSession(): void        // 强制创建新会话
   switchSession(id: string): boolean  // 切换到指定会话，返回是否成功
+  // 配置信息
+  getAvailableModels(): Array<{ provider: string; model: string; isDefault?: boolean }>
 }
 
 export type CommandResult =
@@ -130,9 +132,31 @@ export function createBuiltinCommands(_apiKey: string, _model: string): SlashCom
       description: '查看或切换模型',
       argumentHint: '[模型名称]',
       async execute(args, ctx) {
+        const currentModel = ctx.getModel()
+        const models = ctx.getAvailableModels()
+
         if (!args) {
-          return { type: 'message', text: `当前模型: ${ctx.getModel()}` }
+          // 显示所有可用模型
+          const lines = models.map((m, i) => {
+            const marker = m.model === currentModel ? ' ◀ 当前' : ''
+            const defaultTag = m.isDefault ? ' (默认)' : ''
+            return `  ${i + 1}. ${m.provider}:${m.model}${defaultTag}${marker}`
+          })
+          return {
+            type: 'message',
+            text: `可用模型（共 ${models.length} 个）:\n${lines.join('\n')}\n\n输入 /model <序号> 或 /model <模型名称> 切换模型`,
+          }
         }
+
+        // 尝试按序号切换
+        const idx = parseInt(args.trim())
+        if (!isNaN(idx) && idx >= 1 && idx <= models.length) {
+          const selected = models[idx - 1]
+          ctx.setModel(selected.model)
+          return { type: 'message', text: `已切换到模型: ${selected.provider}:${selected.model}` }
+        }
+
+        // 按名称切换
         ctx.setModel(args.trim())
         return { type: 'message', text: `已切换到模型: ${args.trim()}` }
       },

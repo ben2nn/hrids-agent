@@ -2,6 +2,8 @@
 import { Box, Text, useInput, useApp } from 'ink'
 import TextInput from 'ink-text-input'
 import { SplashScreen } from './SplashScreen.js'
+import { CommandHint } from './CommandHint.js'
+import { FileHint } from './FileHint.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { CommandRegistry } from '../core/CommandRegistry.js'
 import type { CommandContext } from '../core/CommandRegistry.js'
@@ -11,6 +13,7 @@ import { listSessions, loadSessionEvents, generateSessionId, archiveSession, lis
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js'
+import { loadConfig } from '../core/Config.js'
 
 interface Props {
   engine: QueryEngine
@@ -134,7 +137,6 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [msgs, setMsgs] = useState<DisplayMsg[]>([
     { role: 'system', text: `会话已启动 (${initialSessionId})  输入 /help 查看命令` },
   ])
-  const [showSplash, setShowSplash] = useState(true)
   const [loading, setLoading] = useState(false)
   const [streamBuf, setStreamBuf] = useState('')   // 当前流式文本缓冲
   const [toolProgress, setToolProgress] = useState('')  // 工具执行中的临时日志，不写入 msgs
@@ -142,9 +144,21 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [costInfo, setCostInfo] = useState<CostInfo | null>(null)
   const modelRef = useRef(currentModel)
   const [displayProvider, setDisplayProvider] = useState(providerName)
+  const [showCommandHint, setShowCommandHint] = useState(false)
+  const [commandFilter, setCommandFilter] = useState('')
+  const [showFileHint, setShowFileHint] = useState(false)
+  const [fileFilter, setFileFilter] = useState('')
+  const [stderrOutput, setStderrOutput] = useState('')
+  const [scrollOffset, setScrollOffset] = useState(0)
+  const MAX_VISIBLE_LINES = 50  // 最大可见行数
 
   const push = useCallback((msg: DisplayMsg) => {
-    setMsgs(prev => [...prev, msg])
+    setMsgs(prev => {
+      const newMsgs = [...prev, msg]
+      // 新消息添加时自动滚动到底部
+      setScrollOffset(Math.max(0, newMsgs.length - MAX_VISIBLE_LINES))
+      return newMsgs
+    })
   }, [])
 
   // 原地更新指定 id 的消息；若找不到对应 id，则降级追加 fallback 消息
@@ -332,7 +346,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     return () => { engine.onBeforeCompact = null }
   }, [engine, sessionId])
 
-  // 注册 stderr 拦截回调：将 process.stderr 输出显示为系统消息，避免破坏 Ink 渲染
+  // 注册 stderr 拦截回调：将 process.stderr 输出存储到状态，在底部显示
   useEffect(() => {
     if (!onStderrReady) return
     onStderrReady((text: string) => {
@@ -341,9 +355,9 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       if (!clean) return
       // 截断过长的 stderr 输出
       const display = clean.length > 500 ? clean.slice(0, 500) + '…' : clean
-      push({ role: 'system', text: display, color: 'gray' })
+      setStderrOutput(display)
     })
-  }, [onStderrReady, push])
+  }, [onStderrReady])
 
   // 构建命令上下文
   const cmdCtx: CommandContext = {
@@ -386,13 +400,78 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       push({ role: 'system', text: `已切换到会话 ${id}（${events.length} 条事件）` })
       return true
     },
+    getAvailableModels: () => {
+      const config = loadConfig()
+      const models: Array<{ provider: string; model: string; isDefault?: boolean }> = []
+      const defaultModel = config.agent?.model
+
+      // 从 llm.fallbacks 中提取所有模型
+      if (config.llm?.fallbacks) {
+        for (const group of config.llm.fallbacks) {
+          for (const model of group.models) {
+            models.push({
+              provider: group.provider,
+              model,
+              isDefault: model === defaultModel,
+            })
+          }
+        }
+      }
+
+      // 如果没有 fallbacks，使用默认模型
+      if (models.length === 0 && defaultModel) {
+        models.push({
+          provider: config.provider || 'unknown',
+          model: defaultModel,
+          isDefault: true,
+        })
+      }
+
+      return models
+    },
   }
+
+  // 处理输入变化，控制命令提示和文件提示显示
+  const handleInputChange = useCallback((value: string) => {
+    setInput(value)
+    // 当输入以 / 开头时显示命令提示
+    if (value.startsWith('/')) {
+      setShowCommandHint(true)
+      setCommandFilter(value.slice(1))
+      setShowFileHint(false)
+      setFileFilter('')
+    }
+    // 当输入以 @ 开头时显示文件提示
+    else if (value.startsWith('@')) {
+      setShowFileHint(true)
+      setFileFilter(value.slice(1))
+      setShowCommandHint(false)
+      setCommandFilter('')
+    }
+    else {
+      setShowCommandHint(false)
+      setCommandFilter('')
+      setShowFileHint(false)
+      setFileFilter('')
+    }
+  }, [])
+
+  // 处理文件选择
+  const handleFileSelect = useCallback((filePath: string) => {
+    setInput(`@${filePath} `)
+    setShowFileHint(false)
+    setFileFilter('')
+  }, [])
 
   const handleSubmit = useCallback(async (value: string) => {
     const text = value.trim()
     if (!text || loading) return
     setInput('')
-    setShowSplash(false)
+    // 保留 SplashScreen，不在提交时隐藏
+    setShowCommandHint(false)
+    setCommandFilter('')
+    setShowFileHint(false)
+    setFileFilter('')
 
     // 优先检查是否有待处理的 ask_user（工具在等待用户回答）
     const pending = getPendingAskUser()
@@ -445,6 +524,13 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         exit()
       }
     }
+    // 上下箭头滚动查看历史消息
+    if (key.upArrow) {
+      setScrollOffset(prev => Math.max(0, prev - 1))
+    }
+    if (key.downArrow) {
+      setScrollOffset(prev => Math.min(msgs.length - MAX_VISIBLE_LINES, prev + 1))
+    }
   })
 
   // 直接监听 stdin 原始字节，确保 loading 期间也能捕获 Ctrl+C（\x03）
@@ -471,24 +557,25 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
       {/* 启动画面 */}
-      {showSplash && (
-        <SplashScreen
-          version="1.0.0"
-          model={modelRef.current}
-          providerName={displayProvider}
-          projectPath={process.cwd()}
-        />
-      )}
+      <SplashScreen
+        version="1.0.0"
+        model={modelRef.current}
+        providerName={displayProvider}
+        projectPath={process.cwd()}
+      />
 
       {/* 消息历史 */}
       <Box flexDirection="column" marginBottom={1}>
-        {msgs.map((m, i) => (
-          <Box key={m.id ?? i} marginBottom={0}>
-            <Text color={m.color ?? ROLE_COLOR[m.role]}>
-              {ROLE_PREFIX[m.role]}{m.text}
-            </Text>
-          </Box>
-        ))}
+        {msgs
+          .slice(scrollOffset, scrollOffset + MAX_VISIBLE_LINES)
+          .map((m, i) => (
+            <Box key={m.id ?? i} marginBottom={0}>
+              <Text color={m.color ?? ROLE_COLOR[m.role]}>
+                {ROLE_PREFIX[m.role]}{m.text}
+              </Text>
+            </Box>
+          ))
+        }
       </Box>
 
       {/* 工具执行中的临时进度日志（tool_end 后自动清空，不留在历史里） */}
@@ -504,6 +591,20 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           <Text color="white">✦ {streamBuf}</Text>
         </Box>
       )}
+
+      {/* 命令提示 */}
+      <CommandHint
+        commands={commands.getAll()}
+        filter={commandFilter}
+        visible={showCommandHint}
+      />
+
+      {/* 文件提示 */}
+      <FileHint
+        filter={fileFilter}
+        visible={showFileHint}
+        onSelect={handleFileSelect}
+      />
 
       {/* 状态栏 */}
       <Box marginBottom={0}>
@@ -529,7 +630,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
               <Text color="cyan">{'› '}</Text>
               <TextInput
                 value={input}
-                onChange={setInput}
+                onChange={handleInputChange}
                 onSubmit={handleSubmit}
                 placeholder="输入消息或 /命令..."
               />
@@ -544,8 +645,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           {displayProvider}  {modelRef.current}
           {costInfo && ` 输入 ${costInfo.inputTokens} / 输出 ${costInfo.outputTokens} tokens  累计 ${costInfo.costUsd.toFixed(4)}`}
           {loading ? '  Ctrl+C 中断' : '  Ctrl+C 退出'}
+          {msgs.length > MAX_VISIBLE_LINES && `  ↑↓ 滚动查看历史 (${scrollOffset + 1}-${Math.min(scrollOffset + MAX_VISIBLE_LINES, msgs.length)}/${msgs.length})`}
         </Text>
       </Box>
+
+      {/* stderr 输出 */}
+      {stderrOutput && (
+        <Box marginTop={0}>
+          <Text color="gray" dimColor>[stderr] {stderrOutput}</Text>
+        </Box>
+      )}
     </Box>
   )
 }

@@ -30,7 +30,7 @@ const originalStderrWrite = process.stderr.write.bind(process.stderr)
 
 function patchStderr(listener: StderrListener) {
   stderrListener = listener
-  process.stderr.write = ((chunk: any) => {
+  process.stderr.write = ((chunk: string | Buffer) => {
     const text = typeof chunk === 'string' ? chunk : String(chunk)
     // 过滤 ANSI 转义序列（避免颜色码干扰 Ink 渲染）
     // eslint-disable-next-line no-control-regex
@@ -94,9 +94,14 @@ export async function runInteractiveMode(
 
   // stderr 回调容器：App 挂载后设置 listener
   let stderrCallback: StderrListener | null = null
+  const earlyStderrBuffer: string[] = []  // App 挂载前的 stderr 输出缓冲
   patchStderr((text) => {
-    if (stderrCallback) stderrCallback(text)
-    else originalStderrWrite(`[stderr] ${text}\n`)
+    if (stderrCallback) {
+      stderrCallback(text)
+    } else {
+      // App 还没挂载，先缓冲起来
+      earlyStderrBuffer.push(text)
+    }
   })
 
   try {
@@ -112,7 +117,14 @@ export async function runInteractiveMode(
           model = m
           saveConfig({ model: m })
         },
-        onStderrReady: (cb: StderrListener) => { stderrCallback = cb },
+        onStderrReady: (cb: StderrListener) => {
+          stderrCallback = cb
+          // 将 App 挂载前缓冲的 stderr 输出发送给 App
+          for (const text of earlyStderrBuffer) {
+            cb(text)
+          }
+          earlyStderrBuffer.length = 0
+        },
       }),
     )
 
