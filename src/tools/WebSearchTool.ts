@@ -198,10 +198,18 @@ async function webSearch(query: string, topK: number): Promise<{ results: Search
   const engine = config.webSearch?.engine ?? 'mojeek'
   const endpoint = config.webSearch?.endpoint ?? 'http://localhost:8080'
 
+  // SearXNG 优先，失败自动降级 Mojeek
   if (engine === 'searxng') {
-    const results = await searchSearxng(query, topK, endpoint)
-    return { results, engine: `SearXNG (${endpoint})` }
+    try {
+      const results = await searchSearxng(query, topK, endpoint)
+      return { results, engine: `SearXNG (${endpoint})` }
+    } catch (searxErr) {
+      process.stderr.write(`[web_search] SearXNG 失败，降级到 Mojeek: ${searxErr}\n`)
+      const results = await searchMojeek(query, topK)
+      return { results, engine: 'Mojeek (SearXNG 降级)' }
+    }
   }
+
   const results = await searchMojeek(query, topK)
   return { results, engine: 'Mojeek' }
 }
@@ -307,9 +315,9 @@ function checkNetworkPolicy(): string | null {
 
 export const WebSearchTool: ToolDef<typeof inputSchema> = {
   name: 'web_search',
-  description: `在互联网上搜索最新信息。
+  description: `在互联网上搜索最新信息。内部自动降级：SearXNG → Mojeek。
 适用场景：查询实时数据（天气、股价、新闻）、搜索技术文档、查找 API 用法
-不适用场景：查询已有知识能回答的问题 → 直接回答 | 问候/闲聊`,
+不适用场景：查询已有知识能回答的问题 → 直接回答 | 已知具体 URL → 用 web_fetch | 问候/闲聊`,
   inputSchema,
   readonly: true,
   capabilities: { requiresNetwork: true, parallelSafe: true, maxExecutionTimeMs: 30_000 },
@@ -330,7 +338,10 @@ export const WebSearchTool: ToolDef<typeof inputSchema> = {
       const { results, engine } = await webSearch(input.query, topK)
       return { type: 'success', output: `[${engine}]\n\n${formatSearchResults(input.query, results)}` }
     } catch (err) {
-      return { type: 'error', message: `搜索失败: ${parseNetworkError(err)}` }
+      return {
+        type: 'error',
+        message: `搜索失败: ${parseNetworkError(err)}\n提示：如果已知具体 URL，可尝试使用 web_fetch 获取网页内容`,
+      }
     }
   },
 }

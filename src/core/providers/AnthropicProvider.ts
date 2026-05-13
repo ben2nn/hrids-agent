@@ -80,7 +80,8 @@ export class AnthropicProvider implements LLMProvider {
         } else if (event.type === 'message_stop') {
           const final = await stream.finalMessage()
           for (const block of final.content) {
-            if (block.type === 'tool_use') {
+            // 跳过原生 web_search 工具调用，它由 Anthropic API 内部处理
+            if (block.type === 'tool_use' && !(this.nativeWebSearch && block.name === 'web_search')) {
               yield { type: 'tool_call', toolCall: { id: block.id, name: block.name, input: block.input } }
             }
           }

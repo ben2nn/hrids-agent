@@ -259,8 +259,9 @@ export class OpenAIProvider implements LLMProvider {
         if (!line.startsWith('data: ')) continue
         const data = line.slice(6).trim()
         if (data === '[DONE]') {
-          // 输出所有累积的工具调用
+          // 输出所有累积的工具调用（跳过原生 web_search，它由 API 内部处理）
           for (const tc of Object.values(pendingToolCalls)) {
+            if (this.config.nativeWebSearch && tc.name === 'web_search') continue
             totalToolCalls++
             try {
               yield {
