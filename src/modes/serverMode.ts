@@ -3,6 +3,7 @@ import { saveSessionMeta, extractSessionTitle, generateSessionId, loadSessionEve
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd, getGlobalCwd } from '../core/cwd.js'
 import { CommandRegistry, createBuiltinCommands } from '../core/CommandRegistry.js'
+import { createWorkdirCommands } from '../commands/WorkdirCommands.js'
 import { resolveAskUser } from '../tools/AskUserTool.js'
 import { resolveDecision } from '../tools/DecisionTool.js'
 import { disconnectAllMcp } from '../tools/McpTool.js'
@@ -65,6 +66,7 @@ export async function runServerMode(
   registerAllBundledSkills()
   const serverRegistry = new CommandRegistry()
   createBuiltinCommands('', model).forEach(c => serverRegistry.register(c))
+  createWorkdirCommands().forEach(c => serverRegistry.register(c))
   serverRegistry.registerSkills(buildSkillRegistry(getGlobalCwd()))
 
   // 用 Promise 链实现严格串行执行，彻底避免锁竞争

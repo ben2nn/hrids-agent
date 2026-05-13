@@ -6,6 +6,16 @@ import type { ChatMessage, LLMProvider, ModelType, StreamChunk } from './types.j
 import { LlmError } from '../LlmError.js'
 import { logger } from '../logger.js'
 
+export interface FallbackStatusEvent {
+  type: 'retrying' | 'switching' | 'rate_limited'
+  provider: string
+  model: string
+  attempt?: number
+  maxAttempts?: number
+  delayMs?: number
+  reason?: string
+}
+
 const log = logger.child({ component: 'fallback-provider' })
 
 const MAX_RETRIES = 3
@@ -47,13 +57,15 @@ export class FallbackProvider implements LLMProvider {
   private groups: ProviderGroup[]
   private currentGroupIdx: number
   private currentModelIdx: number
+  private onStatus?: (event: FallbackStatusEvent) => void
 
-  constructor(providers: LLMProvider[], groups?: ProviderGroup[]) {
+  constructor(providers: LLMProvider[], groups?: ProviderGroup[], onStatus?: (event: FallbackStatusEvent) => void) {
     if (providers.length === 0) throw new Error('FallbackProvider 至少需要一个提供商')
     this.providers = providers
     this.groups = groups ?? []
     this.currentGroupIdx = 0
     this.currentModelIdx = 0
+    this.onStatus = onStatus
   }
 
   private currentProvider(): LLMProvider {
@@ -158,6 +170,12 @@ export class FallbackProvider implements LLMProvider {
           if (attempt < MAX_RETRIES) {
             const delay = calcBackoff(attempt, llmErr.retryAfterMs)
             log.warn(`模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，${Math.round(delay / 1000)}s 后重试`, { code: llmErr.code, error: llmErr.message })
+            // 发射状态事件：限流时提示用户等待时间
+            if (llmErr.code === 'rate_limited') {
+              this.onStatus?.({ type: 'rate_limited', provider: provider.name, model: provider.model, delayMs: delay, attempt, maxAttempts: MAX_RETRIES, reason: llmErr.message })
+            } else {
+              this.onStatus?.({ type: 'retrying', provider: provider.name, model: provider.model, attempt, maxAttempts: MAX_RETRIES, delayMs: delay, reason: llmErr.message })
+            }
             try { await sleep(delay, signal) } catch { return }
           }
         }
@@ -176,6 +194,7 @@ export class FallbackProvider implements LLMProvider {
         `模型 ${provider.name}/${provider.model} ${MAX_RETRIES} 次均失败，切换到 ${next.model}`,
         { error: String(lastErr) },
       )
+      this.onStatus?.({ type: 'switching', provider: next.name, model: next.model, reason: `${provider.model} 失败` })
     }
   }
 }

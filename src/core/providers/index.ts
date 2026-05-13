@@ -3,6 +3,7 @@ import { AnthropicProvider } from './AnthropicProvider.js'
 import { OpenAIProvider } from './OpenAIProvider.js'
 import { FallbackProvider } from './FallbackProvider.js'
 import type { LLMProvider, ModelType, ProviderConfig } from './types.js'
+import type { FallbackStatusEvent } from './FallbackProvider.js'
 import {
   getBuiltinProvider,
   getCustomProvider,
@@ -17,8 +18,10 @@ export type { LLMProvider, ModelType, ProviderConfig, StreamChunk, ChatMessage, 
 export { AnthropicProvider } from './AnthropicProvider.js'
 export { OpenAIProvider } from './OpenAIProvider.js'
 export { FallbackProvider } from './FallbackProvider.js'
+export type { FallbackStatusEvent } from './FallbackProvider.js'
 export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel } from './registry.js'
 export type { ProviderDef, CustomProviderConfig } from './registry.js'
+export { loadProviderProfiles } from './ProviderProfileLoader.js'
 
 // ── ProviderOptions ───────────────────────────────────────────
 
@@ -106,13 +109,13 @@ const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'groq', 'aliyun
 
 // ── 多模型 Fallback 工厂 ──────────────────────────────────────
 
-export function createFallbackProvider(configs: ProviderOptions[]): LLMProvider {
+export function createFallbackProvider(configs: ProviderOptions[], onStatus?: (event: FallbackStatusEvent) => void): LLMProvider {
   if (configs.length === 0) throw new Error('至少需要一个提供商配置')
   if (configs.length === 1) return createProvider(configs[0])
-  return new FallbackProvider(configs.map(c => createProvider(c)))
+  return new FallbackProvider(configs.map(c => createProvider(c)), undefined, onStatus)
 }
 
-export function createGroupedFallbackProvider(groups: Array<{ platformName: string; configs: ProviderOptions[] }>): LLMProvider {
+export function createGroupedFallbackProvider(groups: Array<{ platformName: string; configs: ProviderOptions[] }>, onStatus?: (event: FallbackStatusEvent) => void): LLMProvider {
   if (groups.length === 0) throw new Error('至少需要一个平台配置')
 
   const allProviders: LLMProvider[] = []
@@ -125,7 +128,7 @@ export function createGroupedFallbackProvider(groups: Array<{ platformName: stri
   }
 
   if (allProviders.length === 1) return allProviders[0]
-  return new FallbackProvider(allProviders, providerGroups)
+  return new FallbackProvider(allProviders, providerGroups, onStatus)
 }
 
 // ── 从 config 创建指定类型的 Provider ────────────────────────
@@ -134,6 +137,7 @@ interface TypedProviderContext {
   typeConfig?: ModelTypeConfig
   customProviders?: CustomProviderConfig[]
   modelType: ModelType
+  onStatus?: (event: FallbackStatusEvent) => void
 }
 
 /**
@@ -142,7 +146,7 @@ interface TypedProviderContext {
  * API Key 直接从各 fallback 条目的 apiKey 字段读取。
  */
 export function createTypedProvider(ctx: TypedProviderContext): LLMProvider | null {
-  const { typeConfig, customProviders = [], modelType } = ctx
+  const { typeConfig, customProviders = [], modelType, onStatus } = ctx
   if (!typeConfig) return null
 
   // 有 fallbacks 配置 → 构建分组 Fallback
@@ -166,7 +170,7 @@ export function createTypedProvider(ctx: TypedProviderContext): LLMProvider | nu
       process.stderr.write(`[providers] ${modelType} fallback 链: ${chain}\n`)
     }
 
-    return createGroupedFallbackProvider(groups)
+    return createGroupedFallbackProvider(groups, onStatus)
   }
 
   // 只有单一 model
@@ -190,11 +194,11 @@ export function createProviderFromConfig(config: {
   baseUrl?: string
   llm?: ModelTypeConfig
   customProviders?: CustomProviderConfig[]
-}): LLMProvider {
+}, onStatus?: (event: FallbackStatusEvent) => void): LLMProvider {
   const { customProviders = [] } = config
 
   // 1. llm 字段（含 fallbacks）
-  const fromLlm = createTypedProvider({ typeConfig: config.llm, customProviders, modelType: 'llm' })
+  const fromLlm = createTypedProvider({ typeConfig: config.llm, customProviders, modelType: 'llm', onStatus })
   if (fromLlm) return fromLlm
 
   // 2. 顶层 model + provider

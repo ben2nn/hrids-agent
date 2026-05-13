@@ -119,6 +119,8 @@ export interface QueryEngineConfig {
   autoCompactThreshold?: number  // 自动压缩 token 阈值（默认 100000）
   sessionCwd?: string            // 会话工作目录，用于图片预处理
   uploadsDir?: string            // 会话上传目录，用于 @引用 搜索
+  /** FallbackProvider 状态回调（用于通知用户重试/切换状态） */
+  onFallbackStatus?: (event: { type: 'retrying' | 'switching' | 'rate_limited'; provider: string; model: string; delayMs?: number; reason?: string }) => void
 }
 export type InterruptReason = 'turn_limit' | 'budget_exceeded' | 'aborted' | 'error' | 'permission_denied'
 
@@ -135,6 +137,7 @@ export type StreamEvent =
   | { type: 'compact_done'; summary: string }
   | { type: 'interrupted'; reason: InterruptReason; message: string }
   | { type: 'continuation_needed' }  // 非自动模式下，LLM 表达了继续意图但需用户确认
+  | { type: 'fallback_status'; status: 'retrying' | 'switching' | 'rate_limited'; provider: string; model: string; delayMs?: number; reason?: string }
   | { type: 'done' }
   | { type: 'error'; message: string }
 

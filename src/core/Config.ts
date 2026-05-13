@@ -7,6 +7,7 @@ import type { McpServerConfig } from '../tools/McpTool.js'
 import type { CustomProviderConfig } from './providers/registry.js'
 import { normalizeProvider } from './providers/registry.js'
 import { loadYamlFile, saveYamlFile } from './YamlLoader.js'
+import { loadProviderProfiles } from './providers/ProviderProfileLoader.js'
 
 const OLD_CONFIG_DIR = join(homedir(), '.hrids-agent')
 const CONFIG_DIR = join(homedir(), '.hrids')
@@ -510,6 +511,14 @@ export function loadConfig(): ResolvedConfig {
     }
     const mcpFileServers = loadMcpFile()
     if (mcpFileServers.length > 0) generated.mcpServers = mcpFileServers
+
+    // 合并目录加载的自定义提供商
+    const dirProviders = loadProviderProfiles(process.cwd())
+    if (dirProviders.length > 0) {
+      generated.customProviders = dirProviders
+      process.stderr.write(`[providers] 从目录加载了 ${dirProviders.length} 个自定义提供商\n`)
+    }
+
     _cachedConfig = generated
     _cachedMtime = existsSync(CONFIG_YAML_FILE) ? statSync(CONFIG_YAML_FILE).mtimeMs : 0
     return generated
@@ -519,6 +528,7 @@ export function loadConfig(): ResolvedConfig {
   try {
     const raw = loadYamlFile<Partial<AgentConfig>>(CONFIG_YAML_FILE)
     const config = normalize(raw)
+
     // 合并 mcp.json
     const mcpFileServers = loadMcpFile()
     if (mcpFileServers.length > 0) {
@@ -528,6 +538,18 @@ export function loadConfig(): ResolvedConfig {
         ...mcpFileServers.filter(s => !existingNames.has(s.name)),
       ]
     }
+
+    // 合并目录加载的自定义提供商（~/.hrids/providers/ + .hrids/providers/）
+    const dirProviders = loadProviderProfiles(config.agent?.cwd || process.cwd())
+    if (dirProviders.length > 0) {
+      const existingNames = new Set((config.customProviders ?? []).map(p => p.name.toLowerCase()))
+      const newProviders = dirProviders.filter(p => !existingNames.has(p.name.toLowerCase()))
+      if (newProviders.length > 0) {
+        config.customProviders = [...(config.customProviders ?? []), ...newProviders]
+        process.stderr.write(`[providers] 从目录加载了 ${newProviders.length} 个自定义提供商\n`)
+      }
+    }
+
     _cachedConfig = config
     _cachedMtime = statSync(activeFile).mtimeMs
     return config

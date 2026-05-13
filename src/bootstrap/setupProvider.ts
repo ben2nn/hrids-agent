@@ -1,6 +1,7 @@
 // Provider 初始化 —— 从 config.yaml 创建 LLM 提供商
 import { createProvider, createProviderFromConfig, normalizeProvider } from '../core/providers/index.js'
 import type { LLMProvider } from '../core/providers/index.js'
+import type { FallbackStatusEvent } from '../core/providers/FallbackProvider.js'
 import type { AgentConfig } from '../core/Config.js'
 
 export interface ProviderOpts {
@@ -14,10 +15,12 @@ export interface ProviderOpts {
   provider?: string
   /** 完整 config（来自 loadConfig()） */
   config: AgentConfig
+  /** FallbackProvider 状态回调 */
+  onStatus?: (event: FallbackStatusEvent) => void
 }
 
 export function setupProvider(opts: ProviderOpts): LLMProvider {
-  const { config } = opts
+  const { config, onStatus } = opts
 
   // CLI 参数显式指定了 model/provider/apiKey → 精确创建，跳过 fallback 链
   const hasCliOverride = opts.model || opts.provider || opts.apiKey
@@ -32,5 +35,5 @@ export function setupProvider(opts: ProviderOpts): LLMProvider {
   }
 
   // 无 CLI 覆盖 → 走 config.yaml 的完整配置（含 llm.fallbacks）
-  return createProviderFromConfig(config)
+  return createProviderFromConfig(config, onStatus)
 }

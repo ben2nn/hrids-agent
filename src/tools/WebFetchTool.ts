@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { NetworkPolicyDecider } from '../core/NetworkPolicy.js'
 import { loadConfig } from '../core/Config.js'
+import { ExternalContentIsolator } from '../core/ExternalContentIsolator.js'
 
 const inputSchema = z.object({
   url: z.string().describe('要获取的 URL'),
@@ -10,6 +11,8 @@ const inputSchema = z.object({
 })
 
 // 代理由 proxySetup.ts 在启动时注入为全局 dispatcher，fetch 无需手动传 dispatcher
+
+const isolator = new ExternalContentIsolator()
 
 // 从 HTML 中提取可读文本，比简单 regex 更干净
 function extractTextFromHtml(html: string): string {
@@ -180,11 +183,14 @@ export const WebFetchTool: ToolDef<typeof inputSchema> = {
       }
 
       const maxLen = input.maxLength ?? 20000
-      const output = plain.length > maxLen
+      const truncated = plain.length > maxLen
         ? `${plain.slice(0, maxLen)}\n\n[内容已截断，共 ${plain.length} 字符，使用 maxLength 参数获取更多]`
         : plain
 
-      return { type: 'success', output: output || '（页面内容为空）' }
+      // 隔离外部内容，防止提示注入攻击
+      const safe = isolator.isolate(truncated || '（页面内容为空）', `web:${input.url}`)
+
+      return { type: 'success', output: safe }
     } catch (err) {
       const msg = String(err)
       if (msg.includes('timeout') || msg.includes('TimeoutError')) {

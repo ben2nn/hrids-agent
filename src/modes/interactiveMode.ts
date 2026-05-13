@@ -3,6 +3,7 @@ import React from 'react'
 import { render } from 'ink'
 import { saveSessionMeta, extractSessionTitle, archiveSession } from '../core/SessionStore.js'
 import { CommandRegistry, createBuiltinCommands } from '../core/CommandRegistry.js'
+import { createWorkdirCommands } from '../commands/WorkdirCommands.js'
 import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js'
@@ -58,6 +59,7 @@ export async function runInteractiveMode(
   // 注册斜杠命令
   const registry = new CommandRegistry()
   createBuiltinCommands('', model).forEach(c => registry.register(c))
+  createWorkdirCommands().forEach(c => registry.register(c))
 
   // 初始化 skills 系统
   registerAllBundledSkills()

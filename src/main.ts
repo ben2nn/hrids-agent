@@ -205,8 +205,17 @@ async function main() {
         agentCwd: config.agentCwd,
       })
 
-      // 创建 LLM 提供商
+      // 创建 LLM 提供商（带状态回调）
       let provider
+      const fallbackStatusHandler = (event: { type: string; provider: string; model: string; delayMs?: number; reason?: string }) => {
+        if (event.type === 'rate_limited' && event.delayMs) {
+          process.stderr.write(`\r[providers] API 限流，等待 ${Math.round(event.delayMs / 1000)}s 后重试 (${event.provider}/${event.model})...\n`)
+        } else if (event.type === 'retrying') {
+          process.stderr.write(`\r[providers] 重试中: ${event.provider}/${event.model} (${event.reason ?? '未知错误'})\n`)
+        } else if (event.type === 'switching') {
+          process.stderr.write(`\r[providers] 切换到备用模型: ${event.provider}/${event.model}\n`)
+        }
+      }
       try {
         provider = setupProvider({
           model: opts.model,
@@ -214,6 +223,7 @@ async function main() {
           baseUrl: opts.baseUrl || undefined,
           provider: opts.provider,
           config,
+          onStatus: fallbackStatusHandler,
         })
       } catch (err) {
         console.error(`\n错误: ${String(err)}\n`)
