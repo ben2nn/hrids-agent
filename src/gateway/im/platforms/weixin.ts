@@ -568,9 +568,33 @@ function downloadWeixinMediaByUrl(
   url: string,
 ): Promise<{ buffer: Buffer; mimeType: string; ext: string }> {
   return new Promise((resolve, reject) => {
+    // SSRF 防护：验证 URL 域名白名单
+    let urlObj: URL
+    try {
+      urlObj = new URL(url)
+    } catch {
+      return reject(new Error(`无效的媒体 URL: ${url.slice(0, 100)}`))
+    }
+    if (urlObj.protocol !== 'https:') {
+      return reject(new Error(`不允许的协议: ${urlObj.protocol}（要求 HTTPS）`))
+    }
+    const allowedDomains = ['.qpic.cn', '.wechat.com', '.weixin.qq.com', '.gtimg.cn']
+    if (!allowedDomains.some(d => urlObj.hostname.endsWith(d))) {
+      return reject(new Error(`不允许的微信媒体域名: ${urlObj.hostname}`))
+    }
+
+    const MAX_MEDIA_SIZE = 20 * 1024 * 1024 // 20MB
     const req = https.get(url, (res) => {
       const chunks: Buffer[] = []
-      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      let totalSize = 0
+      res.on('data', (chunk: Buffer) => {
+        totalSize += chunk.length
+        if (totalSize > MAX_MEDIA_SIZE) {
+          req.destroy()
+          return reject(new Error('媒体文件超过 20MB 限制'))
+        }
+        chunks.push(chunk)
+      })
       res.on('end', () => {
         const buffer = Buffer.concat(chunks)
         const contentType = res.headers['content-type'] || ''

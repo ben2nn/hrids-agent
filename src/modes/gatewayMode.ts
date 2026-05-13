@@ -14,13 +14,12 @@ export interface GatewayModeOpts {
 }
 
 export async function runGatewayMode(opts: GatewayModeOpts): Promise<void> {
-  // 覆盖全局异常处理器，避免 Gateway 因单次异常退出
-  process.removeAllListeners('uncaughtException')
-  process.removeAllListeners('unhandledRejection')
-  process.on('uncaughtException', (err) => {
+  // 注册全局异常处理器，避免 Gateway 因单次异常退出
+  // 使用 prependListener 插到队首，不移除已有的处理器（避免吞掉其他模块注册的处理器）
+  process.prependListener('uncaughtException', (err) => {
     logger.error('未捕获异常（Gateway 继续运行）', { error: err.message, stack: err.stack })
   })
-  process.on('unhandledRejection', (reason) => {
+  process.prependListener('unhandledRejection', (reason) => {
     logger.error('未处理的 Promise 拒绝（Gateway 继续运行）', { reason: String(reason) })
   })
 

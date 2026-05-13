@@ -35,6 +35,11 @@ export class LlmError extends Error {
     const msg = err instanceof Error ? err.message : String(err)
     const lower = msg.toLowerCase()
 
+    // AbortError：用户取消或信号中断
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return new LlmError('timeout', '请求已取消', false, undefined, err)
+    }
+
     // 网络错误
     if (lower.includes('fetch failed') || lower.includes('econnreset') || lower.includes('econnrefused')
       || lower.includes('network') || lower.includes('socket hang up')
@@ -51,6 +56,13 @@ export class LlmError extends Error {
     if (lower.includes('429') || lower.includes('rate limit') || lower.includes('too many requests')) {
       const retryAfter = extractRetryAfter(msg)
       return new LlmError('rate_limited', msg, true, retryAfter, err)
+    }
+
+    // 配额/额度耗尽（403 中常见的非认证错误，优先于 auth_error 检查）
+    if (lower.includes('allocationquota') || lower.includes('insufficient_quota')
+      || lower.includes('quota') || lower.includes('free tier')
+      || lower.includes('exceeded') || lower.includes('exhausted')) {
+      return new LlmError('model_error', msg, false, undefined, err)
     }
 
     // HTTP 401/403 认证
@@ -74,8 +86,8 @@ export class LlmError extends Error {
       return new LlmError('content_policy', msg, false, undefined, err)
     }
 
-    // 未分类：默认不可重试（安全策略：宁可中断也不盲目重试）
-    return new LlmError('unknown', msg, false, undefined, err)
+    // 未分类：默认可重试一次（多数未知错误是瞬态的，FallbackProvider 会限制重试次数）
+    return new LlmError('unknown', msg, true, undefined, err)
   }
 }
 

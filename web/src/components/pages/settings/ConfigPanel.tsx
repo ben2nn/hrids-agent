@@ -27,7 +27,6 @@ interface FallbackEntry {
   apiKey: string
   models: string
   baseUrl?: string
-  toolMode?: string
   _comment?: string
 }
 
@@ -138,7 +137,6 @@ function parseFallbacks(arr: unknown): FallbackEntry[] {
         apiKey: String(obj.apiKey ?? ''),
         models,
         baseUrl: obj.baseUrl ? String(obj.baseUrl) : undefined,
-        toolMode: obj.toolMode ? String(obj.toolMode) : undefined,
         _comment: obj._comment ? String(obj._comment) : undefined,
       }
     })
@@ -246,7 +244,6 @@ function fallbacksToObj(list: FallbackEntry[]) {
     const models = f.models.split(',').map(s => s.trim()).filter(Boolean)
     const obj: Record<string, unknown> = { provider: f.provider, apiKey: f.apiKey, models }
     if (f.baseUrl) obj.baseUrl = f.baseUrl
-    if (f.toolMode) obj.toolMode = f.toolMode
     if (f._comment) obj._comment = f._comment
     return obj
   })
@@ -601,15 +598,6 @@ function FallbackList({
                 value={item.baseUrl ?? ''}
                 onChange={e => update(i, 'baseUrl', e.target.value)}
               />
-              <select
-                className={selectCls}
-                value={item.toolMode ?? ''}
-                onChange={e => update(i, 'toolMode', e.target.value)}
-              >
-                <option value="">toolMode（默认 native）</option>
-                <option value="native">native（原生 function calling）</option>
-                <option value="dsml">dsml（文本解析模式）</option>
-              </select>
             </div>
           )}
         </div>

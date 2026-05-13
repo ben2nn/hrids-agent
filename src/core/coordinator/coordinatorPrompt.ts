@@ -544,10 +544,19 @@ export const DEFAULT_MAIN_AGENT_FILES: Record<string, string> = {
 
 /**
  * 加载静态层 section。优先从文件加载，不存在时回退到代码默认值。
- * 返回 8 个 section 字符串。
+ * 返回 8 个 section 字符串。结果会被缓存，避免每次请求都读磁盘。
  */
+let _cachedStaticSections: string[] | null = null
 function loadStaticSections(): string[] {
-  return STATIC_FILE_NAMES.map(name => loadPromptFile(name) ?? DEFAULT_MAIN_AGENT_FILES[name] ?? '')
+  if (!_cachedStaticSections) {
+    _cachedStaticSections = STATIC_FILE_NAMES.map(name => loadPromptFile(name) ?? DEFAULT_MAIN_AGENT_FILES[name] ?? '')
+  }
+  return _cachedStaticSections
+}
+
+/** 清除静态 section 缓存（用于热更新场景） */
+export function invalidateStaticSectionsCache(): void {
+  _cachedStaticSections = null
 }
 
 // ─────────────────────────────────────────────

@@ -11,7 +11,7 @@ import { clearFileCache } from '../tools/FileReadTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
 import { ConversationStore, createUserMessageEvent, createAssistantMessageEvent, createToolResultEvent, createCompactEvent, createRequestCompleteEvent, createSystemEvent, createToolExecutionEvent } from './ConversationStore.js'
-import { projectForDisplay, projectForLLM, estimateEventTokens, MAX_TOOL_RESULT_CHARS, truncateToolResult } from './projections.js'
+import { projectForDisplay, projectForLLM, estimateEventTokens, MAX_TOOL_RESULT_CHARS, truncateToolResult, applyToolResultBudget, pruneOldToolResults, pruneOldImageBlocks } from './projections.js'
 
 import { StormBreaker } from './StormBreaker.js'
 import { partitionToolCalls, type ToolCall } from './ToolScheduler.js'
@@ -95,6 +95,7 @@ export interface Message {
 }
 
 export type ContentBlock =
+  | { type: 'thinking'; thinking: string }
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
@@ -313,7 +314,9 @@ ${contentToSummarize}
           summary += chunk.delta
         }
       }
-    } catch {
+    } catch (err) {
+      const errMsg = err instanceof Error ? `${err.message}\n${err.stack}` : String(err)
+      log.warn('摘要生成失败，使用兜底文本', { error: errMsg })
       summary = `[对话历史摘要：共 ${this.store.getEventCount()} 条消息，因摘要生成失败而截断]`
     }
 
@@ -349,15 +352,24 @@ ${contentToSummarize}
         ? [...this.config.systemPrompt, liveTodo]
         : this.config.systemPrompt
 
-      // 从 store 事件日志投影出 LLM 所需的消息（含 prune/budget 优化）
-      const projectedMessages = projectForLLM(this.store.getEventLog(), {
+      // 从 store 事件日志投影出 LLM 所需的消息
+      const rawMessages = projectForLLM(this.store.getEventLog(), {
         latestPreprocessed: this.store.getLatestPreprocessed(),
-        prunedToolCallIds: this.store.isToolCallPruned('__budget__') ? undefined : undefined, // 由 applyToolResultBudget 管理
+        prunedToolCallIds: this.store.getPrunedToolCallIds(),
       })
+
+      // 依次应用 prune 优化（纯函数，只修改投影副本不修改事件日志）
+      const { messages: afterOldPrune, prunedIds: oldPruned } = pruneOldToolResults(rawMessages)
+      const { messages: afterBudget, prunedIds: budgetPruned } = applyToolResultBudget(afterOldPrune)
+      const projectedMessages = pruneOldImageBlocks(afterBudget)
+
+      // 合并 prunedIds 存回 store，供下次投影跳过已 prune 的 tool_use
+      for (const id of oldPruned) this.store.markToolCallPruned(id)
+      for (const id of budgetPruned) this.store.markToolCallPruned(id)
 
       // 重试 + 故障转移由 FallbackProvider 内部统一处理
       for await (const chunk of this.config.provider.stream(
-        projectedMessages as never,
+        projectedMessages,
         toolsForLLM,
         systemPromptForThisTurn,
         this.config.maxTokens ?? 8096,
@@ -400,11 +412,14 @@ ${contentToSummarize}
       log.error('LLM 请求失败', { turn: turns, error: errMsg })
       yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` }
       yield { type: 'error', message: errMsg }
-      this.store.appendEvents(createSystemEvent(
-        'error_recovery',
-        `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。`,
-        this.currentRequestId ?? undefined,
-      ))
+      // abort 导致的异常不写 error_recovery，由 send() 的 abort 处理统一负责
+      if (!this.abortController.signal.aborted) {
+        this.store.appendEvents(createSystemEvent(
+          'error_recovery',
+          `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。`,
+          this.currentRequestId ?? undefined,
+        ))
+      }
       return
     }
 
@@ -684,9 +699,10 @@ ${contentToSummarize}
       const timeoutPromise: Promise<ToolResult> = new Promise(resolve =>
         setTimeout(() => resolve({ type: 'error', message: `工具执行超时（超过 ${TOOL_TIMEOUT_MS / 1000}s）：${tc.name}` }), TOOL_TIMEOUT_MS))
 
+      let abortListener: (() => void) | undefined
       const abortPromise: Promise<ToolResult> = new Promise(resolve => {
-        this.abortController.signal.addEventListener('abort', () =>
-          resolve({ type: 'error', message: '任务已被中止' }), { once: true })
+        abortListener = () => resolve({ type: 'error', message: '任务已被中止' })
+        this.abortController.signal.addEventListener('abort', abortListener, { once: true })
       })
 
       const racePromise = Promise.race([toolPromise, timeoutPromise, abortPromise])
@@ -706,6 +722,11 @@ ${contentToSummarize}
         }
       }
 
+      // 清理 abort 事件监听器，防止泄漏
+      if (abortListener) {
+        this.abortController.signal.removeEventListener('abort', abortListener)
+      }
+
       // flush 残留日志
       while (logQueue.length > 0) {
         yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
@@ -714,6 +735,8 @@ ${contentToSummarize}
       if (this.abortController.signal.aborted) {
         execStatus = 'aborted'
         errorSummary = '任务已被中止'
+        // 标记此 tool_use 为 pruned，避免投影时产生孤立 tool_use（无对应 tool_result）
+        this.store.markToolCallPruned(tc.id)
         yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: '任务已被中止' } }
         return
       }
@@ -797,15 +820,6 @@ ${contentToSummarize}
     }
   }
 
-  // 图片扩展名 → MIME 类型映射
-  private static readonly IMAGE_MIME_MAP: Record<string, ImageSource['mediaType']> = {
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png': 'image/png',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-  }
-
   /**
    * 预处理用户消息：将 @引用（本地文件 / URL）替换为 image/document ContentBlock。
    *
@@ -817,7 +831,7 @@ ${contentToSummarize}
    * 若消息中没有任何媒体引用，直接返回原始字符串（不做转换）。
    */
   private async preprocessUserMessage(text: string): Promise<string | ContentBlock[]> {
-    const cwd = this.config.sessionCwd!
+    const cwd = this.config.sessionCwd ?? process.cwd()
     const { attachments, cleanText, errors } = await extractMediaFromText(text, cwd, this.config.uploadsDir)
 
     if (attachments.length === 0) {
@@ -864,6 +878,7 @@ ${contentToSummarize}
 
     // 请求级快照（用于 request_complete 事件）
     const requestStartTime = Date.now()
+    this.costs.reset()  // 每次请求重置，避免跨请求累积导致预算误触
     const costBefore = this.costs.getCostUsd()
     const usageBefore = this.costs.getUsage()
     let exitStatus: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied' = 'completed'
@@ -887,8 +902,6 @@ ${contentToSummarize}
     // 预处理用户消息：将 @filename 转换为 image block（仅用于发给 LLM）
     // 事件日志里保留原始文本（含 @filename），避免 base64 数据膨胀事件流
     let processedContent: string | ContentBlock[] = typeof userMessage === 'string' ? userMessage : (userMessage as Message).content
-    const hasImageBlocks = Array.isArray(processedContent) &&
-      (processedContent as ContentBlock[]).some(b => b.type === 'image')
     if (typeof processedContent === 'string' && this.config.sessionCwd) {
       try {
         processedContent = await this.preprocessUserMessage(processedContent)
@@ -896,6 +909,9 @@ ${contentToSummarize}
         log.warn('图片预处理失败', { error: String(err) })
       }
     }
+    // 在 preprocess 之后检查，确保 @filename 转换的 image block 能被检测到
+    const hasImageBlocks = Array.isArray(processedContent) &&
+      (processedContent as ContentBlock[]).some(b => b.type === 'image')
 
     // 提取原始文本（不含 base64），存入事件日志
     const originalText = typeof userMessage === 'string' ? userMessage : msgText
@@ -976,7 +992,9 @@ ${contentToSummarize}
         // 检查最新用户消息是否包含图片（图片消息不触发压缩）
         const latestHasImage = this.store.getLatestPreprocessed() !== null
 
-        if (!latestHasImage && tokenCount > autoCompactThreshold) {
+        // 图片消息不触发压缩（避免图片上下文丢失），但超过绝对上限时强制压缩
+        const absoluteMaxTokens = autoCompactThreshold * 3
+        if ((!latestHasImage && tokenCount > autoCompactThreshold) || tokenCount > absoluteMaxTokens) {
           yield { type: 'compact_start' }
           const summary = await this.generateCompactSummary()
           if (this.onBeforeCompact) {
@@ -1014,19 +1032,28 @@ ${contentToSummarize}
             // 用 API 返回的真实 inputTokens 更新计量
             if (ev.inputTokens > 0) lastKnownInputTokens = ev.inputTokens
             yield ev
+          } else if (ev.type === 'budget_exceeded') {
+            exitStatus = 'budget_exceeded'
+            yield ev
+            break
           } else {
             yield ev
           }
         }
-        if (llmError) break
+        if (llmError || exitStatus === 'budget_exceeded') break
 
         // 将 assistant 回复写入事件日志
         const toolCallEvents = toolCalls.length > 0
           ? toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input }))
           : undefined
-        if (fullText || toolCallEvents) {
+        // 过滤心跳标记，避免内部协议标记污染前端展示
+        const cleanText = fullText
+          .replace(HEARTBEAT_DONE, '')
+          .replace(HEARTBEAT_CONTINUE, '')
+          .trim()
+        if (cleanText || thinkingText || toolCallEvents) {
           this.store.appendEvents(createAssistantMessageEvent(
-            fullText,
+            cleanText,
             toolCallEvents,
             this.currentRequestId ?? undefined,
             thinkingText || undefined,
@@ -1116,6 +1143,8 @@ ${contentToSummarize}
     this.store.clear()
     // 清空历史时同步重置任务快照，确保新会话不会继承旧任务状态
     this.activeTodoSnapshot = null
+    // 重置压缩摘要，避免下次 autocompact 引用已不存在的历史
+    this.previousSummary = null
     // 清除文件读取缓存，防止跨会话脏读
     clearFileCache()
   }
@@ -1139,6 +1168,9 @@ ${contentToSummarize}
   /** 替换消息历史（清空后写入新消息） */
   setHistory(messages: Message[]) {
     this.store.clear()
+    // 重置任务快照和压缩摘要，避免新会话继承旧状态
+    this.activeTodoSnapshot = null
+    this.previousSummary = null
     for (const msg of messages) {
       if (msg.role === 'user') {
         this.store.appendEvents(createUserMessageEvent(
@@ -1169,10 +1201,10 @@ ${contentToSummarize}
   getTools(): readonly ToolDef[] { return this.config.registry.getAll() }
 
   compactHistory(summary: string) {
-    // 清空历史后写入 CompactEvent（供投影层识别）+ 空 assistant（保持事件对完整）
-    this.store.clear()
-    this.store.appendEvents(createCompactEvent(summary, this.currentRequestId ?? undefined))
-    this.store.appendEvents(createAssistantMessageEvent('', undefined, this.currentRequestId ?? undefined))
+    // 用 replaceEvents 替换为 CompactEvent + 空 assistant，不丢失原始事件的元信息
+    const compactEv = createCompactEvent(summary, this.currentRequestId ?? undefined)
+    const assistantEv = createAssistantMessageEvent('', undefined, this.currentRequestId ?? undefined)
+    this.store.replaceEvents([compactEv, assistantEv])
     // 压缩后重新从文件读取快照确保状态同步
     try {
       this.activeTodoSnapshot = loadTodos()

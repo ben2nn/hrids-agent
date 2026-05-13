@@ -68,6 +68,9 @@ export function PermissionModal({ sessionId: _sessionId, permission, onReply }: 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center animate-fade-in">
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="权限请求"
         className="bg-[var(--bg-secondary)] w-full max-w-md rounded-2xl shadow-[var(--shadow-lg)] border border-[var(--border)] mx-4 flex flex-col"
         style={{ maxHeight: 'min(620px, calc(100vh - 48px))' }}
         onClick={(e) => e.stopPropagation()}

@@ -45,11 +45,14 @@ export class CommandRegistry {
     return this.commands.get(name)
   }
 
-  // 解析输入，返回命令名和参数
+  // 解析输入，返回命令名和参数（支持引号包裹的参数）
   parse(input: string): { name: string; args: string } | null {
     if (!input.startsWith('/')) return null
-    const [name, ...rest] = input.slice(1).split(' ')
-    return { name: name.toLowerCase(), args: rest.join(' ') }
+    const trimmed = input.slice(1).trim()
+    // 找到第一个空格分隔命令名和参数
+    const spaceIdx = trimmed.indexOf(' ')
+    if (spaceIdx === -1) return { name: trimmed.toLowerCase(), args: '' }
+    return { name: trimmed.slice(0, spaceIdx).toLowerCase(), args: trimmed.slice(spaceIdx + 1).trim() }
   }
 
   getAll(): SlashCommand[] {

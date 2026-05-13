@@ -53,7 +53,26 @@ interface FileCacheEntry {
   totalLines: number
 }
 
+const MAX_CACHE_ENTRIES = 50
 const readFileState = new Map<string, FileCacheEntry>()
+
+function getFromCache(key: string): FileCacheEntry | undefined {
+  const entry = readFileState.get(key)
+  if (!entry) return undefined
+  // LRU：命中时移到末尾
+  readFileState.delete(key)
+  readFileState.set(key, entry)
+  return entry
+}
+
+function setCache(key: string, entry: FileCacheEntry): void {
+  if (readFileState.size >= MAX_CACHE_ENTRIES) {
+    // 淘汰最旧的条目
+    const oldest = readFileState.keys().next().value
+    if (oldest) readFileState.delete(oldest)
+  }
+  readFileState.set(key, entry)
+}
 
 /**
  * 使文件缓存失效（供写操作调用）
@@ -107,11 +126,11 @@ export const FileReadTool = buildTool({
       const currentMtime = Math.floor(stat.mtimeMs)
 
       // 检查缓存：文件未变化且无范围参数时返回缓存提示
-      const cached = readFileState.get(filePath)
+      const cached = getFromCache(filePath)
       if (cached && cached.timestamp === currentMtime && !input.startLine && !input.endLine) {
         return {
           type: 'success',
-          output: `[文件未变化，使用缓存]\n${cached.content.slice(0, 200)}${cached.content.length > 200 ? '...' : ''}`,
+          output: `[文件未变化，使用缓存] 共 ${cached.totalLines} 行\n${cached.content.slice(0, 200)}${cached.content.length > 200 ? '...' : ''}`,
         }
       }
 
@@ -121,7 +140,7 @@ export const FileReadTool = buildTool({
 
       // 更新缓存（仅完整读取时）
       if (!input.startLine && !input.endLine) {
-        readFileState.set(filePath, {
+        setCache(filePath, {
           content,
           timestamp: currentMtime,
           totalLines,

@@ -237,5 +237,5 @@ export function inferProviderByModel(model: string): ProviderDef | undefined {
 
 /** 将显示名称转为 slug（用于自定义提供商 ID） */
 function toSlug(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, '-')
+  return name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
 }

@@ -322,10 +322,7 @@ export function ChatPage({ onNewSession: _onNewSession, navCollapsed, onNavColla
     if (isCreating) return
     setIsCreating(true)
     try {
-      await createSession({})
-      // createSession 会设置 activeSessionId，稍等一帧再读取
-      await new Promise<void>(resolve => setTimeout(resolve, 50))
-      const sessionId = useSessionStore.getState().activeSessionId
+      const sessionId = await createSession({})
       if (sessionId) {
         appendUserMessage(sessionId, text)
         sendMessage(sessionId, text)

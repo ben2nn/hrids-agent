@@ -1,7 +1,7 @@
 // Skills 注册表 —— 管理内置和用户自定义 skills
 
 import { existsSync, readdirSync, readFileSync } from 'fs'
-import { join, dirname, resolve } from 'path'
+import { join, dirname, resolve, relative, isAbsolute } from 'path'
 import { getConfigDir } from '../core/Config.js'
 import type { Skill, BundledSkillDefinition, SkillFrontmatter } from './types.js'
 
@@ -75,6 +75,11 @@ export function clearBundledSkills(): void {
 function resolveFileIncludes(body: string, skillMdDir: string): string {
   return body.replace(/#\[\[file:([^\]]+)\]\]/g, (match, relPath: string) => {
     const absPath = resolve(skillMdDir, relPath.trim())
+    // 路径穿越防护：确保解析后的路径仍在 skillMdDir 内
+    const relFromDir = relative(skillMdDir, absPath)
+    if (relFromDir.startsWith('..') || isAbsolute(relFromDir)) {
+      return `[引用文件路径越界: ${relPath}]`
+    }
     try {
       if (!existsSync(absPath)) {
         return `[引用文件不存在: ${relPath}]`

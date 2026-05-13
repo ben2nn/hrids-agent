@@ -12,8 +12,12 @@ const MAX_RETRIES = 3
 const BASE_DELAY_MS = 1000
 const MAX_DELAY_MS = 16000
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms))
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return }
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')) }, { once: true })
+  })
 }
 
 function calcBackoff(attempt: number, retryAfterMs?: number): number {
@@ -109,13 +113,13 @@ export class FallbackProvider implements LLMProvider {
           (attempt > 1 ? `（第 ${attempt}/${MAX_RETRIES} 次重试）` : ''),
         )
 
+        let hasContent = false
         try {
-          let hasContent = false
           let thinkingCount = 0
           let textCount = 0
           let toolCallCount = 0
 
-          for await (const chunk of provider.stream(messages, tools, systemPrompt, maxTokens)) {
+          for await (const chunk of provider.stream(messages, tools, systemPrompt, maxTokens, signal)) {
             if (chunk.type === 'thinking_delta') thinkingCount++
             if (chunk.type === 'text_delta') textCount++
             if (chunk.type === 'tool_call') toolCallCount++
@@ -127,7 +131,7 @@ export class FallbackProvider implements LLMProvider {
             if (chunk.type === 'done') {
               if (!hasContent) {
                 log.warn('模型返回空响应', { provider: provider.name, model: provider.model, thinkingCount, textCount, toolCallCount })
-                lastErr = new LlmError('unknown', '模型返回空响应', false)
+                lastErr = new LlmError('unknown', '模型返回空响应', true)
                 break
               }
               yield chunk
@@ -137,11 +141,16 @@ export class FallbackProvider implements LLMProvider {
           }
           if (hasContent) return
           log.warn('模型返回空响应（流结束）', { provider: provider.name, model: provider.model, thinkingCount, textCount, toolCallCount })
-          if (!lastErr) lastErr = new LlmError('unknown', '模型返回空响应', false)
+          if (!lastErr) lastErr = new LlmError('unknown', '模型返回空响应', true)
         } catch (err) {
           lastErr = err
           const llmErr = LlmError.fromUnknown(err)
           retryable = llmErr.retryable
+          // 已经 yield 过内容给调用方，不能重试（否则调用方会收到重复内容）
+          if (hasContent) {
+            log.warn('流式输出中途出错，已有内容不可重试', { provider: provider.name, error: llmErr.message })
+            throw err
+          }
           if (!retryable) {
             log.warn(`模型 ${provider.name}/${provider.model} 不可恢复错误，跳过重试`, { code: llmErr.code, error: llmErr.message })
             break
@@ -149,7 +158,7 @@ export class FallbackProvider implements LLMProvider {
           if (attempt < MAX_RETRIES) {
             const delay = calcBackoff(attempt, llmErr.retryAfterMs)
             log.warn(`模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，${Math.round(delay / 1000)}s 后重试`, { code: llmErr.code, error: llmErr.message })
-            await sleep(delay)
+            try { await sleep(delay, signal) } catch { return }
           }
         }
       }

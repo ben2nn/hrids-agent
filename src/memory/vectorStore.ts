@@ -32,7 +32,6 @@ import { vectorToBuffer } from './embedding.js'
 export class SqliteVecStore implements VectorStore {
   private db: Database.Database
   private dim: number | null = null
-  private nextRowid = 1
   // 实例级映射，避免多个 SqliteVecStore 实例（Gateway 多会话）共享全局 Map 导致 rowid 冲突
   private rowidToId = new Map<number, string>()
   private idToRowid = new Map<string, number>()
@@ -58,15 +57,15 @@ export class SqliteVecStore implements VectorStore {
   }
 
   private _rebuildCache() {
+    // 清空旧映射，防止维度迁移后新旧数据混合
+    this.rowidToId.clear()
+    this.idToRowid.clear()
     // 从 memories 表重建映射（vec0 rowid 与 memories rowid 对应）
     try {
       const rows = this.db.prepare('SELECT rowid, id FROM memories').all() as { rowid: number; id: string }[]
       for (const { rowid, id } of rows) {
         this.rowidToId.set(rowid, id)
         this.idToRowid.set(id, rowid)
-      }
-      if (rows.length > 0) {
-        this.nextRowid = Math.max(...rows.map(r => r.rowid)) + 1
       }
     } catch { /* memories 表可能还未创建 */ }
   }
@@ -139,6 +138,10 @@ export class PgVectorStore implements VectorStore {
 
   constructor(url: string, table = 'memory_vectors') {
     this.url = url
+    // 表名仅允许字母、数字、下划线，防止 SQL 注入
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) {
+      throw new Error(`非法的表名: ${table}（仅允许字母、数字、下划线，且以字母或下划线开头）`)
+    }
     this.table = table
   }
 

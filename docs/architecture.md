@@ -82,7 +82,6 @@ hrids-agent/
 │   │   ├── SessionStore.ts         # 会话 JSONL 持久化和归档
 │   │   ├── CostTracker.ts          # Token 用量和费用追踪
 │   │   ├── MediaProcessor.ts       # 多模态媒体预处理
-│   │   ├── DsmlParser.ts           # DSML 格式工具调用解析
 │   │   ├── coordinator/            # 多智能体协调
 │   │   │   ├── AgentPool.ts        # 智能体池（并发控制、任务提交/等待）
 │   │   │   ├── TeamManager.ts      # 团队管理器（创建团队、派发任务）
@@ -236,7 +235,6 @@ QueryEngine 是整个系统的核心，实现了一个智能体执行循环：
 │    │   ├─ 实时任务状态注入 system prompt │
 │    │   ├─ Provider.stream() 流式接收    │
 │    │   └─ 成本追踪 + 超限检查           │
-│    ├─ DSML 文本工具调用解析（可选）       │
 │    ├─ 无工具调用 → 完成/继续判断         │
 │    └─ 有工具调用 → executeOneTool 串行   │
 │        ├─ checkPermission (硬拦截)       │

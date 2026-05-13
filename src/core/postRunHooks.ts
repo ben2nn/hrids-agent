@@ -16,7 +16,6 @@ const log = logger.child({ component: 'post-run-hooks' })
 
 // per-session 的并发锁，防止同一会话同时触发多次记忆总结
 const memoryRunningSessions = new Set<string>()
-const skillRunningSessions = new Set<string>()
 
 // ── 记忆自动提炼 ──────────────────────────────────────────────
 

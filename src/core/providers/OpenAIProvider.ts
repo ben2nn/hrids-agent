@@ -8,38 +8,11 @@ import { zodToJsonSchema } from '../schema.js'
 
 const log = logger.child({ component: 'openai-provider' })
 
-/**
- * DeepSeek 模型 DSML 工具调用格式说明。
- *
- * DeepSeek 在某些情况下不走 function calling，而以文本形式输出 DSML 格式的工具调用。
- * 注入此说明可减少 LLM 在数组参数写法上的格式错误（嵌套 parameter、整体 JSON 对象等）。
- *
- * 关键规则：
- * - 数组参数必须用 JSON 数组字符串，不能用嵌套 <|DSML|parameter>
- * - 不能把整个工具参数对象 {"todos":[...]} 作为单个参数值传入
- */
-const DEEPSEEK_DSML_FORMAT_HINT = `## 工具调用格式规范（DSML）
-
-当使用 DSML 格式调用工具时，数组参数必须写成 JSON 数组字符串，不能用嵌套标签：
-
-✅ 正确写法（数组用 JSON）：
-<|DSML|invoke name="todo_write">
-  <|DSML|parameter name="todos"><![CDATA[[{"content":"任务1","priority":"high"},{"content":"任务2","priority":"medium"}]]]></|DSML|parameter>
-</|DSML|invoke>
-
-❌ 错误写法（不能用嵌套 parameter 表达数组）：
-<|DSML|invoke name="todo_write">
-  <|DSML|parameter name="todos">
-    <|DSML|parameter name="item"><![CDATA[{"content":"任务1"}]]></|DSML|parameter>
-  </|DSML|parameter>
-</|DSML|invoke>
-
-❌ 错误写法（不能把整个参数对象作为单个参数值）：
-<|DSML|parameter name="todos"><![CDATA[{"todos":[...]}]]></|DSML|parameter>`
 
 interface OAIMessage {
   role: string
   content: string | null
+  reasoning_content?: string
   tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>
   tool_call_id?: string
 }
@@ -62,16 +35,9 @@ function toOAITool(tool: ToolDef): OAITool {
 }
 
 // 将通用消息转换为 OpenAI 格式
-function toOAIMessages(messages: ChatMessage[], systemPrompt: string[], providerName?: string): OAIMessage[] {
+function toOAIMessages(messages: ChatMessage[], systemPrompt: string[]): OAIMessage[] {
   // OpenAI 不支持 system 数组，合并为单个 system 消息
-  let systemContent = systemPrompt.join('\n\n')
-
-  // DeepSeek 模型有时不走 function calling 而输出 DSML 文本格式，
-  // 且对数组参数的写法不稳定（嵌套 parameter、整体 JSON 对象等）。
-  // 注入明确的格式说明，减少格式错误概率。
-  if (providerName === 'deepseek') {
-    systemContent += '\n\n' + DEEPSEEK_DSML_FORMAT_HINT
-  }
+  const systemContent = systemPrompt.join('\n\n')
 
   const result: OAIMessage[] = [{ role: 'system', content: systemContent }]
 
@@ -95,9 +61,16 @@ function toOAIMessages(messages: ChatMessage[], systemPrompt: string[], provider
           }))
 
         if (msg.role === 'assistant') {
+          // 提取 thinking 块作为 reasoning_content（DeepSeek 等 OpenAI 兼容 API 要求）
+          const thinkingParts = (msg.content as Array<{ type: string; thinking?: string }>)
+            .filter(b => b.type === 'thinking')
+            .map(b => b.thinking ?? '')
+            .join('')
+
           result.push({
             role: 'assistant',
             content: textParts || null,
+            ...(thinkingParts ? { reasoning_content: thinkingParts } : {}),
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
           })
         } else {
@@ -156,18 +129,13 @@ export class OpenAIProvider implements LLMProvider {
   readonly name: string
   readonly model: string
   readonly modelType: ModelType
-  readonly toolMode: 'native' | 'dsml'
   private config: ProviderConfig
-  /** dsml 模式：不向 API 传 tools，让模型输出 DSML 文本格式的工具调用 */
-  private disableNativeTools: boolean
 
-  constructor(config: ProviderConfig, providerName = 'openai', disableNativeTools = false) {
+  constructor(config: ProviderConfig, providerName = 'openai') {
     this.config = config
     this.model = config.model
     this.modelType = config.modelType ?? 'llm'
     this.name = providerName
-    this.disableNativeTools = disableNativeTools
-    this.toolMode = disableNativeTools ? 'dsml' : 'native'
   }
 
   async *stream(
@@ -175,10 +143,11 @@ export class OpenAIProvider implements LLMProvider {
     tools: ToolDef[],
     systemPrompt: string[],
     maxTokens: number,
+    signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {
     const baseUrl = this.config.baseUrl ?? 'https://api.openai.com/v1'
-    const oaiMessages = toOAIMessages(messages, systemPrompt, this.name)
-    const oaiTools = (!this.disableNativeTools && tools.length > 0) ? tools.map(toOAITool) : undefined
+    const oaiMessages = toOAIMessages(messages, systemPrompt)
+    const oaiTools = tools.length > 0 ? tools.map(toOAITool) : undefined
 
     const body: Record<string, unknown> = {
       model: this.model,
@@ -234,16 +203,18 @@ export class OpenAIProvider implements LLMProvider {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(600000),
+      signal: signal ?? AbortSignal.timeout(600000),
     })
 
     if (!res.ok) {
       const err = await res.text()
-      log.error('API 请求失败', { provider: this.name, model: this.model, status: res.status })
-      throw new Error(`${this.name} API 错误 ${res.status}: ${err}`)
+      log.error('API 请求失败', { provider: this.name, model: this.model, status: res.status, body: err.slice(0, 500) })
+      // 截断响应体，避免泄露敏感信息（如 prompt 片段、token 等）
+      throw new Error(`${this.name} API 错误 ${res.status}: ${err.slice(0, 200)}`)
     }
 
-    const reader = res.body!.getReader()
+    if (!res.body) throw new Error(`${this.name} API 返回空响应体`)
+    const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
 
@@ -260,12 +231,16 @@ export class OpenAIProvider implements LLMProvider {
     // 单次 read() 超时保护：防止服务端保持连接但不发数据导致永久阻塞
     // 使用请求级超时（600s）的一半作为单次读取超时，避免与工具层超时冲突
     const READ_IDLE_TIMEOUT_MS = 300_000 // 5 分钟无数据则超时
-    const readWithTimeout = (ms: number) => Promise.race([
-      reader.read(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`流式读取超时（${ms / 1000}s 无数据）`)), ms)
-      ),
-    ])
+    const readWithTimeout = (ms: number) => {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), ms)
+      return Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          ctrl.signal.addEventListener('abort', () => reject(new Error(`流式读取超时（${ms / 1000}s 无数据）`)))
+        }),
+      ]).finally(() => clearTimeout(timer))
+    }
 
     while (true) {
       const { done, value } = await readWithTimeout(READ_IDLE_TIMEOUT_MS)
@@ -287,7 +262,13 @@ export class OpenAIProvider implements LLMProvider {
                 type: 'tool_call',
                 toolCall: { id: tc.id, name: tc.name, input: JSON.parse(tc.args || '{}') },
               }
-            } catch { /* JSON 解析失败忽略 */ }
+            } catch (parseErr) {
+              log.warn('工具调用参数 JSON 解析失败，跳过该调用', {
+                toolName: tc.name, toolId: tc.id,
+                argsPreview: tc.args.slice(0, 200),
+                error: String(parseErr),
+              })
+            }
           }
           log.debug('[响应诊断] 流式响应完成', {
             provider: this.name,
@@ -356,7 +337,9 @@ export class OpenAIProvider implements LLMProvider {
             // OpenAI 用 'length' 表示 max_tokens，统一映射为 'max_tokens'
             yield { type: 'stop_reason', stopReason: finishReason === 'length' ? 'max_tokens' : finishReason }
           }
-        } catch { /* 忽略解析错误 */ }
+        } catch (parseErr) {
+          log.debug('SSE chunk JSON 解析失败', { data: data.slice(0, 200), error: String(parseErr) })
+        }
       }
     }
 

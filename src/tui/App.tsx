@@ -1,6 +1,7 @@
 ﻿import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { Box, Text, useInput, useApp } from 'ink'
-import { SimpleTextInput } from './SimpleTextInput.js'
+import TextInput from 'ink-text-input'
+import { SplashScreen } from './SplashScreen.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { CommandRegistry } from '../core/CommandRegistry.js'
 import type { CommandContext } from '../core/CommandRegistry.js'
@@ -133,6 +134,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [msgs, setMsgs] = useState<DisplayMsg[]>([
     { role: 'system', text: `会话已启动 (${initialSessionId})  输入 /help 查看命令` },
   ])
+  const [showSplash, setShowSplash] = useState(true)
   const [loading, setLoading] = useState(false)
   const [streamBuf, setStreamBuf] = useState('')   // 当前流式文本缓冲
   const [toolProgress, setToolProgress] = useState('')  // 工具执行中的临时日志，不写入 msgs
@@ -390,6 +392,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     const text = value.trim()
     if (!text || loading) return
     setInput('')
+    setShowSplash(false)
 
     // 优先检查是否有待处理的 ask_user（工具在等待用户回答）
     const pending = getPendingAskUser()
@@ -467,6 +470,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
+      {/* 启动画面 */}
+      {showSplash && (
+        <SplashScreen
+          version="1.0.0"
+          model={modelRef.current}
+          providerName={displayProvider}
+          projectPath={process.cwd()}
+        />
+      )}
+
       {/* 消息历史 */}
       <Box flexDirection="column" marginBottom={1}>
         {msgs.map((m, i) => (
@@ -498,12 +511,13 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           ? (
             <Box flexDirection="column">
               <Text color="yellow">{askUserPrompt}</Text>
-              <Box>
-                <SimpleTextInput
+               <Box>
+                <Text color="cyan">{'› '}</Text>
+                <TextInput
                   value={input}
                   onChange={setInput}
                   onSubmit={handleSubmit}
-                  prefix="› "
+                  placeholder="输入回答..."
                 />
               </Box>
             </Box>
@@ -511,12 +525,13 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           : loading
           ? <Text color="yellow" dimColor>▸ 思考中...</Text>
           : (
-            <Box>
-              <SimpleTextInput
+           <Box>
+              <Text color="cyan">{'› '}</Text>
+              <TextInput
                 value={input}
                 onChange={setInput}
                 onSubmit={handleSubmit}
-                prefix="› "
+                placeholder="输入消息或 /命令..."
               />
             </Box>
           )

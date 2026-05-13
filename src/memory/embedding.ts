@@ -97,8 +97,17 @@ export class EmbeddingProvider {
   }
 
   async embed(text: string): Promise<number[]> {
-    const cacheKey = `${this.config.provider}:${text.slice(0, 200)}`
-    if (this.cache.has(cacheKey)) return this.cache.get(cacheKey)!
+    // 使用完整内容的哈希作为缓存 key，避免前 200 字符相同导致碰撞
+    const { createHash } = await import('crypto')
+    const hash = createHash('sha256').update(text).digest('hex').slice(0, 16)
+    const cacheKey = `${this.config.provider}:${hash}`
+    if (this.cache.has(cacheKey)) {
+      // LRU：命中时删除再重新插入，将其移到 Map 末尾
+      const cached = this.cache.get(cacheKey)!
+      this.cache.delete(cacheKey)
+      this.cache.set(cacheKey, cached)
+      return cached
+    }
 
     let vec: number[]
     switch (this.config.provider) {
@@ -119,6 +128,11 @@ export class EmbeddingProvider {
     }
     this.cache.set(cacheKey, vec)
     return vec
+  }
+
+  /** 清空嵌入缓存（用于配置变更后重新初始化） */
+  clearCache(): void {
+    this.cache.clear()
   }
 
   /** 批量 embed，OpenAI 支持批量请求，减少 API 调用次数 */
@@ -363,9 +377,14 @@ export function getEmbeddingProvider(): AnyEmbeddingProvider {
 
 /** 重置单例（用于配置变更后重新初始化） */
 export function resetEmbeddingProvider(config?: EmbeddingConfig) {
-  // 重置时清空旧 provider 的缓存（如果是 EmbeddingProvider 实例）
+  // 重置时清空旧 provider 的缓存
   if (_provider instanceof EmbeddingProvider) {
     (_provider as EmbeddingProvider)['cache'].clear()
+  } else if (_provider instanceof EmbeddingFallbackProvider) {
+    // 清空 FallbackProvider 中每个子 provider 的缓存
+    for (const p of (_provider as EmbeddingFallbackProvider)['providers']) {
+      p['cache'].clear()
+    }
   }
   _provider = config ? new EmbeddingProvider(config) : createEmbeddingProviderFromEnv()
 }

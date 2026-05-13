@@ -11,7 +11,7 @@
  */
 
 import { readFileSync, existsSync, statSync } from 'fs'
-import { resolve, extname, basename } from 'path'
+import { resolve, extname, basename, relative, isAbsolute } from 'path'
 import { createHash } from 'crypto'
 import { logger } from './logger.js'
 
@@ -99,6 +99,8 @@ interface CacheEntry {
 
 class MediaCache {
   private map = new Map<string, CacheEntry>()
+  /** URL 缓存 TTL（1 小时），文件缓存通过 mtime+size 自动失效不受此限 */
+  private static URL_TTL_MS = 3600_000
 
   /** 生成缓存 key：文件用 path+mtime，URL 用 URL 本身 */
   static keyForFile(absPath: string): string {
@@ -125,6 +127,11 @@ class MediaCache {
   get(key: string): MediaAttachment | undefined {
     const entry = this.map.get(key)
     if (!entry) return undefined
+    // URL 缓存 TTL 检查：超过 1 小时视为过期
+    if (entry.source.startsWith('http') && Date.now() - entry.cachedAt > MediaCache.URL_TTL_MS) {
+      this.map.delete(key)
+      return undefined
+    }
     // LRU：访问时移到末尾
     this.map.delete(key)
     this.map.set(key, entry)
@@ -465,6 +472,12 @@ export async function extractMediaFromText(
     } else {
       // 搜索顺序：cwd → uploadsDir
       const absPath = resolve(cwd, ref)
+      // 路径遍历防护：确保解析后的路径仍在 cwd 内
+      const relFromCwd = relative(cwd, absPath)
+      if (relFromCwd.startsWith('..') || isAbsolute(relFromCwd)) {
+        errors.push(`文件路径越界: ${ref}`)
+        return
+      }
       attachment = await loadMediaFromFile(absPath, ref)
       if (!attachment && uploadsDir) {
         const uploadsPath = resolve(uploadsDir, ref)

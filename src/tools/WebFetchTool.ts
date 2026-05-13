@@ -35,6 +35,9 @@ function extractTextFromHtml(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, ' ')
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
+    // 移除控制字符（保留换行和制表符），防止 HTML 实体解码注入控制字符
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
 
   // 5. 合并多余空白行，保留段落结构
   text = text
@@ -85,6 +88,28 @@ export const WebFetchTool: ToolDef<typeof inputSchema> = {
   },
 
   async execute(input) {
+    // URL scheme 校验：仅允许 http/https
+    const url = new URL(input.url)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return { type: 'error', message: `不支持的 URL 协议: ${url.protocol}（仅允许 http/https）` }
+    }
+
+    // SSRF 防护：阻止访问环回地址、链路本地地址和云元数据地址
+    const hostname = url.hostname
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname.startsWith('169.254.') ||
+      hostname.startsWith('10.') ||
+      hostname.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+      hostname === 'metadata.google.internal' ||
+      hostname === 'instance-data'
+    ) {
+      return { type: 'error', message: `安全策略禁止访问内网/元数据地址: ${hostname}` }
+    }
+
     // 网络策略检查
     const decider = getDecider()
     const { decision, reason } = decider.decide(input.url)
@@ -93,6 +118,7 @@ export const WebFetchTool: ToolDef<typeof inputSchema> = {
     }
 
     try {
+      // redirect:manual 防止 SSRF 重定向绕过域名检查
       const res = await fetch(input.url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (compatible; hrids-agent/0.1; +https://github.com/hrids)',
@@ -100,15 +126,42 @@ export const WebFetchTool: ToolDef<typeof inputSchema> = {
           'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         },
         signal: AbortSignal.timeout(20000),
-        redirect: 'follow',
+        redirect: 'manual',
       })
+
+      // 处理重定向：检查目标是否安全
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get('location')
+        if (location) {
+          try {
+            const redirectUrl = new URL(location, input.url)
+            const redirectHostname = redirectUrl.hostname
+            if (
+              redirectHostname === 'localhost' || redirectHostname === '127.0.0.1' || redirectHostname === '::1' ||
+              redirectHostname.startsWith('169.254.') || redirectHostname.startsWith('10.') ||
+              redirectHostname.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(redirectHostname)
+            ) {
+              return { type: 'error', message: `重定向目标为内网地址，已阻止: ${redirectHostname}` }
+            }
+          } catch { /* 忽略无效重定向 URL */ }
+        }
+      }
 
       if (!res.ok) {
         return { type: 'error', message: `HTTP ${res.status}: ${res.statusText} — ${input.url}` }
       }
 
       const contentType = res.headers.get('content-type') ?? ''
+      // 响应体大小限制（10MB），防止 OOM
+      const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+      const contentLength = res.headers.get('content-length')
+      if (contentLength && parseInt(contentLength, 10) > MAX_RESPONSE_BYTES) {
+        return { type: 'error', message: `响应体过大（${(parseInt(contentLength, 10) / 1024 / 1024).toFixed(1)}MB > 10MB 限制）: ${input.url}` }
+      }
       const rawText = await res.text()
+      if (rawText.length > MAX_RESPONSE_BYTES) {
+        return { type: 'error', message: `响应体过大（${(rawText.length / 1024 / 1024).toFixed(1)}MB > 10MB 限制）: ${input.url}` }
+      }
 
       let plain: string
       if (input.raw) {

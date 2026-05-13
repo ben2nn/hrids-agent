@@ -917,10 +917,20 @@ ${writeTools.join('、')}
       case 'set_cwd': {
         const cwd = String(msg.cwd ?? '')
         if (cwd) {
-          // 只更新会话自己的 cwd，不修改全局变量
-          // 下次 runMessage 时 runWithCwd 会用 session.info.cwd 建立新的上下文
-          session.info.cwd = cwd
-          this.broadcast(session, { type: 'cwd_changed', cwd })
+          // 路径安全校验：规范化、禁止空字节
+          const { resolve } = require('path') as typeof import('path')
+          if (cwd.includes('\0')) {
+            this.broadcast(session, { type: 'error', message: `路径包含非法字符: ${cwd}` })
+            break
+          }
+          const resolved = resolve(cwd)
+          const { existsSync, statSync } = require('fs') as typeof import('fs')
+          if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+            this.broadcast(session, { type: 'error', message: `路径不存在或不是目录: ${cwd}` })
+            break
+          }
+          session.info.cwd = resolved
+          this.broadcast(session, { type: 'cwd_changed', cwd: resolved })
         }
         break
       }

@@ -62,6 +62,9 @@ function searchFiles(
       '.ttf', '.eot', '.pdf', '.zip', '.tar', '.gz', '.exe', '.dll', '.so', '.dylib']
     if (binaryExts.some(ext => entry.endsWith(ext))) continue
 
+    // 跳过大文件（>10MB），防止 OOM
+    if (stat.size > 10 * 1024 * 1024) continue
+
     let content: string
     try {
       content = readFileSync(fullPath, 'utf-8')
@@ -72,7 +75,9 @@ function searchFiles(
     const lines = content.split('\n')
     for (let i = 0; i < lines.length; i++) {
       if (results.length >= maxResults) break
-      if (regex.test(lines[i])) {
+      // 截断超长行防止 ReDoS（正则在超长字符串上可能指数级回溯）
+      const line = lines[i].length > 10000 ? lines[i].slice(0, 10000) : lines[i]
+      if (regex.test(line)) {
         const relPath = relative(rootDir, fullPath)
         results.push(`${relPath}:${i + 1}: ${lines[i].trimEnd()}`)
       }
@@ -118,7 +123,8 @@ export const GrepTool = buildTool({
         const content = readFileSync(searchRoot, 'utf-8')
         const lines = content.split('\n')
         for (let i = 0; i < lines.length && results.length < maxResults; i++) {
-          if (regex.test(lines[i])) {
+          const line = lines[i].length > 10000 ? lines[i].slice(0, 10000) : lines[i]
+          if (regex.test(line)) {
             results.push(`${searchRoot}:${i + 1}: ${lines[i].trimEnd()}`)
           }
         }

@@ -8,7 +8,6 @@ import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js'
 import { saveConfig } from '../core/Config.js'
 import { App } from '../tui/App.js'
-import { InkRenderer } from '../tui/InkRenderer.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { LLMProvider } from '../core/providers/index.js'
 
@@ -34,6 +33,7 @@ function patchStderr(listener: StderrListener) {
   process.stderr.write = ((chunk: any) => {
     const text = typeof chunk === 'string' ? chunk : String(chunk)
     // 过滤 ANSI 转义序列（避免颜色码干扰 Ink 渲染）
+    // eslint-disable-next-line no-control-regex
     const clean = text.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
     if (clean && stderrListener) {
       stderrListener(clean)
@@ -90,13 +90,7 @@ export async function runInteractiveMode(
   }
 
   // ── 进入 alternate screen（参考 claude-code 的 DEC 1049 方案）──
-  // 必须在 render() 前发送，确保 Ink 的第一帧渲染到独立缓冲区
   process.stdout.write('\x1b[?1049h\x1b[H')
-
-  // 创建 cell-level diff 渲染器（拦截 Ink 的 stdout，做增量 diff + DEC 2026 同步输出）
-  const renderer = new InkRenderer(process.stdout)
-  renderer.hideCursor()
-  const proxyStdout = renderer.createProxyStream()
 
   // stderr 回调容器：App 挂载后设置 listener
   let stderrCallback: StderrListener | null = null
@@ -120,13 +114,11 @@ export async function runInteractiveMode(
         },
         onStderrReady: (cb: StderrListener) => { stderrCallback = cb },
       }),
-      { stdout: proxyStdout },
     )
 
     await waitUntilExit()
   } finally {
-    // ── 清理：恢复光标 + stderr + raw mode + 退出 alternate screen ──
-    renderer.showCursor()
+    // ── 清理：恢复 stderr + raw mode + 退出 alternate screen ──
     restoreStderr()
     if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
       process.stdin.setRawMode(false)

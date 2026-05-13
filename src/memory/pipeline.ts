@@ -16,6 +16,8 @@ export interface PipelineOptions {
   minConfidence?: number
   /** 会话 ID，写入记忆时作为来源标记 */
   sessionId?: string
+  /** 记忆归属的 agent 名称，默认 'main' */
+  agent?: string
 }
 
 export interface PipelineResult {
@@ -38,6 +40,7 @@ export async function runMemoryPipeline(
     dedupThreshold = 0.85,
     minConfidence = 0.4,
     sessionId,
+    agent = 'main',
   } = opts
 
   const result: PipelineResult = { saved: 0, skipped: 0, condensed: 0 }
@@ -87,7 +90,7 @@ export async function runMemoryPipeline(
     store.addMemory({
       content,
       type: mem.type,
-      agent: 'main',
+      agent,
       importance: mem.importance,
       sourceSession: sessionId,
     } as Omit<Memory, 'id' | 'createdAt' | 'updatedAt'>)

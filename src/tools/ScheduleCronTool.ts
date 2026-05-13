@@ -10,9 +10,9 @@ import { invalidateFileCache } from './FileReadTool.js'
 
 const CRON_FILE = join(getConfigDir(), 'crons.json')
 
-// ── 并发写入保护：防止同一轮次并行工具调用导致重复创建 ──────────────────────
-// 使用内存级互斥锁，确保 create 操作串行执行（读-检查-写 原子化）
-let createLock: Promise<void> = Promise.resolve()
+// ── 并发写入保护：防止同一轮次并行工具调用导致数据竞态 ──────────────────────
+// 使用内存级互斥锁，确保所有读-改-写操作串行执行
+let cronLock: Promise<void> = Promise.resolve()
 
 export interface CronJob {
   id: string
@@ -311,7 +311,10 @@ function scheduleJob(job: CronJob) {
     return
   }
 
-  const timer = setTimeout(() => {
+  // setTimeout 最大延迟约 24.8 天（2^31 - 1 ms），超限时分段调度
+  const MAX_TIMER_DELAY = 2_147_483_647
+
+  const trigger = () => {
     activeTimers.delete(job.id)
     const crons = loadCrons()
     const idx = crons.findIndex(c => c.id === job.id)
@@ -330,7 +333,18 @@ function scheduleJob(job: CronJob) {
     }
     // 触发任务
     if (onTrigger) onTrigger(job)
-  }, delay)
+  }
+
+  let timer: ReturnType<typeof setTimeout>
+  if (delay > MAX_TIMER_DELAY) {
+    // 递归分段：每段最多 MAX_TIMER_DELAY，剩余时间重新调度
+    timer = setTimeout(() => {
+      activeTimers.delete(job.id)
+      scheduleJob(job)
+    }, MAX_TIMER_DELAY)
+  } else {
+    timer = setTimeout(trigger, delay)
+  }
 
   activeTimers.set(job.id, timer)
 }
@@ -436,8 +450,8 @@ cron 表达式格式（5位）：分 时 日 月 周
     if (input.action === 'create') {
       // ── 串行化保护：防止并行工具调用导致重复创建（竞态条件）──
       let resolveCreate!: () => void
-      const prevLock = createLock
-      createLock = new Promise<void>(resolve => { resolveCreate = resolve })
+      const prevLock = cronLock
+      cronLock = new Promise<void>(resolve => { resolveCreate = resolve })
       await prevLock
 
       try {
@@ -501,6 +515,12 @@ cron 表达式格式（5位）：分 时 日 月 周
         return { type: 'error', message: '必须提供 id 或 description 之一' }
       }
 
+      let resolveDelete!: () => void
+      const prevLockD = cronLock
+      cronLock = new Promise<void>(resolve => { resolveDelete = resolve })
+      await prevLockD
+
+      try {
       const crons = loadCrons()
 
       // 优先按 id 精确匹配，否则按 description 模糊匹配
@@ -525,9 +545,19 @@ cron 表达式格式（5位）：分 时 日 月 周
       crons.splice(idx, 1)
       saveCrons(crons)
       return { type: 'success', output: `✅ 定时任务已删除，无需再次查询验证，操作已完成。\nID: ${job.id}\n描述: ${job.description}` }
+      } finally {
+        resolveDelete()
+      }
     }
 
     if (input.action === 'toggle') {
+      let resolveToggle!: () => void
+      const prevLockT = cronLock
+      cronLock = new Promise<void>(resolve => { resolveToggle = resolve })
+      await prevLockT
+
+      try {
+      const crons = loadCrons()
       const job = crons.find(c => c.id === input.id)
       if (!job) return { type: 'error', message: `未找到任务 ID: ${input.id}` }
       job.enabled = input.enabled
@@ -539,6 +569,9 @@ cron 表达式格式（5位）：分 时 日 月 周
       }
       saveCrons(crons)
       return { type: 'success', output: `✅ 任务 ${input.id} 已${input.enabled ? '启用' : '禁用'}` }
+      } finally {
+        resolveToggle()
+      }
     }
 
     return { type: 'error', message: '未知操作' }

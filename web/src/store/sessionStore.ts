@@ -76,7 +76,7 @@ interface SessionState {
   /**
    * 创建新会话：调用 REST API，成功后建立 WS 连接，并设为活跃会话。
    */
-  createSession: (req: CreateSessionRequest) => Promise<void>
+  createSession: (req: CreateSessionRequest) => Promise<string>
 
   /**
    * 删除会话：关闭对应 WS 连接，调用 REST API，从列表移除。
@@ -197,7 +197,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  async createSession(req: CreateSessionRequest) {
+  async createSession(req: CreateSessionRequest): Promise<string> {
     // 若调用方没有指定 model，自动带入用户选择的 pendingModel
     const { pendingModel } = get()
     const mergedReq: CreateSessionRequest = {
@@ -217,6 +217,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     // 4. 设为活跃会话
     set({ activeSessionId: session.id })
+    return session.id
   },
 
   setPendingModel(model: string | null) {
@@ -253,6 +254,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   async deleteSession(id: string) {
+    _clearOptimisticTimer(id)
     const { wsClients } = get()
 
     // 1. 关闭对应 WS 连接

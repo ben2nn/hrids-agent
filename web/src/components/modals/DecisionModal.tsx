@@ -52,6 +52,9 @@ export function DecisionModal({ sessionId: _sessionId, decision, onReply }: Deci
       onClick={(e) => e.stopPropagation()}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={decision.title || '决策请求'}
         className="bg-[var(--bg-secondary)] w-full max-w-lg rounded-2xl shadow-[var(--shadow-lg)] border border-[var(--border)] mx-4 flex flex-col"
         style={{ maxHeight: 'min(680px, calc(100vh - 48px))' }}
         onClick={(e) => e.stopPropagation()}

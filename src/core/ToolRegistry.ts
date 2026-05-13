@@ -77,7 +77,7 @@ export class ToolRegistry {
   private readonly _autoFlatten: boolean
   private _planMode = false
   private _interceptor: ToolInterceptor | null = null
-  private _auditListener: ToolCallAuditListener | null = null
+  private _auditListeners: ToolCallAuditListener[] = []
   private _resultAugmenter: ToolResultAugmenter | null = null
 
   constructor(opts: ToolRegistryOptions = {}) {
@@ -110,7 +110,8 @@ export class ToolRegistry {
    * 每次工具调用时触发，用于日志记录
    */
   setAuditListener(fn: ToolCallAuditListener | null): void {
-    this._auditListener = fn
+    if (fn) this._auditListeners.push(fn)
+    else this._auditListeners = []
   }
 
   /**
@@ -270,14 +271,12 @@ export class ToolRegistry {
     }
 
     // 审计日志
-    try {
-      this._auditListener?.({
-        name,
-        args,
-        timestamp: Date.now(),
-      })
-    } catch {
-      /* audit path must never break tool execution */
+    for (const listener of this._auditListeners) {
+      try {
+        listener({ name, args, timestamp: Date.now() })
+      } catch {
+        /* audit path must never break tool execution */
+      }
     }
 
     // autoFlatten: 还原点号路径参数为嵌套对象

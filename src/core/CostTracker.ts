@@ -47,6 +47,11 @@ export class CostTracker {
     this.model = model
   }
 
+  /** 更新当前模型（用于 FallbackProvider 切换模型后同步定价） */
+  setModel(model: string) {
+    this.model = model
+  }
+
   add(delta: Partial<TokenUsage>) {
     this.usage.inputTokens += delta.inputTokens ?? 0
     this.usage.outputTokens += delta.outputTokens ?? 0
@@ -60,9 +65,16 @@ export class CostTracker {
 
   getCostUsd(): number {
     // 前缀匹配（处理带日期后缀的模型名，如 claude-3-5-sonnet-20241022）
+    // 按前缀长度降序排列，优先匹配最长前缀（避免 gpt-4 误匹配 gpt-4o）
     const pricing = MODEL_PRICING[this.model]
-      ?? Object.entries(MODEL_PRICING).find(([k]) => this.model.startsWith(k))?.[1]
-      ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      ?? (Object.entries(MODEL_PRICING)
+        .filter(([k]) => this.model.startsWith(k))
+        .sort((a, b) => b[0].length - a[0].length)
+        [0]?.[1])
+    if (!pricing) {
+      // 未知模型：返回 0 但不静默，便于发现新模型需要添加定价
+      return 0
+    }
     const M = 1_000_000
     return (
       (this.usage.inputTokens * pricing.input) / M +

@@ -139,6 +139,24 @@ function getToolCards(
 
 // ─── Store 实现 ────────────────────────────────────────────────────────────
 
+// text_delta 批量刷新：累积 delta 后在下一帧统一更新，避免高频创建新 Map
+const _pendingDeltas = new Map<string, string>()
+let _deltaFlushScheduled = false
+function scheduleDeltaFlush(set: (partial: Partial<MessageState>) => void, get: () => MessageState) {
+  if (_deltaFlushScheduled) return
+  _deltaFlushScheduled = true
+  requestAnimationFrame(() => {
+    _deltaFlushScheduled = false
+    if (_pendingDeltas.size === 0) return
+    const newStreamingText = new Map(get().streamingText)
+    for (const [sid, delta] of _pendingDeltas) {
+      newStreamingText.set(sid, (newStreamingText.get(sid) ?? '') + delta)
+    }
+    _pendingDeltas.clear()
+    set({ streamingText: newStreamingText })
+  })
+}
+
 export const useMessageStore = create<MessageState>((set, get) => ({
   messages: new Map(),
   streamingText: new Map(),
@@ -166,12 +184,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         break
       }
 
-      // ── 流式文本追加 ──────────────────────────────────────────────────
+      // ── 流式文本追加（rAF 批量刷新，避免高频创建新 Map）──────────────
       case 'text_delta': {
-        const prev = state.streamingText.get(sessionId) ?? ''
-        const newStreamingText = new Map(state.streamingText)
-        newStreamingText.set(sessionId, prev + msg.delta)
-        set({ streamingText: newStreamingText })
+        _pendingDeltas.set(sessionId, (_pendingDeltas.get(sessionId) ?? '') + msg.delta)
+        scheduleDeltaFlush(set, get)
         break
       }
 

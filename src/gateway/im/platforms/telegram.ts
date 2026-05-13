@@ -356,8 +356,9 @@ export class TelegramAdapter extends BasePlatformAdapter {
     if (this.processedIds.has(msg.message_id)) return
     this.processedIds.add(msg.message_id)
     if (this.processedIds.size > 1000) {
-      // 清理旧记录（简单策略：清空重来）
-      this.processedIds.clear()
+      // 保留最近 500 条，丢弃最旧的（Set 迭代顺序 = 插入顺序）
+      const ids = [...this.processedIds]
+      this.processedIds = new Set(ids.slice(ids.length - 500))
     }
 
     // 忽略 Bot 自身的消息

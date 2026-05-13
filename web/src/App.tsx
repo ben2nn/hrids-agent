@@ -44,7 +44,7 @@ export function App() {
       setInitialized(true)
     }
     void init()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadFromStorage, checkConnection])
 
   // ── 连接成功后：拉取会话列表，并自动恢复上次活跃会话 ─────────────────
   useEffect(() => {

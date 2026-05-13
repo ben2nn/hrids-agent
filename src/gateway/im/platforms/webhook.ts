@@ -66,6 +66,10 @@ export class WebhookAdapter extends BasePlatformAdapter {
       void this.handleRequest(req, res)
     })
 
+    if (!this.webhookConfig.secret) {
+      log.warn('Webhook 适配器未配置 secret，任意来源可发送消息，生产环境建议配置 secret')
+    }
+
     await new Promise<void>((resolve, reject) => {
       this.server!.listen(port, host, () => {
         log.info('Webhook 适配器已启动', { host, port })
@@ -235,6 +239,12 @@ export class WebhookAdapter extends BasePlatformAdapter {
       'X-Accel-Buffering': 'no',
     })
 
+    // 关闭同 chatId 的旧 SSE 连接，防止资源泄漏
+    const oldClient = this.sseClients.get(chatId)
+    if (oldClient) {
+      try { oldClient.res.end() } catch { /* 忽略 */ }
+    }
+
     const client: SSEClient = { chatId, res, createdAt: Date.now() }
     this.sseClients.set(chatId, client)
 
@@ -286,7 +296,14 @@ interface MessageBody {
 function readJSON<T>(req: http.IncomingMessage): Promise<T> {
   return new Promise((resolve, reject) => {
     let data = ''
-    req.on('data', (chunk) => { data += chunk })
+    const MAX_BODY = 10 * 1024 * 1024 // 10MB
+    req.on('data', (chunk) => {
+      data += chunk
+      if (data.length > MAX_BODY) {
+        req.destroy()
+        reject(new Error('请求体超过 10MB 限制'))
+      }
+    })
     req.on('end', () => {
       try {
         resolve(JSON.parse(data) as T)

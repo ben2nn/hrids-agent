@@ -2,8 +2,8 @@
 import http from 'http'
 import express from 'express'
 import { WebSocketServer, WebSocket } from 'ws'
-import { execSync } from 'child_process'
-import { randomBytes } from 'crypto'
+import { execFileSync } from 'child_process'
+import { randomBytes, timingSafeEqual, scryptSync } from 'crypto'
 import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
 import { listSessions as listDiskSessions, loadSessionEvents, loadSessionMeta, listArchives as listSessionArchives, deleteSessionFromDisk } from '../core/SessionStore.js'
@@ -20,6 +20,49 @@ import type { IMGatewayConfig, IMPlatform, PlatformConfig } from './im/types.js'
 import { projectForDisplay } from '../core/projections.js'
 
 const log = logger.child({ component: 'gateway-server' })
+
+// ── 密码哈希（scrypt，兼容明文迁移）───────────────────────────
+
+const SCRYPT_KEYLEN = 64
+
+/** 用 scrypt 哈希密码，返回 `scrypt:hex(salt):hex(hash)` 格式 */
+export function hashPassword(password: string): string {
+  const salt = randomBytes(16)
+  const hash = scryptSync(password, salt, SCRYPT_KEYLEN)
+  return `scrypt:${salt.toString('hex')}:${hash.toString('hex')}`
+}
+
+/** 验证密码：支持 scrypt 哈希格式和明文回退 */
+function verifyPassword(stored: string, input: string): boolean {
+  if (stored.startsWith('scrypt:')) {
+    const parts = stored.split(':')
+    if (parts.length !== 3) return false
+    const salt = Buffer.from(parts[1], 'hex')
+    const expectedHash = Buffer.from(parts[2], 'hex')
+    const actualHash = scryptSync(input, salt, SCRYPT_KEYLEN)
+    return timingSafeEqual(expectedHash, actualHash)
+  }
+  // 明文回退（迁移期间兼容）
+  if (stored.length !== input.length) return false
+  return timingSafeEqual(Buffer.from(stored), Buffer.from(input))
+}
+
+/** 将内部错误转换为安全的客户端消息（隐藏路径和堆栈） */
+function safeClientError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err)
+  // 移除文件路径（Windows C:\... 和 Unix /path/...）
+  return msg.replace(/[A-Za-z]:\\[^\s"']+|\/[^\s"':]+/g, '<path>').slice(0, 200)
+}
+
+/** 清洗 mammoth 输出的 HTML，仅保留安全标签，防止 XSS */
+function sanitizeHtml(html: string): string {
+  // 移除 script/style 标签及内容
+  let safe = html.replace(/<\s*(script|style|iframe|object|embed|form)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+  // 移除 on* 事件属性和 javascript: 协议
+  safe = safe.replace(/\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)/gi, '')
+  safe = safe.replace(/href\s*=\s*["']?\s*javascript\s*:/gi, 'href="#"')
+  return safe
+}
 
 /** 原子写入 JSON 文件：先写 .tmp 再 rename，防止并发写入时文件损坏 */
 function atomicWriteJson(filePath: string, data: unknown): void {
@@ -38,7 +81,7 @@ export interface DisplayMessage {
   toolId?: string
   toolName?: string
   toolInput?: unknown
-  toolStatus?: 'success' | 'error'
+  toolStatus?: 'success' | 'error' | 'unknown'
   toolResult?: unknown
   images?: string[]
   isCron?: boolean
@@ -161,9 +204,26 @@ export function createGateway(config: GatewayConfig = {}) {
   const hasUsers = (config.users ?? []).length > 0
   const hasStaticToken = !!config.authToken
 
-  // 登录模式下的 JWT 密钥（启动时生成随机密钥，或使用配置中的密钥）
-  const jwtSecret = config.jwtSecret
-    ?? (hasUsers ? randomBytes(32).toString('hex') : '')
+  // 登录模式下的 JWT 密钥（优先配置 > 持久化文件 > 新生成并持久化）
+  let jwtSecret: string
+  if (config.jwtSecret) {
+    jwtSecret = config.jwtSecret
+  } else if (hasUsers) {
+    // 从持久化文件加载，避免重启后已有 token 失效
+    const secretFile = join(getConfigDir(), '.jwt-secret')
+    try {
+      if (existsSync(secretFile)) {
+        jwtSecret = readFileSync(secretFile, 'utf-8').trim()
+      } else {
+        jwtSecret = randomBytes(32).toString('hex')
+        try { writeFileSync(secretFile, jwtSecret, 'utf-8') } catch { /* 写入失败不阻塞启动 */ }
+      }
+    } catch {
+      jwtSecret = randomBytes(32).toString('hex')
+    }
+  } else {
+    jwtSecret = ''
+  }
 
   /** 验证 Bearer token（自动去除 "Bearer " 前缀） */
   function verifyToken(authHeader: string): boolean {
@@ -172,10 +232,16 @@ export function createGateway(config: GatewayConfig = {}) {
   }
 
   /** 验证裸 token（不含 "Bearer " 前缀） */
+  /** 时序安全的字符串比较，防止侧信道攻击 */
+  function timingSafeCompare(a: string, b: string): boolean {
+    if (a.length !== b.length) return false
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b))
+  }
+
   function verifyRawToken(token: string): boolean {
     if (!token) return false
     if (hasStaticToken) {
-      return token === config.authToken
+      return timingSafeCompare(token, config.authToken ?? '')
     }
     if (hasUsers) {
       try {
@@ -202,8 +268,14 @@ export function createGateway(config: GatewayConfig = {}) {
   const app = express()
   app.use(express.json({ limit: '50mb' }))
 
+  // 登录接口专用速率限制（5次/分钟/IP，防暴力破解）
+  const loginLimiter = new RateLimiter(5, 60_000)
+
   // ── CORS 中间件（在所有 API 路由之前）──────────────────────
   const corsOrigin = config.corsOrigin ?? '*'
+  if (corsOrigin === '*') {
+    log.warn('CORS Origin 为通配符 *，生产环境建议在 config.yaml 中设置 corsOrigin 为具体域名')
+  }
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', corsOrigin)
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
@@ -215,8 +287,29 @@ export function createGateway(config: GatewayConfig = {}) {
     next()
   })
 
+  // ── 全局 API 速率限制（/api/* 和 /sessions*）────────────────
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/') || req.path.startsWith('/sessions')) {
+      const ip = req.ip ?? 'unknown'
+      if (!rateLimiter.check(ip)) {
+        log.warn('API 速率限制触发', { ip, path: req.path })
+        res.status(429).json({ error: '请求过于频繁，请稍后再试' })
+        return
+      }
+    }
+    next()
+  })
+
   // ── 登录接口（在鉴权中间件之前，无需 token）──────────────────
   app.post('/api/login', (req, res) => {
+    // 登录速率限制
+    const ip = req.ip ?? 'unknown'
+    if (!loginLimiter.check(ip)) {
+      log.warn('登录速率限制触发', { ip })
+      res.status(429).json({ error: '登录尝试过于频繁，请稍后再试' })
+      return
+    }
+
     const { username, password } = req.body as { username?: string; password?: string }
     const users = config.users ?? []
 
@@ -226,7 +319,8 @@ export function createGateway(config: GatewayConfig = {}) {
       return
     }
 
-    const matched = users.find(u => u.username === username && u.password === password)
+    const matched = username && password && users.find(u =>
+      timingSafeCompare(u.username, username) && verifyPassword(u.password, password))
     if (!matched) {
       log.warn('登录失败', { username, ip: req.ip })
       res.status(401).json({ error: '用户名或密码错误' })
@@ -343,22 +437,29 @@ export function createGateway(config: GatewayConfig = {}) {
     }
   })
 
-  // 创建新会话（带速率限制）
+  // 创建新会话
   app.post('/sessions', async (req, res) => {
-    const ip = req.ip ?? 'unknown'
-    if (!rateLimiter.check(ip)) {
-      log.warn('速率限制触发', { ip })
-      res.status(429).json({ error: '请求过于频繁，请稍后再试' })
-      return
-    }
     try {
       const body = req.body as CreateSessionRequest
+      // 基础类型校验，防止注入对象/数组
+      for (const key of ['model', 'provider', 'apiKey', 'baseUrl', 'cwd', 'resume', 'title'] as const) {
+        const val = body[key]
+        if (val !== undefined && typeof val !== 'string') {
+          res.status(400).json({ error: `${key} 必须是字符串` })
+          return
+        }
+      }
+      // cwd 路径遍历检查
+      if (body.cwd && (body.cwd.includes('\0') || body.cwd.includes('..'))) {
+        res.status(400).json({ error: 'cwd 包含非法字符' })
+        return
+      }
       const session = await manager.createSession(body)
       // 返回完整的 SessionInfo，前端直接使用 session.id 等字段
       res.json(session.info)
     } catch (err) {
       log.error('创建会话失败', { error: String(err), stack: err instanceof Error ? err.stack : undefined })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -391,7 +492,7 @@ export function createGateway(config: GatewayConfig = {}) {
         maxTurns: cfg.maxTurns,
       })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -407,7 +508,7 @@ export function createGateway(config: GatewayConfig = {}) {
       saveConfig(patch)
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -433,7 +534,7 @@ export function createGateway(config: GatewayConfig = {}) {
       writeFileSync(file, JSON.stringify({ sessionId: body.sessionId ?? null }, null, 2), 'utf-8')
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -464,7 +565,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
       res.json({ models, defaultModel })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -589,7 +690,7 @@ export function createGateway(config: GatewayConfig = {}) {
       })
       res.json({ cwd, path: relPath, entries })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -629,7 +730,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const content = readFileSync(absPath, 'utf-8')
       res.json({ path: relPath, content, size: stat.size, mtime: stat.mtimeMs })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -672,7 +773,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
       if (ext === '.docx') {
         const result = await mammoth.convertToHtml({ path: absPath })
-        res.json({ type: 'html', html: result.value })
+        res.json({ type: 'html', html: sanitizeHtml(result.value) })
         return
       }
 
@@ -709,7 +810,7 @@ export function createGateway(config: GatewayConfig = {}) {
       res.status(400).json({ error: '不支持的文件格式，仅支持 docx/doc/xlsx/xls/csv' })
     } catch (err) {
       log.error('文件预览失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -743,7 +844,7 @@ export function createGateway(config: GatewayConfig = {}) {
       res.json({ ok: true })
     } catch (err) {
       log.error('文件保存失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -770,7 +871,7 @@ export function createGateway(config: GatewayConfig = {}) {
     }
 
     try {
-      const content = execSync(`git show HEAD:${relPath}`, { cwd, encoding: 'utf-8', timeout: 5000 })
+      const content = execFileSync('git', ['show', `HEAD:${relPath}`], { cwd, encoding: 'utf-8', timeout: 5000 })
       res.json({ path: relPath, content })
     } catch {
       // 文件在 git 中不存在（新文件）或不在 git 仓库中
@@ -848,7 +949,7 @@ export function createGateway(config: GatewayConfig = {}) {
       res.json({ files: uploaded })
     } catch (err) {
       log.error('文件上传失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -893,7 +994,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -921,7 +1022,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1004,7 +1105,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
       res.json(job)
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1035,13 +1136,30 @@ export function createGateway(config: GatewayConfig = {}) {
         res.status(400).json({ error: '请求体格式错误' })
         return
       }
+      // 结构校验：mcpServers 必须是对象，每个值必须是包含 command 的对象
+      const servers = body.mcpServers ?? {}
+      if (typeof servers !== 'object' || Array.isArray(servers)) {
+        res.status(400).json({ error: 'mcpServers 必须是对象' })
+        return
+      }
+      for (const [name, cfg] of Object.entries(servers)) {
+        if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+          res.status(400).json({ error: `MCP 服务器 "${name}" 配置格式错误，必须是对象` })
+          return
+        }
+        const serverCfg = cfg as Record<string, unknown>
+        if (!serverCfg.command || typeof serverCfg.command !== 'string') {
+          res.status(400).json({ error: `MCP 服务器 "${name}" 缺少 command 字段` })
+          return
+        }
+      }
       if (!existsSync(mcpDir)) mkdirSync(mcpDir, { recursive: true })
       atomicWriteJson(mcpFile, body)
       log.info('MCP 配置已保存', { serverCount: Object.keys(body.mcpServers ?? {}).length })
       res.json({ ok: true })
     } catch (err) {
       log.error('MCP 配置保存失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1052,8 +1170,12 @@ export function createGateway(config: GatewayConfig = {}) {
     try {
       const serverName = req.params.name
       const serverConfig = req.body as Record<string, unknown>
-      if (!serverConfig || typeof serverConfig !== 'object') {
-        res.status(400).json({ error: '请求体格式错误' })
+      if (!serverConfig || typeof serverConfig !== 'object' || Array.isArray(serverConfig)) {
+        res.status(400).json({ error: '请求体格式错误，必须是对象' })
+        return
+      }
+      if (!serverConfig.command || typeof serverConfig.command !== 'string') {
+        res.status(400).json({ error: 'MCP 服务器配置缺少 command 字段' })
         return
       }
 
@@ -1069,7 +1191,7 @@ export function createGateway(config: GatewayConfig = {}) {
       log.info('MCP 服务器已添加/更新', { name: serverName })
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1092,7 +1214,7 @@ export function createGateway(config: GatewayConfig = {}) {
       log.info('MCP 服务器已删除', { name: serverName })
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1197,7 +1319,7 @@ export function createGateway(config: GatewayConfig = {}) {
       rs(tmpPath, disabledPath)
       res.json({ ok: true, enabled })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1221,7 +1343,7 @@ export function createGateway(config: GatewayConfig = {}) {
       }
     } catch (err) {
       log.warn('技能安装失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1244,7 +1366,7 @@ export function createGateway(config: GatewayConfig = {}) {
       }
     } catch (err) {
       log.warn('技能卸载失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1302,7 +1424,7 @@ export function createGateway(config: GatewayConfig = {}) {
       res.json({ results, total: data.total ?? results.length })
     } catch (err) {
       log.warn('技能市场搜索失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1321,17 +1443,28 @@ export function createGateway(config: GatewayConfig = {}) {
       })
       res.json({ platforms: sanitized, status: platformManager.getStatus() })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
-  // GET /im/platforms/config — 读取完整配置（含 token，需鉴权）
+  // GET /im/platforms/config — 读取配置（token 脱敏）
   app.get('/im/platforms/config', (_req, res) => {
     try {
       const cfg = PlatformManager.loadConfig()
-      res.json(cfg)
+      // 脱敏：隐藏 token/secret 等敏感字段
+      const sanitized = JSON.parse(JSON.stringify(cfg))
+      if (sanitized?.platforms && typeof sanitized.platforms === 'object') {
+        for (const p of Object.values(sanitized.platforms) as Record<string, unknown>[]) {
+          if (p && typeof p === 'object') {
+            if (p.token) p.token = '***'
+            if (p.secret) p.secret = '***'
+            if (p.appSecret) p.appSecret = '***'
+          }
+        }
+      }
+      res.json(sanitized)
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1347,7 +1480,7 @@ export function createGateway(config: GatewayConfig = {}) {
       log.info('IM 平台配置已保存', { platformCount: body.platforms.length })
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1388,7 +1521,7 @@ export function createGateway(config: GatewayConfig = {}) {
 
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1408,7 +1541,7 @@ export function createGateway(config: GatewayConfig = {}) {
       log.info('IM 平台已删除', { platform })
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1430,7 +1563,7 @@ export function createGateway(config: GatewayConfig = {}) {
       log.info('IM 平台适配器已重启', { platform })
       res.json({ ok: true, status: platformManager.getStatus() })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1449,7 +1582,7 @@ export function createGateway(config: GatewayConfig = {}) {
       })
     } catch (err) {
       log.error('发起微信扫码登录失败', { error: String(err) })
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1534,11 +1667,11 @@ export function createGateway(config: GatewayConfig = {}) {
       const buf = readFileSync(absPath)
       res.send(buf)
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
-  // GET /api/logs — 读取最近的日志条目
+  // GET /api/logs — 读取最近的日志条目（只读文件尾部，防止 OOM）
   app.get('/api/logs', (req, res) => {
     const logFile = join(getConfigDir(), 'logs', 'agent.log')
     const limit = Math.min(parseInt(String(req.query.limit ?? '200'), 10) || 200, 1000)
@@ -1550,7 +1683,16 @@ export function createGateway(config: GatewayConfig = {}) {
     }
 
     try {
-      const content = readFileSync(logFile, 'utf-8')
+      const { statSync, openSync, readSync, closeSync } = require('fs') as typeof import('fs')
+      const stat = statSync(logFile)
+      // 最多读取文件尾部 5MB
+      const MAX_READ = 5 * 1024 * 1024
+      const readSize = Math.min(stat.size, MAX_READ)
+      const buf = Buffer.allocUnsafe(readSize)
+      const fd = openSync(logFile, 'r')
+      readSync(fd, buf, 0, readSize, stat.size - readSize)
+      closeSync(fd)
+      const content = buf.toString('utf-8')
       const lines = content.split('\n').filter(l => l.trim())
       const entries: Array<Record<string, unknown>> = []
 
@@ -1566,7 +1708,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const sliced = entries.slice(-limit)
       res.json({ logs: sliced, total: entries.length })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1580,7 +1722,15 @@ export function createGateway(config: GatewayConfig = {}) {
     }
 
     try {
-      const content = readFileSync(logFile, 'utf-8')
+      const { statSync, openSync, readSync, closeSync } = require('fs') as typeof import('fs')
+      const stat = statSync(logFile)
+      const MAX_READ = 5 * 1024 * 1024
+      const readSize = Math.min(stat.size, MAX_READ)
+      const buf = Buffer.allocUnsafe(readSize)
+      const fd = openSync(logFile, 'r')
+      readSync(fd, buf, 0, readSize, stat.size - readSize)
+      closeSync(fd)
+      const content = buf.toString('utf-8')
       const lines = content.split('\n').filter(l => l.trim())
 
       // 按日期聚合用量
@@ -1625,7 +1775,7 @@ export function createGateway(config: GatewayConfig = {}) {
         totals: { inputTokens: totalInput, outputTokens: totalOutput, costUsd: totalCost, calls: totalCalls },
       })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1640,7 +1790,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const content = readFileSync(configFile, 'utf-8')
       res.json({ content, path: configFile })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
@@ -1664,14 +1814,21 @@ export function createGateway(config: GatewayConfig = {}) {
       log.info('config.yaml 已通过 Web 界面更新')
       res.json({ ok: true })
     } catch (err) {
-      res.status(500).json({ error: String(err) })
+      res.status(500).json({ error: safeClientError(err) })
     }
   })
 
   // ── WebSocket 服务器 ─────────────────────────────────────────
   const server = http.createServer(app)
   // 不设置 path，由 connection 回调自行匹配 /sessions/:id/stream
-  const wss = new WebSocketServer({ server })
+  const wss = new WebSocketServer({
+    server,
+    // 支持通过 Sec-WebSocket-Protocol 传递 token（避免 token 出现在 URL 中）
+    handleProtocols: (protocols: Set<string>) => {
+      for (const p of protocols) return p
+      return false
+    },
+  })
 
   wss.on('connection', (ws: WebSocket, req) => {
     // req.url 包含路径和查询参数，先解析出纯路径部分再匹配
@@ -1684,10 +1841,10 @@ export function createGateway(config: GatewayConfig = {}) {
     }
     const sessionId = match[1]
 
-    // WebSocket 鉴权（通过 URL query 参数 token 或 Sec-WebSocket-Protocol）
+    // WebSocket 鉴权（优先 Sec-WebSocket-Protocol，兼容 URL query 参数）
     if (hasUsers || hasStaticToken) {
-      const token = parsedUrl.searchParams.get('token')
-        ?? req.headers['sec-websocket-protocol']
+      const token = req.headers['sec-websocket-protocol']
+        ?? parsedUrl.searchParams.get('token')
       if (!token || !verifyRawToken(token)) {
         log.warn('WebSocket 未授权', { sessionId })
         ws.close(1008, '未授权')
@@ -1708,7 +1865,15 @@ export function createGateway(config: GatewayConfig = {}) {
     // 再订阅（会触发回放缓冲区推送，前端已准备好接收）
     manager.subscribe(sessionId, ws)
     ws.on('message', (data) => {
-      manager.handleClientMessage(sessionId, data.toString())
+      // 消息大小限制（1MB），防止恶意客户端发送超大消息导致 OOM
+      const MAX_WS_MESSAGE_BYTES = 1024 * 1024
+      const raw = data.toString()
+      if (raw.length > MAX_WS_MESSAGE_BYTES) {
+        log.warn('WebSocket 消息过大，已丢弃', { sessionId, size: raw.length })
+        ws.close(1009, '消息过大')
+        return
+      }
+      manager.handleClientMessage(sessionId, raw)
     })
 
     ws.on('close', () => {

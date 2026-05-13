@@ -11,7 +11,7 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): object {
     const required: string[] = []
     for (const [key, val] of Object.entries(shape)) {
       properties[key] = zodFieldToSchema(val)
-      if (!(val instanceof z.ZodOptional)) required.push(key)
+      if (!(val instanceof z.ZodOptional) && !(val instanceof z.ZodDefault)) required.push(key)
     }
     return { type: 'object', properties, required }
   }
@@ -39,6 +39,10 @@ export function zodFieldToSchema(field: z.ZodTypeAny): object {
   if (field instanceof z.ZodNullable) {
     const inner = zodFieldToSchema(field.unwrap())
     return { ...inner, nullable: true }
+  }
+  // 剥离 Effects 包装（.refine() / .transform() / .pipe() 等）
+  if (field instanceof z.ZodEffects) {
+    return zodFieldToSchema(field._def.schema as z.ZodTypeAny)
   }
 
   const base: Record<string, unknown> = {}
@@ -83,6 +87,50 @@ export function zodFieldToSchema(field: z.ZodTypeAny): object {
     return { type: 'object', additionalProperties: zodFieldToSchema((field._def as { valueType: z.ZodTypeAny }).valueType), ...base }
   }
 
-  // 兜底：unknown / any
+  if (field instanceof z.ZodTuple) {
+    const items = (field._def as { items: z.ZodTypeAny[] }).items.map(zodFieldToSchema)
+    return { type: 'array', items, ...base }
+  }
+
+  if (field instanceof z.ZodAny) {
+    return { ...base }  // 不限制类型
+  }
+
+  // ZodNull
+  if (field instanceof z.ZodNull) {
+    return { type: 'null', ...base }
+  }
+
+  // ZodIntersection（.and()）
+  if (field instanceof z.ZodIntersection) {
+    const left = zodFieldToSchema(field._def.left as z.ZodTypeAny)
+    const right = zodFieldToSchema(field._def.right as z.ZodTypeAny)
+    return { allOf: [left, right], ...base }
+  }
+
+  // ZodDate
+  if (field instanceof z.ZodDate) {
+    return { type: 'string', format: 'date-time', ...base }
+  }
+
+  // ZodCatch（.catch() 包装，解包内部类型）
+  if (field instanceof z.ZodCatch) {
+    return zodFieldToSchema(field._def.innerType as z.ZodTypeAny)
+  }
+
+  // ZodReadonly（.readonly() 包装，解包内部类型）
+  if (field instanceof z.ZodReadonly) {
+    return zodFieldToSchema(field._def.innerType as z.ZodTypeAny)
+  }
+
+  // ZodBranded（.brand() 包装，解包内部类型）
+  if (field instanceof z.ZodBranded) {
+    return zodFieldToSchema(field._def.type as z.ZodTypeAny)
+  }
+
+  // 兜底：unknown / any 及未识别的 Zod 类型降级为 string
+  if (!(field instanceof z.ZodUnknown)) {
+    process.stderr.write(`[schema] 未识别的 Zod 类型 ${(field as { constructor?: { name?: string } }).constructor?.name ?? 'unknown'}，降级为 string\n`)
+  }
   return { type: 'string', ...base }
 }

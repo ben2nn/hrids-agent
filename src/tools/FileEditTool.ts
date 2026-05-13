@@ -1,5 +1,15 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs'
-import { resolve } from 'path'
+import { resolve, join } from 'path'
+
+/** 检查目录是否在 git 仓库中（向上查找 .git 目录） */
+function isGitRepo(dir: string): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--git-dir'], { cwd: dir, stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
 import { execFileSync } from 'child_process'
 import { z } from 'zod'
 import { buildTool } from '../core/Tool.js'
@@ -68,7 +78,13 @@ export const FileEditTool = buildTool({
 
     try {
       const content = readFileSync(filePath, 'utf-8')
-      const count = content.split(input.oldStr).length - 1
+      // 用 indexOf 循环计数，避免 split() 在大文件上创建大量临时数组
+      let count = 0
+      let pos = 0
+      while ((pos = content.indexOf(input.oldStr, pos)) !== -1) {
+        count++
+        pos += input.oldStr.length
+      }
 
       if (count === 0) {
         return { type: 'error', message: '未找到要替换的字符串' }
@@ -80,11 +96,16 @@ export const FileEditTool = buildTool({
       const updated = content.replace(input.oldStr, input.newStr)
 
       // 写入前先将当前状态提交到 git，使 HEAD 保留修改前内容
-      try {
-        execFileSync('git', ['add', input.path], { cwd, stdio: 'ignore' })
-        execFileSync('git', ['commit', '-m', `file_edit: ${input.path}`], { cwd, stdio: 'ignore' })
-      } catch {
-        // 非 git 仓库或无变更时静默忽略
+      // 仅在 git 仓库中执行，避免非仓库目录下无谓的 30s 超时等待
+      if (isGitRepo(cwd)) {
+        try {
+          execFileSync('git', ['add', input.path], { cwd, stdio: 'ignore' })
+          execFileSync('git', ['commit', '-m', `file_edit: ${input.path}`], { cwd, stdio: 'ignore' })
+        } catch (gitErr) {
+          if (gitErr instanceof Error && !gitErr.message.includes('not a git repository')) {
+            process.stderr.write(`[FileEditTool] git 备份失败: ${gitErr.message}\n`)
+          }
+        }
       }
 
       writeFileSync(filePath, updated, 'utf-8')

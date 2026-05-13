@@ -2,8 +2,10 @@
 // 与 ask_user 的区别：ask_user 是简单问答，DecisionTool 是带完整上下文的决策框架
 import { z } from 'zod'
 import * as readline from 'readline'
-import type { ToolDef } from '../core/Tool.js'
+import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
+
+const INTERACTIVE_TIMEOUT_MS = 5 * 60 * 1000 // 5 分钟超时
 
 const OptionSchema = z.object({
   label: z.string().describe('选项标签，简短'),
@@ -22,6 +24,7 @@ const inputSchema = z.object({
 
 // ── CLI / Server 模式（单会话）全局 pending resolve ──────────────────────────
 let pendingDecisionResolve: ((answer: string) => void) | null = null
+let pendingDecisionReject: ((err: Error) => void) | null = null
 
 // ── Gateway 模式（多会话）会话级 pending resolve 表 ──────────────────────────
 const sessionDecisionResolves = new Map<string, (answer: string) => void>()
@@ -54,6 +57,7 @@ export function resolveDecision(answer: string, sessionId?: string): boolean {
   if (!pendingDecisionResolve) return false
   const resolve = pendingDecisionResolve
   pendingDecisionResolve = null
+  pendingDecisionReject = null
   resolve(answer)
   return true
 }
@@ -108,10 +112,13 @@ export const DecisionTool: ToolDef<typeof inputSchema> = {
 
     // server 模式：通过 NDJSON 协议发送决策请求
     if (process.env.AGENT_SERVER_MODE === '1') {
-      return new Promise(resolve => {
+      const main = new Promise<ToolResult>((resolve, reject) => {
+        // 拒绝前一个未完成的决策请求，避免 Promise 泄漏
+        if (pendingDecisionReject) { pendingDecisionReject(new Error('request_decision 被新请求覆盖')); pendingDecisionReject = null }
         pendingDecisionResolve = (answer: string) => {
           resolve({ type: 'success', output: parseDecisionAnswer(answer, input.options) })
         }
+        pendingDecisionReject = reject
         process.stdout.write(JSON.stringify({
           type: 'decision_request',
           title: input.title,
@@ -122,6 +129,10 @@ export const DecisionTool: ToolDef<typeof inputSchema> = {
           impact: input.impact,
         }) + '\n')
       })
+      const timeout = new Promise<ToolResult>(resolve =>
+        setTimeout(() => resolve({ type: 'error', message: '决策请求超时（5 分钟无响应）' }), INTERACTIVE_TIMEOUT_MS)
+      )
+      return Promise.race([main, timeout])
     }
 
     // Gateway 多会话模式：按 sessionId 隔离 pending resolve 和推送回调
@@ -135,12 +146,16 @@ export const DecisionTool: ToolDef<typeof inputSchema> = {
         deadline: input.deadline,
         impact: input.impact,
       }
-      return new Promise(resolve => {
+      const main = new Promise<ToolResult>(resolve => {
         sessionDecisionResolves.set(sessionId, (answer: string) => {
           resolve({ type: 'success', output: parseDecisionAnswer(answer, input.options) })
         })
         gatewayDecisionCallbacks.get(sessionId)!(payload)
       })
+      const timeout = new Promise<ToolResult>(resolve =>
+        setTimeout(() => resolve({ type: 'error', message: '决策请求超时（5 分钟无响应）' }), INTERACTIVE_TIMEOUT_MS)
+      )
+      return Promise.race([main, timeout])
     }
 
     // 交互模式：直接打印并等待输入
@@ -152,12 +167,16 @@ export const DecisionTool: ToolDef<typeof inputSchema> = {
       terminal: false,
     })
 
-    return new Promise(resolve => {
+    const main = new Promise<ToolResult>(resolve => {
       rl.once('line', answer => {
         rl.close()
         resolve({ type: 'success', output: parseDecisionAnswer(answer.trim(), input.options) })
       })
     })
+    const timeout = new Promise<ToolResult>(resolve =>
+      setTimeout(() => { rl.close(); resolve({ type: 'error', message: '决策请求超时（5 分钟无响应）' }) }, INTERACTIVE_TIMEOUT_MS)
+    )
+    return Promise.race([main, timeout])
   },
 }
 

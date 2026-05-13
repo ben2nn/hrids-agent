@@ -1,5 +1,6 @@
 // 会话持久化 —— 将对话历史保存到本地磁盘
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from 'fs'
+import { randomBytes } from 'crypto'
 import { join } from 'path'
 import type { ConversationEvent } from './ConversationStore.js'
 import { getConfigDir } from './Config.js'
@@ -64,7 +65,7 @@ export function loadSessionEvents(sessionId: string): ConversationEvent[] | null
       if (!content.trim()) return []
       return content
         .split('\n')
-        .filter(line => line.trim())
+        .filter(line => line.trim() && !line.startsWith('//'))  // 跳过 schema marker 行
         .map(line => JSON.parse(line) as ConversationEvent)
     } catch {
       // 事件文件损坏时返回空数组，避免阻塞会话创建
@@ -132,7 +133,8 @@ export function listSessions(): SessionMeta[] {
 }
 
 export function generateSessionId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  // 使用 crypto 避免 Math.random 碰撞
+  return `${Date.now()}-${randomBytes(4).toString('hex')}`
 }
 
 /** 获取最近一次会话的 ID，没有历史会话时返回 null */
@@ -213,6 +215,9 @@ export function listArchives(sessionId: string): CompactArchive[] {
  * 读取指定归档段的事件日志
  */
 export function loadArchive(sessionId: string, filename: string): ConversationEvent[] | null {
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return null
+  }
   const archivePath = join(SESSIONS_DIR, sessionId, filename)
   if (!existsSync(archivePath)) return null
 

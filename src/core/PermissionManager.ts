@@ -4,6 +4,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from '
 import { join, resolve } from 'path'
 import { getConfigDir } from './Config.js'
 
+// 进程内写锁，防止并发 read-then-write 竞态
+let _rulesWriteLock: Promise<void> = Promise.resolve()
+
 export type PermissionMode =
   | 'ask'      // 每次都询问用户
   | 'craft'    // 自主执行模式：agent 独立完成任务，无需用户确认
@@ -90,7 +93,9 @@ function matchesRuleContent(actual: string, ruleContent: string): boolean {
   const finalRegex = regexStr.endsWith(' .*')
     ? regexStr.slice(0, -4) + '( .*)?'
     : regexStr
-  return new RegExp(`^${finalRegex}$`, 's').test(trimmed)
+  // 截断超长输入防止 ReDoS（规则匹配通常针对短命令）
+  const testStr = trimmed.length > 5000 ? trimmed.slice(0, 5000) : trimmed
+  return new RegExp(`^${finalRegex}$`, 's').test(testStr)
 }
 
 /**
@@ -288,26 +293,30 @@ export class PermissionManager {
   }
 
   // 永久批准（持久化到磁盘）
-  // 采用 read-then-write 模式：每次写入前重新读取磁盘最新状态，
-  // 防止多个 Gateway 会话并发修改时互相覆盖对方的规则。
+  // 采用 read-then-write + 进程内锁，防止并发修改覆盖
   approvePermanent(rule: string) {
-    const fresh = loadRules()
-    if (!fresh.alwaysAllow.includes(rule)) {
-      fresh.alwaysAllow.push(rule)
-      saveRules(fresh)
-    }
-    // 同步内存副本，保持一致
-    this.rules = fresh
+    _rulesWriteLock = _rulesWriteLock.then(async () => {
+      const fresh = loadRules()
+      if (!fresh.alwaysAllow.includes(rule)) {
+        fresh.alwaysAllow.push(rule)
+        saveRules(fresh)
+      }
+      this.rules = fresh
+    })
+    return _rulesWriteLock
   }
 
   // 永久拒绝
   denyPermanent(rule: string) {
-    const fresh = loadRules()
-    if (!fresh.alwaysDeny.includes(rule)) {
-      fresh.alwaysDeny.push(rule)
-      saveRules(fresh)
-    }
-    this.rules = fresh
+    _rulesWriteLock = _rulesWriteLock.then(async () => {
+      const fresh = loadRules()
+      if (!fresh.alwaysDeny.includes(rule)) {
+        fresh.alwaysDeny.push(rule)
+        saveRules(fresh)
+      }
+      this.rules = fresh
+    })
+    return _rulesWriteLock
   }
 
   // 永久强制询问（即使在 auto 模式下）

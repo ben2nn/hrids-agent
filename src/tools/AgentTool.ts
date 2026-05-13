@@ -144,7 +144,8 @@ export function createAgentTool(): ToolDef<typeof agentSchema> {
       const worktreeDir: string | null = useIsolated ? subCwd : null
 
       try {
-        const subSessionId = `ephemeral-${input.profile ?? 'sub'}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        const { randomBytes } = await import('crypto')
+        const subSessionId = `ephemeral-${input.profile ?? 'sub'}-${Date.now()}-${randomBytes(4).toString('hex')}`
         await runWithCwd(subCwd, () =>
           runWithSession(subSessionId, async () => {
             for await (const event of subEngine.send(input.prompt)) {

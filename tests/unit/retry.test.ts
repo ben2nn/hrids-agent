@@ -21,8 +21,9 @@ describe('withRetry', () => {
   })
 
   it('不可重试错误立即抛出', async () => {
-    const fn = vi.fn(async () => { throw new Error('业务逻辑错误') })
-    await expect(withRetry(fn, { maxAttempts: 3, baseDelayMs: 1 })).rejects.toThrow('业务逻辑错误')
+    // auth_error（401/403）是明确不可重试的
+    const fn = vi.fn(async () => { throw new Error('401 unauthorized') })
+    await expect(withRetry(fn, { maxAttempts: 3, baseDelayMs: 1 })).rejects.toThrow('401 unauthorized')
     expect(fn).toHaveBeenCalledTimes(1)
   })
 
@@ -30,6 +31,12 @@ describe('withRetry', () => {
     const fn = vi.fn(async () => { throw new Error('429 rate limit') })
     await expect(withRetry(fn, { maxAttempts: 2, baseDelayMs: 1 })).rejects.toThrow('429 rate limit')
     expect(fn).toHaveBeenCalledTimes(2)
+  })
+
+  it('未知错误默认可重试', async () => {
+    const fn = vi.fn(async () => { throw new Error('业务逻辑错误') })
+    await expect(withRetry(fn, { maxAttempts: 3, baseDelayMs: 1 })).rejects.toThrow('业务逻辑错误')
+    expect(fn).toHaveBeenCalledTimes(3)
   })
 
   it('自定义 retryIf 控制重试条件', async () => {

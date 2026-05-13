@@ -33,12 +33,6 @@ export interface ProviderOptions {
   provider?: string
   /** 用户自定义提供商列表（来自 config.yaml 的 customProviders） */
   customProviders?: CustomProviderConfig[]
-  /**
-   * 工具调用模式（默认 "native"）：
-   *   - "native"：原生 function calling
-   *   - "dsml"：强制走 DSML 文本解析（DS2API 等兼容层）
-   */
-  toolMode?: 'native' | 'dsml'
 }
 
 // ── 单一提供商创建 ────────────────────────────────────────────
@@ -86,7 +80,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
 // ── 内部：从 ProviderDef 构建 LLMProvider ─────────────────────
 
 function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
-  const { model = DEFAULT_MODEL, modelType, toolMode = 'native' } = opts
+  const { model = DEFAULT_MODEL, modelType } = opts
   const baseUrl = opts.baseUrl ?? def.defaultBaseUrl
   const apiKey = opts.apiKey
 
@@ -100,8 +94,7 @@ function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
   if (def.id !== 'ollama' && !apiKey) {
     throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
   }
-  // dsml 模式下禁用 OpenAI function calling，让模型输出 DSML 文本
-  return new OpenAIProvider({ ...config, apiKey: apiKey ?? 'ollama' }, def.id, toolMode === 'dsml')
+  return new OpenAIProvider({ ...config, apiKey: apiKey ?? 'ollama' }, def.id)
 }
 
 /** 解析提供商定义（内置 → 自定义） */
@@ -163,7 +156,6 @@ export function createTypedProvider(ctx: TypedProviderContext): LLMProvider | nu
         baseUrl: g.baseUrl,
         modelType,
         customProviders,
-        toolMode: g.toolMode,
       } satisfies ProviderOptions)),
     }))
 

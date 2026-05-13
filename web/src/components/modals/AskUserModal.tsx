@@ -55,6 +55,9 @@ export function AskUserModal({ sessionId: _sessionId, askUserState, onReply }: A
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Agent 提问"
         className="bg-[var(--bg-secondary)] w-full max-w-md rounded-2xl shadow-[var(--shadow-lg)] border border-[var(--border)] mx-4 flex flex-col"
         style={{ maxHeight: 'min(560px, calc(100vh - 48px))' }}
         onClick={(e) => e.stopPropagation()}

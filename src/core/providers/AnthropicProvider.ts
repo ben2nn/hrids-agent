@@ -13,7 +13,7 @@ export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
   readonly model: string
   readonly modelType: ModelType
-  readonly toolMode = 'native' as const
+
   private client: Anthropic
 
   constructor(config: ProviderConfig) {
@@ -30,6 +30,7 @@ export class AnthropicProvider implements LLMProvider {
     tools: ToolDef[],
     systemPrompt: string[],
     maxTokens: number,
+    signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {
     const anthropicMessages = messages.map(m => ({
       role: m.role as 'user' | 'assistant',
@@ -57,7 +58,7 @@ export class AnthropicProvider implements LLMProvider {
       system: systemBlocks,
       tools: tools.length > 0 ? tools.map(toAnthropicTool) as Anthropic.Tool[] : undefined,
       messages: anthropicMessages,
-    })
+    }, { signal })
 
     try {
       for await (const event of stream) {

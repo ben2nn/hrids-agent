@@ -97,7 +97,7 @@ export function projectForDisplay(events: readonly ConversationEvent[]): Display
               id: tc.id,
               name: tc.name,
               input: tc.input,
-              status: result ? (result.isError ? 'error' : 'success') : 'success',
+              status: result ? (result.isError ? 'error' : 'success') : 'unknown',
               timestamp: ev.timestamp + 1,
             }
             if (result) card.result = result.content
@@ -260,6 +260,17 @@ export function projectForLLM(
       case 'assistant_message': {
         const content: ContentBlock[] = []
 
+        // thinking 必须在 text 之前（Anthropic API 要求）
+        // 仅在有未被 prune 的 tool_calls 时才插入占位符
+        const hasActiveToolCalls = ev.toolCalls?.some(tc => !prunedToolCallIds?.has(tc.id))
+        if (ev.thinking) {
+          content.push({ type: 'thinking', thinking: ev.thinking })
+        } else if (hasActiveToolCalls) {
+          // mimo 等 thinking API 要求：有 tool_calls 的 assistant 消息必须携带 thinking 块
+          // 旧事件没有 thinking 数据时，插入占位符以满足 API 要求
+          content.push({ type: 'thinking', thinking: '[thinking content not captured]' })
+        }
+
         if (ev.text) {
           content.push({ type: 'text', text: ev.text })
         }
@@ -311,9 +322,16 @@ export function projectForLLM(
         break
 
       // system_event 注入为 user 消息，LLM 需要感知这些上下文
-      case 'system_event':
-        messages.push({ role: 'user', content: ev.content })
+      // 与前一条 user 消息合并，避免连续 user 消息违反 API 契约
+      case 'system_event': {
+        const last = messages[messages.length - 1]
+        if (last && last.role === 'user' && typeof last.content === 'string') {
+          last.content += '\n\n' + ev.content
+        } else {
+          messages.push({ role: 'user', content: ev.content })
+        }
         break
+      }
 
       // tool_execution 不参与 LLM 投影（审计用）
       case 'tool_execution':
@@ -505,7 +523,7 @@ function estimateStringTokens(s: string): number {
   for (const ch of s) {
     const code = ch.codePointAt(0) ?? 0
     if (code > 0x2E7F) {
-      tokens += 6  // CJK: ~1.5 token/字
+      tokens += 4  // CJK: ~1 token/字（主流 tokenizer 实测值）
     } else {
       tokens += 1  // ASCII/Latin: ~0.25 token/字符
     }

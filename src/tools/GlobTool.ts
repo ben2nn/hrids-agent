@@ -25,18 +25,25 @@ export const GlobTool = buildTool({
 
   async execute(input) {
     try {
-      // 使用 persistentCwd（跟随 bash cd 命令），而非 process.cwd()
+      const rootDir = input.cwd ?? getGlobalCwd()
       const files = await glob(input.pattern, {
-        cwd: input.cwd ?? getGlobalCwd(),
+        cwd: rootDir,
         nodir: true,
-        absolute: false,
+        absolute: true,  // 先用绝对路径做安全检查
       })
 
-      if (files.length === 0) {
+      // 路径遍历保护：过滤掉逃出 cwd 的结果
+      const { resolve, relative } = await import('path')
+      const resolvedRoot = resolve(rootDir) + (process.platform === 'win32' ? '\\' : '/')
+      const safeFiles = files
+        .filter(f => resolve(f).startsWith(resolvedRoot))
+        .map(f => relative(rootDir, f).replace(/\\/g, '/'))  // 转回相对路径，统一用 /
+
+      if (safeFiles.length === 0) {
         return { type: 'success', output: '未找到匹配的文件' }
       }
 
-      return { type: 'success', output: files.sort().join('\n') }
+      return { type: 'success', output: safeFiles.sort().join('\n') }
     } catch (err) {
       return { type: 'error', message: `搜索失败: ${String(err)}` }
     }

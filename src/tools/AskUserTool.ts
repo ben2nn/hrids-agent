@@ -3,6 +3,8 @@ import { z } from 'zod'
 import type { ToolDef, ToolResult } from '../core/Tool.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 
+const INTERACTIVE_TIMEOUT_MS = 5 * 60 * 1000 // 5 分钟超时
+
 const inputSchema = z.object({
   question: z.string().describe('要向用户提问的问题'),
   options: z.array(z.string()).optional().describe('可选的预设选项列表'),
@@ -11,6 +13,7 @@ const inputSchema = z.object({
 // ── CLI / Server 模式（单会话）全局状态 ──────────────────────────────────────
 // 交互模式和 server 模式只有一个会话，用全局变量即可
 let pendingResolve: ((answer: string) => void) | null = null
+let pendingReject: ((err: Error) => void) | null = null
 let pendingQuestion: { question: string; options?: string[] } | null = null
 
 // ── Gateway 模式（多会话）会话级回调表 ───────────────────────────────────────
@@ -52,6 +55,7 @@ export function resolveAskUser(answer: string, sessionId?: string): boolean {
   if (!pendingResolve) return false
   const resolve = pendingResolve
   pendingResolve = null
+  pendingReject = null
   pendingQuestion = null
   resolve(answer)
   return true
@@ -94,33 +98,51 @@ export const AskUserTool: ToolDef<typeof inputSchema> = {
 
     // server 模式：通过 NDJSON 协议发送问题，等待前端回复
     if (process.env.AGENT_SERVER_MODE === '1') {
-      return new Promise<ToolResult>(resolve => {
+      const main = new Promise<ToolResult>((resolve, reject) => {
+        // 拒绝前一个未完成的提问，避免 Promise 泄漏
+        if (pendingReject) { pendingReject(new Error('ask_user 被新提问覆盖')); pendingReject = null }
         pendingQuestion = { question: input.question, options: input.options }
         pendingResolve = makeAnswerResolver(input.options, resolve)
+        pendingReject = reject
         process.stdout.write(JSON.stringify({
           type: 'ask_user',
           question: input.question,
           options: input.options ?? [],
         }) + '\n')
       })
+      const timeout = new Promise<ToolResult>(resolve =>
+        setTimeout(() => resolve({ type: 'error', message: '提问超时（5 分钟无响应）' }), INTERACTIVE_TIMEOUT_MS)
+      )
+      return Promise.race([main, timeout])
     }
 
     // Gateway 多会话模式：按 sessionId 隔离 pending resolve 和回调
     if (sessionId && gatewayCallbacks.has(sessionId)) {
-      return new Promise<ToolResult>(resolve => {
+      const main = new Promise<ToolResult>(resolve => {
         sessionPendingResolves.set(sessionId, makeAnswerResolver(input.options, resolve))
         gatewayCallbacks.get(sessionId)!(input.question, input.options)
       })
+      const timeout = new Promise<ToolResult>(resolve =>
+        setTimeout(() => resolve({ type: 'error', message: '提问超时（5 分钟无响应）' }), INTERACTIVE_TIMEOUT_MS)
+      )
+      return Promise.race([main, timeout])
     }
 
     // 交互模式（Ink UI）：通过全局回调等待，由 App.tsx 的 handleSubmit 调用 resolveAskUser
-    return new Promise<ToolResult>(resolve => {
+    const main = new Promise<ToolResult>((resolve, reject) => {
+      // 拒绝前一个未完成的提问，避免 Promise 泄漏
+      if (pendingReject) { pendingReject(new Error('ask_user 被新提问覆盖')); pendingReject = null }
       pendingQuestion = { question: input.question, options: input.options }
       pendingResolve = makeAnswerResolver(input.options, resolve)
+      pendingReject = reject
 
       // 兼容旧的全局 Gateway 回调（__global__ key）
       const globalCb = gatewayCallbacks.get('__global__')
       if (globalCb) globalCb(input.question, input.options)
     })
+    const timeout = new Promise<ToolResult>(resolve =>
+      setTimeout(() => resolve({ type: 'error', message: '提问超时（5 分钟无响应）' }), INTERACTIVE_TIMEOUT_MS)
+    )
+    return Promise.race([main, timeout])
   },
 }

@@ -261,7 +261,6 @@ async function downloadAndExtractSkill(
   targetDir: string,
   force: boolean,
 ): Promise<void> {
-  const { execSync } = await import('child_process')
   const os = await import('os')
 
   if (existsSync(targetDir) && !force) {
@@ -300,13 +299,30 @@ async function downloadAndExtractSkill(
 
     // 跨平台解压
     if (process.platform === 'win32') {
-      execSync(
-        `powershell -NoProfile -NonInteractive -Command "Expand-Archive -Path '${tmpZip}' -DestinationPath '${tmpDir}' -Force"`,
-        { timeout: 30000 },
-      )
+      const { execFileSync: execFileSyncWin } = await import('child_process')
+      execFileSyncWin('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Expand-Archive -Path '${tmpZip}' -DestinationPath '${tmpDir}' -Force`,
+      ], { timeout: 30000 })
     } else {
-      execSync(`unzip -o "${tmpZip}" -d "${tmpDir}"`, { timeout: 30000 })
+      const { execFileSync: execFileSyncUnix } = await import('child_process')
+      execFileSyncUnix('unzip', ['-o', tmpZip, '-d', tmpDir], { timeout: 30000 })
     }
+
+    // Zip Slip 防护：校验所有解压文件都在 tmpDir 内
+    const { readdirSync } = await import('fs')
+    const { relative: relPath, isAbsolute } = await import('path')
+    const checkDir = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = join(dir, entry.name)
+        const rel = relPath(tmpDir, fullPath)
+        if (rel.startsWith('..') || isAbsolute(rel)) {
+          throw new Error(`Zip Slip 检测：文件 ${entry.name} 试图逃逸目标目录`)
+        }
+        if (entry.isDirectory()) checkDir(fullPath)
+      }
+    }
+    checkDir(tmpDir)
 
     // 替换目标目录
     if (existsSync(targetDir)) {
@@ -750,13 +766,26 @@ async function tryInstallViaCli(
   }
 }
 
+/** 校验 URL 是否为合法 http(s) 地址，防止命令注入 */
+function assertSafeUrl(url: string): void {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`不允许的协议: ${parsed.protocol}`)
+    }
+  } catch (err) {
+    throw new Error(`无效的下载地址: ${url} — ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 async function installOnUnix(scriptUrl: string): Promise<ToolResult> {
-  const { execSync } = await import('child_process')
+  const { execFileSync } = await import('child_process')
+  assertSafeUrl(scriptUrl)
   const tmpScript = `/tmp/skillhub-install-${Date.now()}.sh`
   try {
-    execSync(`curl -fsSL "${scriptUrl}" -o "${tmpScript}"`, { timeout: 30000, encoding: 'utf-8' })
-    execSync(`bash "${tmpScript}"`, { timeout: 120000, encoding: 'utf-8', stdio: 'pipe' })
-    try { execSync(`rm -f "${tmpScript}"`) } catch { /* 忽略 */ }
+    execFileSync('curl', ['-fsSL', scriptUrl, '-o', tmpScript], { timeout: 30000, encoding: 'utf-8' })
+    execFileSync('bash', [tmpScript], { timeout: 120000, encoding: 'utf-8', stdio: 'pipe' })
+    try { execFileSync('rm', ['-f', tmpScript]) } catch { /* 忽略 */ }
     auditLog({ action: 'skillhub_setup', resource: 'cli', result: 'allowed', details: { platform: 'unix' } })
     const version = await checkCliInstalled()
     return {
@@ -768,27 +797,27 @@ async function installOnUnix(scriptUrl: string): Promise<ToolResult> {
       ].join('\n'),
     }
   } catch (err) {
-    try { execSync(`rm -f "${tmpScript}"`) } catch { /* 忽略 */ }
+    try { execFileSync('rm', ['-f', tmpScript]) } catch { /* 忽略 */ }
     auditLog({ action: 'skillhub_setup', resource: 'cli', result: 'error', details: { error: String(err) } })
     return { type: 'error', message: `安装 skillhub CLI 失败: ${String(err)}` }
   }
 }
 
 async function installOnWindows(scriptUrl: string): Promise<ToolResult> {
-  const { execSync } = await import('child_process')
+  const { execFileSync } = await import('child_process')
+  assertSafeUrl(scriptUrl)
   const tmpDir = process.env.TEMP ?? 'C:\\Windows\\Temp'
   const tmpScript = `${tmpDir}\\skillhub-install-${Date.now()}.ps1`
   const psScriptUrl = scriptUrl.replace(/\.sh$/, '.ps1')
   try {
-    execSync(
-      `powershell -NoProfile -NonInteractive -Command "Invoke-WebRequest -Uri '${psScriptUrl}' -OutFile '${tmpScript}'"`,
-      { timeout: 30000, encoding: 'utf-8' },
-    )
-    execSync(
-      `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpScript}"`,
-      { timeout: 120000, encoding: 'utf-8', stdio: 'pipe' },
-    )
-    try { execSync(`del /f "${tmpScript}"`) } catch { /* 忽略 */ }
+    execFileSync('powershell', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      `Invoke-WebRequest -Uri '${psScriptUrl}' -OutFile '${tmpScript}'`,
+    ], { timeout: 30000, encoding: 'utf-8' })
+    execFileSync('powershell', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', tmpScript,
+    ], { timeout: 120000, encoding: 'utf-8', stdio: 'pipe' })
+    try { execFileSync('del', ['/f', tmpScript]) } catch { /* 忽略 */ }
     auditLog({ action: 'skillhub_setup', resource: 'cli', result: 'allowed', details: { platform: 'windows' } })
     const version = await checkCliInstalled()
     return {
@@ -800,7 +829,7 @@ async function installOnWindows(scriptUrl: string): Promise<ToolResult> {
       ].join('\n'),
     }
   } catch (err) {
-    try { execSync(`del /f "${tmpScript}"`) } catch { /* 忽略 */ }
+    try { execFileSync('del', ['/f', tmpScript]) } catch { /* 忽略 */ }
     auditLog({ action: 'skillhub_setup', resource: 'cli', result: 'error', details: { error: String(err) } })
     return { type: 'error', message: `安装 skillhub CLI 失败: ${String(err)}` }
   }

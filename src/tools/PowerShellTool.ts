@@ -21,11 +21,16 @@ const inputSchema = z.object({
 })
 
 // 只读命令白名单（plan-mode 下允许执行，Windows/PowerShell 版本）
-const READONLY_COMMANDS = /^(Get-|Select-|Where-|Measure-|Test-|Find-|Search-|Resolve-|Compare-|Format-|Out-|Write-Host|Write-Output|echo|ls|dir|cat|type|cd|pwd|whoami|hostname|ipconfig|ping|tracert|nslookup|git|npm|pip|docker|kubectl)\b/i
+const READONLY_COMMANDS_RE = /^(Get-|Select-|Where-|Measure-|Test-|Find-|Search-|Resolve-|Compare-|Format-|Out-|Write-Host|Write-Output|echo|ls|dir|cat|type|cd|pwd|whoami|hostname|ipconfig|ping|tracert|nslookup)\b/i
+const PS_CHAIN_OPERATORS = /[;&|`]|&&|\|\||\$\(/
+function isReadonlyCommand(cmd: string): boolean {
+  if (PS_CHAIN_OPERATORS.test(cmd)) return false
+  return READONLY_COMMANDS_RE.test(cmd)
+}
 
 // 危险命令黑名单（Windows/PowerShell）
 const BLOCKED_PATTERNS = [
-  /Remove-Item\s+-Recurse\s+-Force\s+[Cc]:\\/i,  // 递归删除 C 盘
+  /Remove-Item\s+-Recurse\s+-Force\s+[A-Za-z]:[/\\]/i,  // 递归删除任意盘符根目录
   /Remove-Item\s+-Recurse\s+-Force\s+\/$/,         // 递归删除根目录
   /Format-Volume/i,                                 // 格式化磁盘
   /Stop-Computer|Restart-Computer/i,               // 关机/重启
@@ -37,8 +42,9 @@ const BLOCKED_PATTERNS = [
 ]
 
 // 提取 Remove-Item 命令的目标路径，用于危险路径检测
+// 支持短选项（-Recurse）和长选项（-Recurse -Force），路径可能带引号
 function extractRemovalTarget(command: string): string | null {
-  const match = command.match(/Remove-Item\s+(?:-[a-zA-Z]+\s+)*(.+?)(?:\s+-|$)/i)
+  const match = command.match(/Remove-Item\s+(?:(?:-[a-zA-Z]+\s+(?:\S+\s+)?)*)\s*([^\s-][^\s]*)/i)
   if (match) return match[1].trim().replace(/^["']|["']$/g, '')
   return null
 }
@@ -56,7 +62,7 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
 
   readOnlyCheck(input) {
     const cmd = input.command.trim()
-    return READONLY_COMMANDS.test(cmd)
+    return isReadonlyCommand(cmd)
   },
 
   describe(input) {
@@ -116,9 +122,14 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
           // 纯 cd，直接返回
           return { type: 'success', output: newDir }
         }
-        // 有后续命令，在新目录下继续执行（递归调用，cwd 已更新）
+        // 有后续命令，先对 rest 部分执行安全检查
+        const restInput = { command: rest, timeout: input.timeout }
+        const permCheck = await PowerShellTool.checkPermission?.(restInput)
+        if (permCheck && !permCheck.granted) {
+          return { type: 'error', message: permCheck.reason }
+        }
         logLine(`[powershell] 在新目录下执行: ${rest}`)
-        return PowerShellTool.execute({ command: rest, timeout: input.timeout }, ctx)
+        return PowerShellTool.execute(restInput, ctx)
       } else {
         return { type: 'error', message: `目录不存在: ${newDir}` }
       }
@@ -214,7 +225,7 @@ export const PowerShellTool: ToolDef<typeof inputSchema> = {
         const stderrOutput = Buffer.concat(stderrChunks).toString('utf-8')
         if (code === 0) {
           // 写命令成功后清除文件缓存（shell 可能修改了任意文件）
-          if (!READONLY_COMMANDS.test(input.command.trim())) {
+          if (!isReadonlyCommand(input.command.trim())) {
             clearFileCache()
           }
           resolve({ type: 'success', output: output || '（命令执行成功，无输出）' })

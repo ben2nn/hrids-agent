@@ -86,15 +86,14 @@ export class WsClient {
     if (this.closed) return
     this.opened = false
 
-    // 将 token 附加到 URL query 参数
-    const wsUrl = this.token
-      ? `${this.url}?token=${encodeURIComponent(this.token)}`
-      : this.url
+    // 通过 Sec-WebSocket-Protocol 传递 token（避免 token 出现在 URL/日志中）
+    const wsUrl = this.url
+    const protocols = this.token ? [this.token] : undefined
 
-    console.debug('[WsClient] 🔗 正在连接...', { wsUrl, attempt: this.reconnectAttempt })
+    console.debug('[WsClient] 🔗 正在连接...', { url: wsUrl, attempt: this.reconnectAttempt })
 
     try {
-      this.ws = new WebSocket(wsUrl)
+      this.ws = protocols ? new WebSocket(wsUrl, protocols) : new WebSocket(wsUrl)
     } catch (err) {
       // URL 格式错误等同步异常
       console.error('[WsClient] 创建 WebSocket 失败:', err)

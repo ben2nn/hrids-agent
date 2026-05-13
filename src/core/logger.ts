@@ -1,5 +1,5 @@
 // 结构化日志系统 —— 支持级别控制、JSON 格式、文件持久化
-import { existsSync, mkdirSync, appendFileSync, statSync, renameSync } from 'fs'
+import { existsSync, mkdirSync, appendFileSync, statSync, renameSync, readdirSync, unlinkSync } from 'fs'
 import { createRequire } from 'module'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -26,10 +26,20 @@ function ensureLogDir() {
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true })
 }
 
+const MAX_BAK_FILES = 3
+
 function rotateIfNeeded() {
   try {
     if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > MAX_LOG_BYTES) {
       renameSync(LOG_FILE, LOG_FILE + '.' + Date.now() + '.bak')
+      // 清理超过上限的旧 .bak 文件
+      const bakFiles = readdirSync(LOG_DIR)
+        .filter(f => f.endsWith('.bak'))
+        .sort()
+      while (bakFiles.length > MAX_BAK_FILES) {
+        const oldest = bakFiles.shift()!
+        try { unlinkSync(join(LOG_DIR, oldest)) } catch { /* 忽略 */ }
+      }
     }
   } catch { /* 轮转失败不影响主流程 */ }
 }

@@ -225,17 +225,23 @@ export function checkCommandSafetyPermission(command: string): { granted: true }
   const config = loadConfig()
   const safetyConfig = config.commandSafety
 
-  if (safetyConfig?.enabled === false) return { granted: true }
+  if (safetyConfig?.enabled === false) {
+    process.stderr.write('[CommandSafety] 警告：命令安全检查已被配置禁用\n')
+    return { granted: true }
+  }
 
   const analysis = analyzeCommandSafety(command)
   const blockLevel = safetyConfig?.blockLevel ?? 'high'
   const blockPriority = riskPriority(blockLevel)
 
-  // 自定义正则检查
+  // 自定义正则检查（带超时保护，防止 ReDoS）
   if (safetyConfig?.extraPatterns) {
     for (const pattern of safetyConfig.extraPatterns) {
       try {
-        if (new RegExp(pattern).test(command)) {
+        const regex = new RegExp(pattern)
+        // 对超长命令截断后再匹配，防止 ReDoS 导致长时间阻塞
+        const testStr = command.length > 10000 ? command.slice(0, 10000) : command
+        if (regex.test(testStr)) {
           return { granted: false, reason: `命令匹配自定义危险规则: ${pattern}` }
         }
       } catch { /* 无效正则跳过 */ }

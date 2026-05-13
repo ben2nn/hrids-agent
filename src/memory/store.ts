@@ -4,7 +4,7 @@
 //   index.db — 向量索引 + 知识图谱三元组
 import Database from 'better-sqlite3'
 import { createHash, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, copyFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, copyFileSync, renameSync } from 'fs'
 import { join } from 'path'
 import { getConfigDir } from '../core/Config.js'
 import type { Memory, MemoryType, Triple, MemorySearchResult } from './types.js'
@@ -14,6 +14,9 @@ import { createVectorStore, type VectorStore } from './vectorStore.js'
 const AGENTS_DIR = join(getConfigDir(), 'agents')
 
 function getAgentMemoryDir(agent: string): string {
+  if (/[/\\]/.test(agent) || agent.includes('..')) {
+    throw new Error(`Invalid agent name: ${agent}`)
+  }
   return join(AGENTS_DIR, agent, 'memory')
 }
 
@@ -79,14 +82,18 @@ export class MemoryStore {
     `)
 
     this.vec = createVectorStore(this.db)
-    this._restoreDim()
+    this._initPromise = this._restoreDim()
   }
 
-  private _restoreDim() {
+  private _initPromise: Promise<void>
+  /** 等待向量索引初始化完成（构造后首次向量操作前应 await） */
+  async ready(): Promise<void> { await this._initPromise }
+
+  private async _restoreDim(): Promise<void> {
     const saved = this.db.prepare("SELECT value FROM vec_config WHERE key='dim'").get() as { value: string } | undefined
     if (saved) {
       this._dim = parseInt(saved.value, 10)
-      void this.vec.init(this._dim)
+      await this.vec.init(this._dim)
     }
   }
 
@@ -99,12 +106,24 @@ export class MemoryStore {
   private _loadBucket(bucket: BucketName): Memory[] {
     const content = readFileSync(this._bucketPath(bucket), 'utf-8')
     if (!content.trim()) return []
-    return content.split('\n').filter(Boolean).map(l => JSON.parse(l) as Memory)
+    const results: Memory[] = []
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        results.push(JSON.parse(line) as Memory)
+      } catch {
+        process.stderr.write(`[memory] 损坏的 JSONL 行 (${bucket}): ${line.slice(0, 100)}\n`)
+      }
+    }
+    return results
   }
 
   private _saveBucket(bucket: BucketName, memories: Memory[]) {
     const lines = memories.map(m => JSON.stringify(m))
-    writeFileSync(this._bucketPath(bucket), lines.join('\n') + (lines.length > 0 ? '\n' : ''), 'utf-8')
+    const target = this._bucketPath(bucket)
+    const tmp = target + '.tmp'
+    writeFileSync(tmp, lines.join('\n') + (lines.length > 0 ? '\n' : ''), 'utf-8')
+    renameSync(tmp, target)
   }
 
   private _appendBucket(bucket: BucketName, mem: Memory) {
@@ -145,13 +164,16 @@ export class MemoryStore {
     // 向量映射（最小 rowid）
     this.db.prepare('INSERT INTO memories (id) VALUES (?)').run(id)
 
-    // 异步生成向量
-    void this._embedAndInsertVec(id, full.content)
+    // 异步生成向量（附带错误日志，避免静默丢失）
+    this._embedAndInsertVec(id, full.content).catch(err => {
+      process.stderr.write(`[memory] 向量嵌入失败 (${id}): ${err}\n`)
+    })
 
     return full
   }
 
   private async _embedAndInsertVec(id: string, content: string): Promise<void> {
+    await this.ready()
     try {
       const provider = getEmbeddingProvider()
       const vec = await provider.embed(content)
@@ -165,8 +187,11 @@ export class MemoryStore {
 
       if (dim !== this._dim) {
         const { auditLog } = await import('../core/audit.js')
-        auditLog({ action: 'memory_embed_skip', resource: id, result: 'error', details: { reason: 'dim_mismatch', expected: this._dim, actual: dim } })
-        return
+        auditLog({ action: 'memory_dim_migration', resource: id, result: 'allowed', details: { from: this._dim, to: dim } })
+        // 删除旧维度的向量表，用新维度重建
+        this._dim = dim
+        try { this.db.exec('DROP TABLE IF EXISTS vec_memories') } catch { /* 首次无表 */ }
+        await this.vec.init(dim)
       }
 
       await this.vec.upsert(id, vec)
@@ -181,6 +206,7 @@ export class MemoryStore {
   // ── 向量去重 ──────────────────────────────────────────────
 
   async findSimilar(content: string, threshold = 0.85, topK = 3): Promise<MemorySearchResult[]> {
+    await this.ready()
     if (this._dim === null) return []
     try {
       const provider = getEmbeddingProvider()
@@ -215,13 +241,19 @@ export class MemoryStore {
     this._updateInBucket(oldBucket, oldId, m => ({ ...m, supersededBy: newMem.id, updatedAt: new Date().toISOString() }))
 
     // 同步删除旧向量
-    void this.vec.delete(oldId)
+    this.vec.delete(oldId).catch(err => {
+      process.stderr.write(`[memory] 向量删除失败 (${oldId}): ${err}\n`)
+    })
 
     return newMem
   }
 
   deleteMemory(id: string): boolean {
-    void this.vec.delete(id)
+    this.vec.delete(id).catch(err => {
+      process.stderr.write(`[memory] 向量删除失败 (${id}): ${err}\n`)
+    })
+    // 清理 memories 表的 rowid 映射，防止孤立行泄漏
+    try { this.db.prepare('DELETE FROM memories WHERE id = ?').run(id) } catch { /* 表可能不存在 */ }
     for (const bucket of BUCKET_NAMES) {
       const mems = this._loadBucket(bucket)
       const idx = mems.findIndex(m => m.id === id)
@@ -258,6 +290,7 @@ export class MemoryStore {
   }
 
   async search(query: string, opts: { topK?: number } = {}): Promise<MemorySearchResult[]> {
+    await this.ready()
     const topK = opts.topK ?? 5
 
     if (this._dim !== null) {
@@ -283,11 +316,31 @@ export class MemoryStore {
 
   private _keywordSearch(query: string, topK = 5): MemorySearchResult[] {
     const candidates = this.getActiveMemories()
-    const queryWords = new Set(query.toLowerCase().split(/\s+/).filter(w => w.length > 1))
+    const queryLower = query.toLowerCase()
+    // 提取查询词：空格分词 + 中文字符 bigram
+    const queryWords = new Set<string>()
+    for (const w of queryLower.split(/\s+/).filter(w => w.length > 1)) {
+      queryWords.add(w)
+    }
+    // 中文字符 bigram（连续两个中文字符作为一个词）
+    const cjkBigrams = queryLower.match(/[一-鿿]{2,}/g) ?? []
+    for (const bg of cjkBigrams) {
+      for (let i = 0; i < bg.length - 1; i++) {
+        queryWords.add(bg.slice(i, i + 2))
+      }
+    }
 
     return candidates
       .map(mem => {
-        const contentWords = new Set(mem.content.toLowerCase().split(/\s+/).filter(w => w.length > 1))
+        const contentLower = mem.content.toLowerCase()
+        const contentWords = new Set(contentLower.split(/\s+/).filter(w => w.length > 1))
+        // 也为内容提取中文 bigram
+        const contentCjk = contentLower.match(/[一-鿿]{2,}/g) ?? []
+        for (const bg of contentCjk) {
+          for (let i = 0; i < bg.length - 1; i++) {
+            contentWords.add(bg.slice(i, i + 2))
+          }
+        }
         const intersection = [...queryWords].filter(w => contentWords.has(w)).length
         const score = intersection / Math.max(queryWords.size, 1) * 0.5
         return { memory: mem, score }
@@ -403,20 +456,18 @@ export class MemoryStore {
 
   async stats() {
     let total = 0
+    const byType: Record<string, number> = {}
     for (const bucket of BUCKET_NAMES) {
-      total += this._loadBucket(bucket).length
+      const mems = this._loadBucket(bucket)
+      total += mems.length
+      for (const m of mems) {
+        byType[m.type] = (byType[m.type] ?? 0) + 1
+      }
     }
 
     let vecCount = 0
     if (this._dim !== null) {
       vecCount = await this.vec.count()
-    }
-
-    const byType: Record<string, number> = {}
-    for (const bucket of BUCKET_NAMES) {
-      for (const m of this._loadBucket(bucket)) {
-        byType[m.type] = (byType[m.type] ?? 0) + 1
-      }
     }
 
     const triples = (this.db.prepare('SELECT COUNT(*) as c FROM triples WHERE valid_to IS NULL').get() as { c: number }).c

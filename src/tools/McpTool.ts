@@ -203,29 +203,47 @@ export async function disconnectAllMcp(sessionId?: string): Promise<void> {
   }
 }
 
-// 将 JSON Schema 转换为 Zod schema（简化版）
+// 将 JSON Schema 转换为 Zod schema（简化版，支持嵌套对象和 enum）
 function buildZodSchema(jsonSchema: Record<string, unknown>): z.ZodTypeAny {
   if (!jsonSchema || jsonSchema.type !== 'object') {
     return z.record(z.unknown())
   }
 
-  const properties = (jsonSchema.properties ?? {}) as Record<string, { type?: string; description?: string }>
+  const properties = (jsonSchema.properties ?? {}) as Record<string, Record<string, unknown>>
   const required = (jsonSchema.required ?? []) as string[]
   const shape: Record<string, z.ZodTypeAny> = {}
 
   for (const [key, prop] of Object.entries(properties)) {
-    let field: z.ZodTypeAny
-    switch (prop.type) {
-      case 'string':  field = z.string(); break
-      case 'number':  field = z.number(); break
-      case 'boolean': field = z.boolean(); break
-      case 'array':   field = z.array(z.unknown()); break
-      default:        field = z.unknown()
-    }
-    if (prop.description) field = field.describe(prop.description)
+    let field = buildFieldSchema(prop)
+    if (prop.description) field = field.describe(prop.description as string)
     if (!required.includes(key)) field = field.optional() as z.ZodTypeAny
     shape[key] = field
   }
 
   return z.object(shape)
+}
+
+/** 将单个 JSON Schema 属性转换为 Zod 字段类型 */
+function buildFieldSchema(prop: Record<string, unknown>): z.ZodTypeAny {
+  // enum 优先于 type
+  if (Array.isArray(prop.enum) && prop.enum.length > 0) {
+    return z.enum(prop.enum as [string, ...string[]])
+  }
+
+  switch (prop.type) {
+    case 'string':  return z.string()
+    case 'number':
+    case 'integer': return z.number()
+    case 'boolean': return z.boolean()
+    case 'array': {
+      const items = prop.items as Record<string, unknown> | undefined
+      const itemSchema = items ? buildFieldSchema(items) : z.unknown()
+      return z.array(itemSchema)
+    }
+    case 'object': {
+      const nested = buildZodSchema(prop as Record<string, unknown>)
+      return nested
+    }
+    default:        return z.unknown()
+  }
 }

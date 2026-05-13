@@ -155,6 +155,11 @@ export const SkillSaveTool: ToolDef<typeof saveSchema> = {
   },
 
   async execute(input) {
+    // 路径安全校验：skill name 只允许字母、数字、连字符、下划线
+    if (!/^[a-zA-Z0-9_-]+$/.test(input.name)) {
+      return { type: 'error' as const, message: `skill 名称包含非法字符（仅允许字母、数字、-、_）: ${input.name}` }
+    }
+
     // 确定保存目录
     const baseDir = input.scope === 'project'
       ? join(getGlobalCwd(), '.agent', 'skills')

@@ -268,7 +268,7 @@ export interface DisplayToolCard {
   id: string
   name: string
   input: unknown
-  status: 'success' | 'error'
+  status: 'success' | 'error' | 'unknown'
   result?: unknown
   requestId?: string
   timestamp: number
@@ -324,6 +324,10 @@ export class ConversationStore {
 
   /** 替换整个事件日志（用于会话切换），并全量重写磁盘 */
   replaceEvents(events: ConversationEvent[]): void {
+    if (!Array.isArray(events)) {
+      process.stderr.write('[ConversationStore] replaceEvents 收到非数组参数，已忽略\n')
+      return
+    }
     this.eventLog = [...events]
     this.latestPreprocessed = null
     this.prunedToolCallIds.clear()
@@ -376,6 +380,10 @@ export class ConversationStore {
     return this.prunedToolCallIds.has(toolCallId)
   }
 
+  getPrunedToolCallIds(): Set<string> {
+    return this.prunedToolCallIds
+  }
+
   // ── 持久化 ────────────────────────────────────────────────────
 
   /** 加载事件：从 events.jsonl */
@@ -415,7 +423,7 @@ export class ConversationStore {
 
 // ── JSONL 事件存储实现 ──────────────────────────────────────────
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs'
 import { join } from 'path'
 
 const CURRENT_SCHEMA = 'hrids-events/v1'
@@ -435,20 +443,14 @@ export class JsonlEventStorage implements EventStorage {
     const lines = events.map(e => JSON.stringify(e)).join('\n') + '\n'
 
     // 首次写入：文件不存在时先写 schema marker
+    // 使用 appendFileSync 避免并发竞态（两个进程同时检测到文件不存在）
     if (!existsSync(this.eventsPath)) {
-      writeFileSync(this.eventsPath, SCHEMA_MARKER + lines, 'utf-8')
+      appendFileSync(this.eventsPath, SCHEMA_MARKER + lines, 'utf-8')
       return
     }
 
-    // 大块写入：使用 tmp + append 模式（保持 append-only 语义）
-    if (lines.length > 4096) {
-      const tmp = this.eventsPath + '.tmp'
-      writeFileSync(tmp, lines, 'utf-8')
-      appendFileSync(this.eventsPath, readFileSync(tmp, 'utf-8'), 'utf-8')
-      unlinkSync(tmp)
-    } else {
-      appendFileSync(this.eventsPath, lines, 'utf-8')
-    }
+    // append-only 写入（大块和小块统一处理）
+    appendFileSync(this.eventsPath, lines, 'utf-8')
   }
 
   loadEvents(): ConversationEvent[] {

@@ -2,7 +2,7 @@
 // 用于替代 JSON 配置，提供更好的可读性和注释支持
 
 import { readFileSync, writeFileSync, renameSync } from 'fs'
-import { load as parseYaml, dump as stringifyYaml } from 'js-yaml'
+import { load as parseYaml, dump as stringifyYaml, JSON_SCHEMA } from 'js-yaml'
 
 /**
  * 从文件读取并解析 YAML。
@@ -11,7 +11,7 @@ import { load as parseYaml, dump as stringifyYaml } from 'js-yaml'
 export function loadYamlFile<T = unknown>(path: string): T {
   try {
     const raw = readFileSync(path, 'utf-8')
-    return parseYaml(raw) as T
+    return parseYaml(raw, { schema: JSON_SCHEMA }) as T
   } catch (err: unknown) {
     const yamlErr = err as { mark?: { line: number; column: number }; message?: string }
     if (yamlErr.mark) {

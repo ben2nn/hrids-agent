@@ -495,7 +495,7 @@ export class PlatformManager {
 
       if (msg.attachments && msg.attachments.length > 0) {
         const { writeFileSync, mkdirSync } = await import('fs')
-        const { join: pathJoin } = await import('path')
+        const { join: pathJoin, basename } = await import('path')
         const { getConfigDir } = await import('../../core/Config.js')
 
         const uploadsDir = pathJoin(getConfigDir(), 'sessions', agentSessionId, 'uploads')
@@ -505,10 +505,11 @@ export class PlatformManager {
 
         for (const att of msg.attachments) {
           try {
-            const absPath = pathJoin(uploadsDir, att.name)
+            const safeName = basename(att.name).replace(/[/\\]/g, '_')
+            const absPath = pathJoin(uploadsDir, safeName)
             writeFileSync(absPath, Buffer.from(att.data, 'base64'))
-            savedNames.push(att.name)
-            log.debug('IM 图片已落盘', { name: att.name, path: absPath })
+            savedNames.push(safeName)
+            log.debug('IM 图片已落盘', { name: att.name, safeName, path: absPath })
           } catch (err) {
             log.warn('IM 图片落盘失败，保留 base64 附件', { name: att.name, error: String(err) })
             // 落盘失败时保留原始 attachments，走 base64 路径

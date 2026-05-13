@@ -28,11 +28,19 @@ const inputSchema = z.object({
 })
 
 // 只读命令白名单（plan-mode 下允许执行）
-const READONLY_COMMANDS = /^(ls|cat|head|tail|wc|file|stat|which|whereis|type|echo|printf|date|whoami|hostname|uname|pwd|env|printenv|set|alias|history|df|du|free|uptime|id|groups|finger|last|lastlog|w|who|ps|top|htop|pgrep|lsof|netstat|ss|ip|ifconfig|ping|traceroute|dig|nslookup|host|curl|wget|git|npm|pip|docker|kubectl)\b/
+// 排除链式命令（;、&&、||、|、`、$()），防止 ls; rm -rf / 绕过
+const READONLY_COMMANDS_RE = /^(ls|cat|head|tail|wc|file|stat|which|whereis|type|echo|printf|date|whoami|hostname|uname|pwd|env|printenv|set|alias|history|df|du|free|uptime|id|groups|finger|last|lastlog|w|who|ps|top|htop|pgrep|lsof|netstat|ss|ip|ifconfig|ping|traceroute|dig|nslookup|host)\b/
+const CHAIN_OPERATORS = /[;&|`]|&&|\|\||\$\(/
+function isReadonlyCommand(cmd: string): boolean {
+  if (CHAIN_OPERATORS.test(cmd)) return false
+  return READONLY_COMMANDS_RE.test(cmd)
+}
 
 // 危险命令黑名单（Linux/macOS）
 const BLOCKED_PATTERNS = [
   /rm\s+-rf\s+\/(?!\w)/,           // rm -rf /
+  /rm\s+(-[rRf]\s*){2,}\s*\/(?!\w)/, // rm -r -f / （分散 flags）
+  /rm\s+--recursive\s+--force\s+\/(?!\w)/, // rm --recursive --force /
   /rm\s+-rf\s+~\s*$/,              // rm -rf ~
   /:\(\)\{.*\}/,                    // fork bomb
   /dd\s+if=.*of=\/dev\//,          // 覆写磁盘
@@ -46,6 +54,7 @@ const BLOCKED_PATTERNS = [
   /wget.*\|\s*(ba)?sh/,            // 管道执行远程脚本
   // 追加：更多高危操作
   /\bsudo\s+rm\s+-rf/,             // sudo rm -rf
+  /\bsudo\s+rm\s+--recursive\s+--force/, // sudo rm --recursive --force
   /\bsudo\s+dd\b/,                 // sudo dd
   /\bsudo\s+mkfs\b/,               // sudo mkfs
   /\bsudo\s+chmod\s+-R\s+777/,    // sudo chmod -R 777
@@ -57,11 +66,12 @@ const BLOCKED_PATTERNS = [
   /\bsystemctl\s+(stop|disable|mask)\b/, // 停止系统服务
 ]
 
-// 提取 rm/rmdir 命令的目标路径，用于危险路径检测
-function extractRemovalTarget(command: string): string | null {
-  const match = command.match(/\brm\s+(?:-[a-zA-Z]*\s+)*(.+)$/)
-  if (match) return match[1].trim().split(/\s+/)[0]
-  return null
+// 提取 rm/rmdir 命令的所有目标路径，用于危险路径检测
+// 支持短选项（-rf）、长选项（--recursive --force）和分散 flags（-r -f）
+function extractRemovalTargets(command: string): string[] {
+  const match = command.match(/\brm\s+(?:(?:-[a-zA-Z]+|--[a-zA-Z-]+)\s+)*(.+)$/)
+  if (!match) return []
+  return match[1].trim().split(/\s+/).filter(Boolean)
 }
 
 export const BashTool: ToolDef<typeof inputSchema> = {
@@ -81,7 +91,7 @@ export const BashTool: ToolDef<typeof inputSchema> = {
    */
   readOnlyCheck(input) {
     const cmd = input.command.trim()
-    return READONLY_COMMANDS.test(cmd)
+    return isReadonlyCommand(cmd)
   },
 
   describe(input) {
@@ -94,15 +104,18 @@ export const BashTool: ToolDef<typeof inputSchema> = {
 
   async checkPermission(input) {
     // 危险命令黑名单（硬编码，始终生效）
+    // 将换行符替换为空格后再匹配，防止跨行绕过 BLOCKED_PATTERNS
+    const normalized = input.command.replace(/[\r\n]+/g, ' ')
     for (const pattern of BLOCKED_PATTERNS) {
-      if (pattern.test(input.command)) {
+      if (pattern.test(normalized)) {
         return { granted: false, reason: `命令包含危险模式: ${pattern}` }
       }
     }
-    // 危险删除路径检测
-    const removalTarget = extractRemovalTarget(input.command)
-    if (removalTarget && isDangerousRemovalPath(removalTarget)) {
-      return { granted: false, reason: `危险的删除目标路径: ${removalTarget}` }
+    // 危险删除路径检测（检查所有目标路径）
+    for (const target of extractRemovalTargets(input.command)) {
+      if (isDangerousRemovalPath(target)) {
+        return { granted: false, reason: `危险的删除目标路径: ${target}` }
+      }
     }
 
     // 命令安全分析（可配置，补充规则覆盖 high/medium 级别）
@@ -140,9 +153,14 @@ export const BashTool: ToolDef<typeof inputSchema> = {
           // 纯 cd，直接返回
           return { type: 'success', output: newDir }
         }
-        // 有后续命令，在新目录下继续执行（递归调用，cwd 已更新）
+        // 有后续命令，先对 rest 部分执行安全检查
+        const restInput = { command: rest, timeout: input.timeout }
+        const permCheck = await BashTool.checkPermission?.(restInput)
+        if (permCheck && !permCheck.granted) {
+          return { type: 'error', message: permCheck.reason }
+        }
         logLine(`[bash] 在新目录下执行: ${rest}`)
-        return BashTool.execute({ command: rest, timeout: input.timeout }, ctx)
+        return BashTool.execute(restInput, ctx)
       } else {
         return { type: 'error', message: `目录不存在: ${newDir}` }
       }
@@ -162,6 +180,7 @@ export const BashTool: ToolDef<typeof inputSchema> = {
           PYTHONUTF8: '1',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,  // 创建进程组，超时时可杀死整个组
       })
 
       const outputChunks: Buffer[] = []
@@ -181,8 +200,8 @@ export const BashTool: ToolDef<typeof inputSchema> = {
       })
 
       const timer = setTimeout(() => {
-        logLine(`[bash] 超时 (${timeout}ms)，强制终止`)
-        child.kill()
+        logLine(`[bash] 超时 (${timeout}ms)，强制终止进程组`)
+        try { process.kill(-child.pid!, 'SIGKILL') } catch { child.kill('SIGKILL') }
         resolve({ type: 'error', message: `命令超时（${timeout}ms）` })
       }, timeout)
 
@@ -194,7 +213,7 @@ export const BashTool: ToolDef<typeof inputSchema> = {
         const stderrOutput = Buffer.concat(stderrChunks).toString('utf-8')
         if (code === 0) {
           // 写命令成功后清除文件缓存（shell 可能修改了任意文件）
-          if (!READONLY_COMMANDS.test(input.command.trim())) {
+          if (!isReadonlyCommand(input.command.trim())) {
             clearFileCache()
           }
           resolve({ type: 'success', output: output || '（命令执行成功，无输出）' })

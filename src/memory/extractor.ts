@@ -55,12 +55,23 @@ const PROBLEM_PATTERNS = [
   /\bthe fix (is|was)\b/i,
 ]
 
+const FACT_PATTERNS: RegExp[] = [
+  // 技术栈声明
+  /\b(using|uses?|built (?:with|on)|powered by|based on)\b/i,
+  // 版本/环境信息
+  /\b(v?\d+\.\d+\.\d+|node\s+\d+|python\s+\d+|java\s+\d+)/i,
+  // 事实性陈述
+  /\b(is|are|was|were)\s+(a|an|the)?\s*\w+\s+(framework|library|database|language|tool|service)/i,
+  // 中文事实
+  /使用了|采用的是|运行在|部署在|基于|版本是/,
+]
+
 const ALL_PATTERNS: Record<MemoryType, RegExp[]> = {
   decision: DECISION_PATTERNS,
   preference: PREFERENCE_PATTERNS,
   milestone: MILESTONE_PATTERNS,
   problem: PROBLEM_PATTERNS,
-  fact: [],
+  fact: FACT_PATTERNS,
 }
 
 // 正向词（用于消歧）

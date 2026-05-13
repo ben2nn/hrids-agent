@@ -193,7 +193,10 @@ export function initProfileLoader(extraDirs?: string[], projectRoot?: string) {
  * @param inlineProfiles 配置文件中内联定义的 profiles
  */
 export function listProfiles(inlineProfiles?: AgentProfile[]): AgentProfile[] {
-  if (_cachedProfiles && !inlineProfiles?.length) return _cachedProfiles
+  // 无内联 profiles 时使用磁盘 profiles 缓存
+  if (!inlineProfiles?.length) {
+    if (_cachedProfiles) return _cachedProfiles
+  }
 
   const profiles: AgentProfile[] = [...(inlineProfiles ?? [])]
 
@@ -225,7 +228,10 @@ export function listProfiles(inlineProfiles?: AgentProfile[]): AgentProfile[] {
     }
   }
 
-  _cachedProfiles = inlineProfiles?.length ? null : profiles
+  // 仅在无内联 profiles 时缓存（合并结果不应被缓存，因为内联内容每次可能不同）
+  if (!inlineProfiles?.length) {
+    _cachedProfiles = profiles
+  }
   return profiles
 }
 
