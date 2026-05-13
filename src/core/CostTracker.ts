@@ -32,6 +32,14 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead: 
   'llama-3.1-8b-instant':       { input: 0.005, output: 0.008, cacheRead: 0,     cacheWrite: 0     },
   // Ollama 本地模型（免费）
   'ollama':                     { input: 0,     output: 0,     cacheRead: 0,     cacheWrite: 0     },
+  // 通义千问（阿里云）
+  'qwen3.5-35b-a3b':            { input: 0.07,  output: 0.28,  cacheRead: 0,     cacheWrite: 0     },
+  'qwen3.6-flash-2026-04-16':   { input: 0.07,  output: 0.28,  cacheRead: 0,     cacheWrite: 0     },
+  'qwen3.5-plus-2026-04-20':    { input: 0.4,   output: 1.2,   cacheRead: 0,     cacheWrite: 0     },
+  'qwen-vl-plus-latest':        { input: 0.4,   output: 1.2,   cacheRead: 0,     cacheWrite: 0     },
+  'qwen-vl-max':                { input: 2,     output: 6,     cacheRead: 0,     cacheWrite: 0     },
+  'qwen-omni-turbo':            { input: 0.4,   output: 1.2,   cacheRead: 0,     cacheWrite: 0     },
+  'qwen-omni-mini':             { input: 0.07,  output: 0.28,  cacheRead: 0,     cacheWrite: 0     },
 }
 
 export class CostTracker {

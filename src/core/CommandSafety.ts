@@ -217,7 +217,7 @@ export function formatSafetyAnalysis(analysis: SafetyAnalysis): string {
 }
 
 /**
- * 综合命令安全权限检查（供 BashTool / PowerShellTool 共享）。
+ * 综合命令安全权限检查（供 BashTool 共享）。
  * 检查顺序：命令安全分析 → 自定义正则 → 风险等级阈值。
  * @returns { granted: true } 或 { granted: false, reason }
  */

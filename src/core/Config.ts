@@ -140,6 +140,15 @@ export interface SkillHubConfig {
   primaryDownloadUrlTemplate?: string
 }
 
+// ── Web 搜索配置 ───────────────────────────────────────────────
+
+export interface WebSearchConfig {
+  /** 搜索引擎：mojeek（默认）| searxng */
+  engine?: 'mojeek' | 'searxng'
+  /** SearXNG 实例地址（engine=searxng 时必填），例如 https://xng.hrids.com */
+  endpoint?: string
+}
+
 // ── 多智能体配置 ────────────────────────────────────────────────
 
 /** 智能体角色模板 */
@@ -249,6 +258,8 @@ export interface AgentConfig {
   commandSafety?: CommandSafetyConfig
   /** 网络访问策略配置 */
   networkPolicy?: NetPolicyConfig
+  /** Web 搜索引擎配置 */
+  webSearch?: WebSearchConfig
 
   // ── 向后兼容：旧版扁平字段（已迁移到 agent / logging 分组） ──
   /** @deprecated 请使用 agent.permissionMode */
@@ -311,6 +322,7 @@ const DEFAULTS = {
     theme: 'default' as const,
   },
   vectorStore: { backend: 'sqlite' as const },
+  webSearch: { engine: 'mojeek' as const },
   skillHub: {
     url: 'https://skillhub.cn',
     apiBase: 'https://api.skillhub.cn',
@@ -409,6 +421,7 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
   // 深合并 vectorStore / skillHub / multiAgent / toolPermissions
   const vectorStore: VectorStoreConfig = { ...DEFAULTS.vectorStore, ...clean.vectorStore }
   const skillHub: SkillHubConfig = { ...DEFAULTS.skillHub, ...clean.skillHub }
+  const webSearch: WebSearchConfig = { ...DEFAULTS.webSearch, ...clean.webSearch }
   const multiAgent: MultiAgentConfig = {
     ...DEFAULTS.multiAgent,
     ...clean.multiAgent,
@@ -445,6 +458,10 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     logging,
     // 集成
     skillHub,
+    webSearch,
+    // 安全
+    commandSafety: clean.commandSafety,
+    networkPolicy:  clean.networkPolicy,
     mcpServers:      clean.mcpServers      ?? DEFAULTS.mcpServers,
     customProviders: clean.customProviders ?? [],
     // 多智能体

@@ -1,147 +1,309 @@
-// Web 搜索工具 —— 优先使用 Anthropic 原生 web_search 能力，降级到 DuckDuckGo
+/**
+ * Web 搜索工具 —— Mojeek + 可配置 SearXNG
+ *
+ * 搜索引擎：
+ * - Mojeek（默认，免费、无反爬限制、无需 API Key）
+ * - SearXNG（可配置自托管实例，如 xng.hrids.com）
+ *
+ * 配置方式（config.yaml）：
+ * ```yaml
+ * webSearch:
+ *   engine: searxng        # mojeek（默认）| searxng
+ *   endpoint: https://xng.hrids.com  # SearXNG 实例地址
+ * ```
+ *
+ * 设计参考 DeepSeek-Reasonix web.ts
+ */
+
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { NetworkPolicyDecider } from '../core/NetworkPolicy.js'
-import { loadConfig, getApiKey } from '../core/Config.js'
+import { loadConfig } from '../core/Config.js'
+
+// ── 类型定义 ──────────────────────────────────────────────────
+
+export interface SearchResult {
+  title: string
+  url: string
+  snippet: string
+}
 
 const inputSchema = z.object({
   query: z.string().describe('搜索查询词'),
+  topK: z.number().optional().describe('返回结果数量（1..10），默认 5'),
 })
 
-// ── 降级方案：DuckDuckGo HTML 搜索（无需 API Key）────────────────────────────
-async function searchViaDuckDuckGo(query: string): Promise<string> {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
+// ── 常量 ──────────────────────────────────────────────────────
 
-  const fetchOptions: RequestInit = {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Connection': 'keep-alive',
-    },
-    signal: AbortSignal.timeout(20000),
-    redirect: 'follow',
-  }
+const DEFAULT_TOPK = 5
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+const MOJEEK_ENDPOINT = 'https://www.mojeek.com/search'
 
-  const res = await fetch(url, fetchOptions)
+// ── Mojeek ────────────────────────────────────────────────────
 
-  if (!res.ok) {
-    throw new Error(`DuckDuckGo 返回 HTTP ${res.status}`)
-  }
-
-  const html = await res.text()
-
-  // 提取搜索结果：标题 + 摘要 + URL
-  const results: string[] = []
-
-  // 匹配 DuckDuckGo HTML 结果块
-  const resultPattern = /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
-  const snippetPattern = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi
-
-  const titles: Array<{ url: string; title: string }> = []
+/** 解析 Mojeek HTML 搜索结果（title-anchor + snippet-paragraph 位置配对） */
+export function parseMojeekResults(html: string): SearchResult[] {
+  const titles: string[] = []
+  const titleAnchorRe = /<a\b[^>]*\bclass="title"[^>]*>[\s\S]*?<\/a>/g
   let m: RegExpExecArray | null
-  while ((m = resultPattern.exec(html)) !== null && titles.length < 8) {
-    const href = m[1]
-    const title = m[2].replace(/<[^>]+>/g, '').trim()
-    if (!href || !title) continue
-
-    // DuckDuckGo 现在将链接包装为 //duckduckgo.com/l/?uddg=<encoded_url>
-    // 需要解码出真实 URL
-    let realUrl = href
-    if (href.includes('duckduckgo.com/l/') && href.includes('uddg=')) {
-      const uddgMatch = href.match(/[?&]uddg=([^&]+)/)
-      if (uddgMatch) {
-        try { realUrl = decodeURIComponent(uddgMatch[1]) } catch { realUrl = uddgMatch[1] }
-      }
-    }
-    // 跳过无法解析的 duckduckgo 内部链接
-    if (realUrl.startsWith('//duckduckgo') || realUrl.startsWith('https://duckduckgo.com')) continue
-
-    titles.push({ url: realUrl, title })
+  while ((m = titleAnchorRe.exec(html)) !== null) {
+    titles.push(m[0])
   }
 
   const snippets: string[] = []
-  while ((m = snippetPattern.exec(html)) !== null && snippets.length < 8) {
-    const snippet = m[1].replace(/<[^>]+>/g, '').trim()
-    if (snippet) snippets.push(snippet)
+  const snippetRe = /<p\b[^>]*\bclass="s"[^>]*>([\s\S]*?)<\/p>/g
+  while ((m = snippetRe.exec(html)) !== null) {
+    snippets.push(m[1] ?? '')
   }
 
-  for (let i = 0; i < Math.min(titles.length, 5); i++) {
-    const { url, title } = titles[i]
-    const snippet = snippets[i] ?? ''
-    results.push(`**${title}**\n${snippet}\n${url}`)
+  const hrefRe = /href="([^"]+)"/
+  const innerRe = /<a\b[^>]*>([\s\S]*?)<\/a>/
+  const results: SearchResult[] = []
+  for (let i = 0; i < titles.length; i++) {
+    const anchor = titles[i]!
+    const hrefMatch = anchor.match(hrefRe)
+    const innerMatch = anchor.match(innerRe)
+    if (!hrefMatch?.[1]) continue
+    results.push({
+      title: decodeHtmlEntities(stripHtml(innerMatch?.[1] ?? '')).trim(),
+      url: hrefMatch[1],
+      snippet: decodeHtmlEntities(stripHtml(snippets[i] ?? ''))
+        .replace(/\s+/g, ' ')
+        .trim(),
+    })
   }
-
-  if (results.length === 0) {
-    return '未找到相关搜索结果（DuckDuckGo 降级模式）'
-  }
-
-  return `搜索结果（来源：DuckDuckGo）：\n\n${results.join('\n\n---\n\n')}`
+  return results
 }
 
-// ── 主方案：Anthropic 原生 web_search beta ────────────────────────────────────
-async function searchViaAnthropic(query: string, apiKey: string): Promise<string> {
-  const fetchOptions: RequestInit = {
-    method: 'POST',
+async function searchMojeek(query: string, topK: number): Promise<SearchResult[]> {
+  const resp = await fetch(`${MOJEEK_ENDPOINT}?q=${encodeURIComponent(query)}`, {
     headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'web-search-2025-03-05',
-      'content-type': 'application/json',
+      'User-Agent': USER_AGENT,
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9',
+      'Accept-Language': 'en-US,en;q=0.9',
     },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5',
-      max_tokens: 1024,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{ role: 'user', content: `搜索并总结: ${query}` }],
-    }),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(20000),
+    redirect: 'follow',
+  })
+  if (!resp.ok) {
+    if (resp.status === 429) throw new Error('Mojeek 请求频率限制（429），请稍后重试')
+    if (resp.status === 403) throw new Error('Mojeek 拒绝访问（403），可能触发了反爬机制')
+    throw new Error(`Mojeek 返回 HTTP ${resp.status}`)
   }
-
-  const res = await fetch('https://api.anthropic.com/v1/messages', fetchOptions)
-
-  if (!res.ok) {
-    throw new Error(`Anthropic API 错误: ${res.status}`)
+  const html = await resp.text()
+  const results = parseMojeekResults(html).slice(0, topK)
+  if (results.length === 0) {
+    if (/no results found|did not match any documents/i.test(html)) return []
+    if (/captcha|verify you are human|access denied|forbidden/i.test(html)) {
+      throw new Error('Mojeek 触发了人机验证，搜索被阻止')
+    }
+    throw new Error(`Mojeek 返回了无法解析的结果（${html.length} 字符）`)
   }
-
-  const data = await res.json() as {
-    content: Array<{ type: string; text?: string }>
-  }
-
-  const text = data.content
-    .filter(b => b.type === 'text' && b.text)
-    .map(b => b.text)
-    .join('\n')
-
-  return text || '未找到相关结果'
+  return results
 }
 
-// 解析网络错误，提供更友好的错误信息
+// ── SearXNG ───────────────────────────────────────────────────
+
+/** 解析 SearXNG HTML 搜索结果 */
+export function parseSearxngHtmlResults(html: string): SearchResult[] {
+  const results: SearchResult[] = []
+
+  // 方式 1: <article class="result"> 或 <div class="result">（默认主题）
+  const articleRe = /<(?:article|div)\b[^>]*\bclass="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/(?:article|div)>/gi
+  let m: RegExpExecArray | null
+  while ((m = articleRe.exec(html)) !== null) {
+    const block = m[1]
+    const linkMatch = block.match(/<h[34]\s*>\s*<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+      || block.match(/<a\b[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+    if (!linkMatch) continue
+    const url = linkMatch[1]
+    const title = stripHtml(linkMatch[2]).trim()
+    if (!title || !url) continue
+
+    let snippet = ''
+    const pMatch = block.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)
+    if (pMatch) snippet = stripHtml(pMatch[1]).trim()
+    if (!snippet) {
+      const csMatch = block.match(/<(?:div|span)\b[^>]*class="[^"]*(?:content|snippet)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span)>/i)
+      if (csMatch) snippet = stripHtml(csMatch[1]).trim()
+    }
+
+    results.push({ title, url, snippet })
+  }
+  if (results.length > 0) return results
+
+  // 方式 2: 降级 — <h3><a href> 配对
+  const h3Re = /<h3\b[^>]*>\s*<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
+  while ((m = h3Re.exec(html)) !== null) {
+    const url = m[1]
+    const title = stripHtml(m[2]).trim()
+    if (!title || !url || url.startsWith('#')) continue
+    // 尝试在 h3 后找 <p> 作为 snippet
+    const afterH3 = html.slice(m.index + m[0].length)
+    const pMatch = afterH3.match(/^\s*<p\b[^>]*>([\s\S]*?)<\/p>/i)
+    const snippet = pMatch ? stripHtml(pMatch[1]).trim() : ''
+    results.push({ title, url, snippet })
+  }
+  return results
+}
+
+/** 校验 SearXNG endpoint */
+function normalizeSearxngEndpoint(raw: string): string {
+  let url: URL
+  try {
+    url = new URL(raw.includes('://') ? raw : `http://${raw}`)
+  } catch {
+    throw new Error(`无效的 SearXNG 地址: ${raw}`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`SearXNG 地址必须是 http/https 协议，当前: ${url.protocol}`)
+  }
+  return url.origin
+}
+
+async function searchSearxng(query: string, topK: number, endpoint: string): Promise<SearchResult[]> {
+  const baseUrl = normalizeSearxngEndpoint(endpoint)
+  const url = `${baseUrl}/search?format=html&q=${encodeURIComponent(query)}`
+  let resp: Response
+  try {
+    resp = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' },
+      signal: AbortSignal.timeout(20000),
+    })
+  } catch (err) {
+    if (err instanceof TypeError && (err as Error).message.includes('fetch')) {
+      throw new Error(`无法连接 SearXNG 实例: ${endpoint}`)
+    }
+    throw err
+  }
+  if (!resp.ok) {
+    if (resp.status === 429) throw new Error('SearXNG 请求频率限制（429）')
+    if (resp.status === 403) throw new Error('SearXNG 拒绝访问（403）')
+    throw new Error(`SearXNG 返回 HTTP ${resp.status}`)
+  }
+  const html = await resp.text()
+  const results = parseSearxngHtmlResults(html).slice(0, topK)
+  if (results.length === 0) {
+    if (/no results found|did not match any documents/i.test(html)) return []
+    throw new Error(`SearXNG 返回了无法解析的结果（${html.length} 字符）`)
+  }
+  return results
+}
+
+// ── 搜索分发 ──────────────────────────────────────────────────
+
+async function webSearch(query: string, topK: number): Promise<{ results: SearchResult[]; engine: string }> {
+  const config = loadConfig()
+  const engine = config.webSearch?.engine ?? 'mojeek'
+  const endpoint = config.webSearch?.endpoint ?? 'http://localhost:8080'
+
+  if (engine === 'searxng') {
+    const results = await searchSearxng(query, topK, endpoint)
+    return { results, engine: `SearXNG (${endpoint})` }
+  }
+  const results = await searchMojeek(query, topK)
+  return { results, engine: 'Mojeek' }
+}
+
+// ── 结果格式化 ────────────────────────────────────────────────
+
+export function formatSearchResults(query: string, results: SearchResult[]): string {
+  const lines: string[] = [`query: ${query}`, `\nresults (${results.length}):`]
+  results.forEach((r, i) => {
+    lines.push(`\n${i + 1}. ${r.title}`)
+    lines.push(`   ${r.url}`)
+    if (r.snippet) lines.push(`   ${r.snippet}`)
+  })
+  return lines.join('\n')
+}
+
+// ── HTML 工具函数 ─────────────────────────────────────────────
+
+function stripHtml(s: string): string {
+  return s.replace(/<[^>]+>/g, '')
+}
+
+function decodeHtmlEntities(s: string): string {
+  return s.replace(/&(#\d+|#x[0-9a-fA-F]+|\w+);/g, (raw, name: string) => {
+    if (name.startsWith('#x') || name.startsWith('#X')) {
+      const code = Number.parseInt(name.slice(2), 16)
+      return Number.isFinite(code) ? String.fromCodePoint(code) : raw
+    }
+    if (name.startsWith('#')) {
+      const code = Number.parseInt(name.slice(1), 10)
+      return Number.isFinite(code) ? String.fromCodePoint(code) : raw
+    }
+    const entities: Record<string, string> = {
+      amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+    }
+    return entities[name.toLowerCase()] ?? raw
+  })
+}
+
+// ── 错误解析 ──────────────────────────────────────────────────
+
 function parseNetworkError(err: unknown): string {
   const errMsg = String(err)
-  
   if (errMsg.includes('fetch failed') || errMsg.includes('ECONNREFUSED')) {
-    const proxyHint = process.env.HTTPS_PROXY || process.env.HTTP_PROXY 
-      ? '' 
-      : '\n提示：可能需要配置代理。请设置环境变量 HTTPS_PROXY 或 HTTP_PROXY，例如：\n  HTTPS_PROXY=http://127.0.0.1:7890'
-    return `网络连接失败，无法访问目标服务器。${proxyHint}`
+    const proxyHint = process.env.HTTPS_PROXY || process.env.HTTP_PROXY
+      ? ''
+      : '\n提示：可能需要配置代理。请设置环境变量 HTTPS_PROXY 或 HTTP_PROXY'
+    return `网络连接失败。${proxyHint}`
   }
-  
-  if (errMsg.includes('ETIMEDOUT') || errMsg.includes('Timeout')) {
+  if (errMsg.includes('ETIMEDOUT') || errMsg.includes('Timeout') || errMsg.includes('timeout')) {
     return '请求超时，请检查网络连接或稍后重试'
   }
-  
   if (errMsg.includes('ENOTFOUND') || errMsg.includes('getaddrinfo')) {
     return 'DNS 解析失败，无法找到目标服务器'
   }
-  
   if (errMsg.includes('certificate') || errMsg.includes('SSL') || errMsg.includes('TLS')) {
     return 'SSL/TLS 证书验证失败'
   }
-  
   return errMsg
 }
+
+// ── 网络策略检查 ──────────────────────────────────────────────
+
+let _decider: NetworkPolicyDecider | null = null
+function getDecider(): NetworkPolicyDecider {
+  if (!_decider) {
+    const config = loadConfig()
+    const policyConfig = config.networkPolicy
+    if (policyConfig?.enabled === false) {
+      _decider = new NetworkPolicyDecider({ defaultAction: 'allow' })
+    } else {
+      _decider = new NetworkPolicyDecider({
+        allowedDomains: policyConfig?.allowedDomains,
+        blockedDomains: policyConfig?.blockedDomains,
+        defaultAction: policyConfig?.defaultAction ?? 'allow',
+      })
+    }
+  }
+  return _decider
+}
+
+export function resetNetworkPolicyCache(): void {
+  _decider = null
+}
+
+function checkNetworkPolicy(): string | null {
+  const decider = getDecider()
+  const config = loadConfig()
+  const endpoints = ['https://www.mojeek.com']
+  if (config.webSearch?.engine === 'searxng' && config.webSearch?.endpoint) {
+    endpoints.push(config.webSearch.endpoint)
+  }
+  for (const endpoint of endpoints) {
+    const { decision, reason } = decider.decide(endpoint)
+    if (decision === 'deny') {
+      return `网络策略拒绝搜索端点: ${reason}`
+    }
+  }
+  return null
+}
+
+// ── 工具定义 ──────────────────────────────────────────────────
 
 export const WebSearchTool: ToolDef<typeof inputSchema> = {
   name: 'web_search',
@@ -157,49 +319,18 @@ export const WebSearchTool: ToolDef<typeof inputSchema> = {
   },
 
   async execute(input) {
-    // 网络策略检查：搜索工具访问 DuckDuckGo / Anthropic API
-    const config = loadConfig()
-    const policyConfig = config.networkPolicy
-    if (policyConfig?.enabled !== false) {
-      const decider = new NetworkPolicyDecider({
-        allowedDomains: policyConfig?.allowedDomains,
-        blockedDomains: policyConfig?.blockedDomains,
-        defaultAction: policyConfig?.defaultAction ?? 'allow',
-      })
-      const searchEndpoints = ['https://html.duckduckgo.com', 'https://api.anthropic.com']
-      for (const endpoint of searchEndpoints) {
-        const { decision, reason } = decider.decide(endpoint)
-        if (decision === 'deny') {
-          return { type: 'error', message: `网络策略拒绝搜索端点: ${reason}` }
-        }
-      }
+    const policyError = checkNetworkPolicy()
+    if (policyError) {
+      return { type: 'error', message: policyError }
     }
-    const anthropicKey = getApiKey('anthropic')
+
+    const topK = Math.max(1, Math.min(10, input.topK ?? DEFAULT_TOPK))
 
     try {
-      if (anthropicKey) {
-        // 优先使用 Anthropic 原生 web_search
-        const result = await searchViaAnthropic(input.query, anthropicKey)
-        return { type: 'success', output: result }
-      } else {
-        // 降级到 DuckDuckGo（无需 API Key）
-        const result = await searchViaDuckDuckGo(input.query)
-        return { type: 'success', output: result }
-      }
+      const { results, engine } = await webSearch(input.query, topK)
+      return { type: 'success', output: `[${engine}]\n\n${formatSearchResults(input.query, results)}` }
     } catch (err) {
-      const errorMsg = parseNetworkError(err)
-      
-      // 主方案失败时尝试降级
-      if (anthropicKey) {
-        try {
-          const result = await searchViaDuckDuckGo(input.query)
-          return { type: 'success', output: `[Anthropic 搜索失败，已降级到 DuckDuckGo]\n\n${result}` }
-        } catch (fallbackErr) {
-          const fallbackError = parseNetworkError(fallbackErr)
-          return { type: 'error', message: `搜索失败: ${errorMsg}；降级也失败: ${fallbackError}` }
-        }
-      }
-      return { type: 'error', message: `搜索失败: ${errorMsg}` }
+      return { type: 'error', message: `搜索失败: ${parseNetworkError(err)}` }
     }
   },
 }

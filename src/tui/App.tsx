@@ -198,7 +198,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   const bufferToolLog = useCallback((line: string) => {
     // 过滤 stderr 行，不在 CLI UI 中显示
-    if (line.trimStart().startsWith('[stderr]')) return
+    //if (line.trimStart().startsWith('[stderr]')) return
     // 同时记录到当前工具日志缓冲，供 tool_end 持久化
     currentToolLogsRef.current.push(line)
     toolLogBufRef.current.push(line)
@@ -277,7 +277,11 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             break
           }
           case 'permission_denied': push({ role: 'system', text: `⚠ 已拒绝: ${ev.description}`, color: 'yellow' }); break
-          case 'usage': setCostInfo({ inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, costUsd: ev.costUsd }); break
+          case 'usage': setCostInfo(prev => ({
+  inputTokens: (prev?.inputTokens ?? 0) + ev.inputTokens,
+  outputTokens: (prev?.outputTokens ?? 0) + ev.outputTokens,
+  costUsd: ev.costUsd,
+})); break
           case 'compact_start': push({ role: 'system', text: '⟳ 上下文过长，正在自动压缩历史...' }); break
           case 'compact_done': {
             const archives = listArchives(sessionId)
@@ -652,7 +656,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       {/* stderr 输出 */}
       {stderrOutput && (
         <Box marginTop={0}>
-          <Text color="gray" dimColor>[stderr] {stderrOutput}</Text>
+          <Text color="gray" dimColor>{stderrOutput}</Text>
         </Box>
       )}
     </Box>

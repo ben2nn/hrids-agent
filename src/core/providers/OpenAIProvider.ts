@@ -147,7 +147,12 @@ export class OpenAIProvider implements LLMProvider {
   ): AsyncGenerator<StreamChunk> {
     const baseUrl = this.config.baseUrl ?? 'https://api.openai.com/v1'
     const oaiMessages = toOAIMessages(messages, systemPrompt)
-    const oaiTools = tools.length > 0 ? tools.map(toOAITool) : undefined
+    const oaiTools = tools.length > 0 ? tools.map(toOAITool) : []
+
+    // 原生联网搜索：向 LLM 传入 web_search 工具，LLM 内部搜索并返回结果
+    if (this.config.nativeWebSearch) {
+      oaiTools.push({ type: 'web_search' } as unknown as OAITool)
+    }
 
     const body: Record<string, unknown> = {
       model: this.model,
@@ -156,7 +161,7 @@ export class OpenAIProvider implements LLMProvider {
       stream: true,
       stream_options: { include_usage: true },
     }
-    if (oaiTools) body.tools = oaiTools
+    if (oaiTools.length > 0) body.tools = oaiTools
 
     // ── 请求体诊断日志（脱敏：base64 图片只打长度）──────────────────────────
     const debugMessages = oaiMessages.map(m => {

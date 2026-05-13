@@ -20,6 +20,8 @@ export interface ProviderDef {
   isAggregator?: boolean
   /** 模型名前缀列表，用于自动识别提供商 */
   modelPrefixes?: string[]
+  /** 是否支持原生联网搜索（web_search 工具参数） */
+  nativeWebSearch?: boolean
 }
 
 // ── 内置提供商注册表 ──────────────────────────────────────────
@@ -32,6 +34,7 @@ export const BUILTIN_PROVIDERS: ProviderDef[] = [
     apiKeyEnvVars: ['ANTHROPIC_API_KEY', 'ANTHROPIC_TOKEN'],
     baseUrlEnvVar: 'ANTHROPIC_BASE_URL',
     modelPrefixes: ['claude-'],
+    nativeWebSearch: true,
   },
   {
     id: 'openai',
@@ -72,11 +75,12 @@ export const BUILTIN_PROVIDERS: ProviderDef[] = [
   {
     id: 'xiaomi',
     name: 'Xiaomi MiMo',
-    transport: 'anthropic_messages',
+    transport: 'openai_chat',
     apiKeyEnvVars: ['XIAOMI_API_KEY', 'MIMO_API_KEY'],
-    defaultBaseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    defaultBaseUrl: 'https://api.xiaomimimo.com/v1',
     baseUrlEnvVar: 'XIAOMI_BASE_URL',
     modelPrefixes: ['mimo-'],
+    nativeWebSearch: true,
   },
   {
     id: 'zhipu',
@@ -191,6 +195,8 @@ export interface CustomProviderConfig {
   apiKeyEnvVar?: string
   /** 直接内联 API Key（不推荐，建议用 apiKeyEnvVar） */
   apiKey?: string
+  /** 是否支持原生联网搜索（web_search 工具参数） */
+  nativeWebSearch?: boolean
 }
 
 // ── 查找函数 ──────────────────────────────────────────────────
@@ -222,6 +228,7 @@ export function getCustomProvider(name: string, customs: CustomProviderConfig[])
     transport: entry.transport ?? 'openai_chat',
     apiKeyEnvVars: entry.apiKeyEnvVar ? [entry.apiKeyEnvVar] : [],
     defaultBaseUrl: entry.baseUrl,
+    nativeWebSearch: entry.nativeWebSearch,
   }
 }
 

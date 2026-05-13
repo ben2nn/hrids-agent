@@ -54,6 +54,8 @@ export interface ProviderConfig {
   baseUrl?: string   // 自定义端点（Ollama、本地代理等）
   model: string
   modelType?: ModelType
+  /** 提供商是否支持原生联网搜索（通过 web_search 工具参数，LLM 内部搜索并返回结果） */
+  nativeWebSearch?: boolean
 }
 
 // 所有提供商必须实现的接口

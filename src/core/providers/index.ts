@@ -84,7 +84,7 @@ function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
   const baseUrl = opts.baseUrl ?? def.defaultBaseUrl
   const apiKey = opts.apiKey
 
-  const config: ProviderConfig = { apiKey: apiKey ?? '', baseUrl, model, modelType }
+  const config: ProviderConfig = { apiKey: apiKey ?? '', baseUrl, model, modelType, nativeWebSearch: def.nativeWebSearch }
 
   if (def.transport === 'anthropic_messages') {
     if (!apiKey) throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)

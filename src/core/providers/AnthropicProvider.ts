@@ -15,10 +15,12 @@ export class AnthropicProvider implements LLMProvider {
   readonly modelType: ModelType
 
   private client: Anthropic
+  private nativeWebSearch: boolean
 
   constructor(config: ProviderConfig) {
     this.model = config.model
     this.modelType = config.modelType ?? 'llm'
+    this.nativeWebSearch = config.nativeWebSearch ?? false
     this.client = new Anthropic({
       apiKey: config.apiKey,
       baseURL: config.baseUrl,
@@ -51,12 +53,21 @@ export class AnthropicProvider implements LLMProvider {
         : { type: 'text', text }
     })
 
+    // 构建工具列表
+    const anthropicTools: Anthropic.Tool[] = tools.length > 0
+      ? tools.map(toAnthropicTool) as Anthropic.Tool[]
+      : []
+    // 原生联网搜索：Claude 内部搜索并返回结果
+    if (this.nativeWebSearch) {
+      anthropicTools.push({ type: 'web_search_20250305', name: 'web_search' } as unknown as Anthropic.Tool)
+    }
+
     // 重试由外层 FallbackProvider 统一处理
     const stream = this.client.messages.stream({
       model: this.model,
       max_tokens: maxTokens,
       system: systemBlocks,
-      tools: tools.length > 0 ? tools.map(toAnthropicTool) as Anthropic.Tool[] : undefined,
+      tools: anthropicTools.length > 0 ? anthropicTools : undefined,
       messages: anthropicMessages,
     }, { signal })
 

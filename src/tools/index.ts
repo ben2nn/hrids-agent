@@ -1,5 +1,4 @@
 import { BashTool } from './BashTool.js'
-import { PowerShellTool } from './PowerShellTool.js'
 import { FileReadTool } from './FileReadTool.js'
 import { FileWriteTool } from './FileWriteTool.js'
 import { FileEditTool } from './FileEditTool.js'
@@ -19,11 +18,10 @@ import { WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListToo
 import type { ToolDef } from '../core/Tool.js'
 import { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
 
-// 根据平台选择 shell 工具：Windows 使用 PowerShellTool，其他平台使用 BashTool
-const shellTool = process.platform === 'win32' ? PowerShellTool : BashTool
+const shellTool = BashTool
 
 export {
-  BashTool, PowerShellTool, FileReadTool, FileWriteTool, FileEditTool,
+  BashTool, FileReadTool, FileWriteTool, FileEditTool,
   GlobTool, GrepTool, WebFetchTool, WebSearchTool,
   AskUserTool, TodoWriteTool, TodoUpdateTool, TodoAppendTool, TodoResetTool, TodoReadTool,
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
@@ -36,7 +34,7 @@ export { MEMORY_TOOLS } from '../memory/index.js'
 export { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
 
 export const ALL_TOOLS: ToolDef[] = [
-  shellTool,  // Windows → PowerShellTool，Linux/macOS → BashTool
+  shellTool,
   FileReadTool,
   FileWriteTool,
   FileEditTool,
