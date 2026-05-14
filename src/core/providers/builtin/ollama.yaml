@@ -1,0 +1,63 @@
+# Ollama（本地模型）
+name: Ollama
+transport: openai_chat
+apiKeyEnvVars: []
+defaultBaseUrl: http://localhost:11434/v1
+baseUrlEnvVar: OLLAMA_BASE_URL
+
+nativeWebSearch: false
+
+# 本地模型无固定列表，以下为常用模型的参考参数
+# 用户可通过 ollama pull 下载任意模型，此处列出常见型号供自动识别
+models:
+  qwen3:8b:
+    contextWindow: 32768
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: Qwen3 8B 本地版
+
+  qwen3:32b:
+    contextWindow: 32768
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: Qwen3 32B 本地版
+
+  llama3.3:latest:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: Llama 3.3 本地版
+
+  deepseek-r1:32b:
+    contextWindow: 65536
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: DeepSeek R1 32B 本地版

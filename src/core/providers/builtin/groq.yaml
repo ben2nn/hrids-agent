@@ -1,0 +1,62 @@
+# Groq
+name: Groq
+transport: openai_chat
+apiKeyEnvVars: [GROQ_API_KEY]
+defaultBaseUrl: https://api.groq.com/openai/v1
+baseUrlEnvVar: GROQ_BASE_URL
+modelPrefixes: [llama, mixtral, gemma, whisper]
+
+nativeWebSearch: false
+
+models:
+  llama-3.3-70b-versatile:
+    contextWindow: 131072
+    maxOutputTokens: 32768
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.59
+    outputPrice: 0.79
+    description: Llama 3.3 70B，Groq 超速推理
+
+  llama-3.1-8b-instant:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.05
+    outputPrice: 0.08
+    description: Llama 3.1 8B，极低延迟
+
+  mixtral-8x7b-32768:
+    contextWindow: 32768
+    maxOutputTokens: 32768
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.24
+    outputPrice: 0.24
+    description: Mixtral 8x7B，MoE 架构
+
+  whisper-large-v3:
+    contextWindow: 0
+    maxOutputTokens: 0
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: Whisper Large V3，语音转文字

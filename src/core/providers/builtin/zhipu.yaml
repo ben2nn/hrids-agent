@@ -1,0 +1,505 @@
+# 智谱 AI（GLM）
+name: 智谱 AI
+transport: openai_chat
+apiKeyEnvVars: [ZHIPU_API_KEY]
+defaultBaseUrl: https://open.bigmodel.cn/api/paas/v4
+baseUrlEnvVar: ZHIPU_BASE_URL
+modelPrefixes: [glm-, cogview-, cogvideo-, embedding-]
+
+nativeWebSearch: true
+webSearchMode:
+  type: custom
+
+models:
+  # ── GLM-5.1 系列 ──
+  glm-5.1:
+    contextWindow: 262144
+    maxOutputTokens: 32768
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: true
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 3.0
+    outputPrice: 12.0
+    description: GLM-5.1，全模态旗舰推理
+
+  glm-5.1-air:
+    contextWindow: 262144
+    maxOutputTokens: 32768
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: true
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: GLM-5.1 Air，高性价比全模态
+
+  glm-5.1-flash:
+    contextWindow: 262144
+    maxOutputTokens: 32768
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-5.1 Flash，免费多模态推理
+
+  # ── GLM-5 系列 ──
+  glm-5:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 2.0
+    outputPrice: 8.0
+    description: GLM-5，旗舰多模态推理
+
+  glm-5-plus:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 3.0
+    outputPrice: 12.0
+    description: GLM-5 Plus，增强多模态推理
+
+  glm-5-air:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-5 Air，高性价比多模态
+
+  glm-5-flash:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-5 Flash，免费多模态
+
+  glm-5-long:
+    contextWindow: 2097152
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: GLM-5 Long，200 万超长上下文
+
+  # ── GLM-4.7 系列 ──
+  glm-4.7:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 2.0
+    outputPrice: 8.0
+    description: GLM-4.7，多模态推理增强
+
+  glm-4.7-air:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4.7 Air，高性价比
+
+  glm-4.7-flash:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-4.7 Flash，免费版
+
+  # ── GLM-4.6 系列 ──
+  glm-4.6:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.5
+    outputPrice: 6.0
+    description: GLM-4.6，多模态推理
+
+  glm-4.6-air:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: GLM-4.6 Air，高性价比
+
+  glm-4.6-flash:
+    contextWindow: 262144
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-4.6 Flash，免费版
+
+  # ── GLM-4.5 系列 ──
+  glm-4.5:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: GLM-4.5，多模态推理
+
+  glm-4.5-air:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.2
+    outputPrice: 0.8
+    description: GLM-4.5 Air，高性价比
+
+  glm-4.5-flash:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-4.5 Flash，免费版
+
+  glm-4.5-long:
+    contextWindow: 1048576
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4.5 Long，百万上下文
+
+  # ── GLM-4 系列（文本对话） ──
+  glm-4-plus:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4 Plus，旗舰文本模型
+
+  glm-4-0520:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4 0520 快照版
+
+  glm-4-air:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.1
+    outputPrice: 0.1
+    description: GLM-4 Air，高性价比
+
+  glm-4-airx:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.1
+    outputPrice: 0.1
+    description: GLM-4 AirX，极速推理
+
+  glm-4-long:
+    contextWindow: 1048576
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.1
+    outputPrice: 0.5
+    description: GLM-4 Long，百万上下文
+
+  glm-4-flash:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-4 Flash，免费版
+
+  glm-4-flashx:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-4 FlashX，极速免费版
+
+  glm-4-alltools:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4 AllTools，增强工具调用
+
+  # ── GLM-4V 多模态系列 ──
+  glm-4v-plus:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4V Plus，图文视频理解
+
+  glm-4v:
+    contextWindow: 32768
+    maxOutputTokens: 8192
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4V，图文理解
+
+  # ── GLM-4 Voice 语音系列 ──
+  glm-4-voice:
+    contextWindow: 32768
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: GLM-4 Voice，语音理解与生成
+
+  # ── GLM-Z1 推理系列 ──
+  glm-z1-air:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.1
+    outputPrice: 0.1
+    description: GLM-Z1 Air，推理增强
+
+  glm-z1-airx:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.1
+    outputPrice: 0.1
+    description: GLM-Z1 AirX，极速推理
+
+  glm-z1-flash:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: GLM-Z1 Flash，免费推理模型
+
+  # ── CogView 图像生成系列 ──
+  cogview-4:
+    contextWindow: 4096
+    maxOutputTokens: 4096
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: CogView-4，AI 绘画
+
+  cogview-4-250304:
+    contextWindow: 4096
+    maxOutputTokens: 4096
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: CogView-4 快照版
+
+  # ── CogVideo 视频生成系列 ──
+  cogvideox:
+    contextWindow: 4096
+    maxOutputTokens: 4096
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: CogVideoX，AI 视频生成
+
+  # ── Embedding 向量系列 ──
+  embedding-3:
+    contextWindow: 8192
+    maxOutputTokens: 0
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: Embedding-3，文本向量化
+
+  embedding-2:
+    contextWindow: 8192
+    maxOutputTokens: 0
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.0
+    outputPrice: 0.0
+    description: Embedding-2，文本向量化

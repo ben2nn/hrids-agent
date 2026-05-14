@@ -1,81 +1,69 @@
 # 复制此文件到 ~/.hrids/config.yaml 并填入你的配置
 # 完整字段说明见 docs/AGENT.md，或运行 hrids-agent --help
+# 所有模型 ID 均可在 src/core/providers/builtin/ 下的各平台 YAML 中查阅
+
 # 大语言模型（主对话引擎，必须配置）
 # 同平台内按 models 顺序重试，全部失败后切换下一平台
 llm:
   fallbacks:
-    - provider: aliyun
-      apiKey: sk-xxxxxxxx
+    - provider: xiaomi
+      apiKey: tp-cs8mlagf1xrhy9hxut43nkbdu7rtbzazqzqo3r0el9qocy77
       models:
+        - mimo-v2-pro
+    - provider: aliyun
+      apiKey: sk-8d3b65698c8f40a3a9c542c2123e8502
+      models:
+        - deepseek-v4-flash
         - qwen3.5-35b-a3b
         - qwen3.6-flash-2026-04-16
+        - qwen3.6-35b-a3b
         - qwen3.5-plus-2026-04-20
-    - provider: deepseek
-      apiKey: sk-xxxxxxxx
-      models:
-        - deepseek-chat
-        - deepseek-reasoner
-    - provider: anthropic
-      apiKey: sk-ant-xxxxxxxx
-      models:
-        - claude-3-5-haiku-20241022
-        - claude-3-5-sonnet-20241022
-    - provider: openai
-      apiKey: sk-xxxxxxxx
-      models:
-        - gpt-4o
-        - gpt-4o-mini
-    - provider: groq
-      apiKey: gsk_xxxxxxxx
-      models:
-        - llama-3.3-70b-versatile
-        - mixtral-8x7b-32768
+        - qwen3.6-max-preview
+        - kimi-k2.6
+        - qwen3.6-flash
+        - MiniMax-M2.5
+        - deepseek-v4-pro
 
-# 视觉模型（图像理解，可选；未配置则复用 llm）
+# 视觉模型（图像理解，可选；未配置则复用 llm 中支持图片的模型）
 vision:
   fallbacks:
     - provider: aliyun
-      apiKey: sk-xxxxxxxx
+      apiKey: sk-54336ea55e89493688c7819e0c61a95c
       models:
         - qwen-vl-plus-latest
         - qwen-vl-max
-    - provider: openai
-      apiKey: sk-xxxxxxxx
-      models:
-        - gpt-4o
-        - gpt-4o-mini
 
-# 全模态模型（文本 + 图像 + 音频，可选；未配置则复用 vision/llm）
-multimodal:
+# 语音合成（TTS，可选）
+tts:
   fallbacks:
-    - provider: aliyun
+    - provider: xiaomi
       apiKey: sk-xxxxxxxx
       models:
-        - qwen-omni-turbo
-        - qwen-omni-mini
+        - mimo-v2.5-tts
+        - mimo-v2-tts
+    - provider: minimax
+      apiKey: sk-xxxxxxxx
+      models:
+        - speech-2.8-hd
+        - speech-2.8-turbo
 
-# 语音模型（TTS / STT，可选）
-speech:
+# 语音识别（STT，可选）
+stt:
   fallbacks:
-    - provider: aliyun
-      apiKey: sk-xxxxxxxx
+    - provider: groq
+      apiKey: gsk_xxxxxxxx
       models:
-        - cosyvoice-v2
-        - paraformer-realtime-v2
+        - whisper-large-v3
 
 # 向量模型（语义检索，可选；未配置则降级 TF-IDF，无需 API）
 embedding:
   fallbacks:
-    - provider: aliyun
-      apiKey: sk-xxxxxxxx
+    - provider: zhipu
+      apiKey: xxxxxxxxxxx
       models:
-        - text-embedding-v3
-        - text-embedding-v2
-    - provider: openai
-      apiKey: sk-xxxxxxxx
-      models:
-        - text-embedding-3-small
-  dimensions: 512
+        - embedding-3
+        - embedding-2
+  dimensions: 1024
 
 # 向量存储后端。backend: sqlite（默认，内置）| pgvector | seekdb
 vectorStore:
@@ -83,11 +71,11 @@ vectorStore:
 
 # Agent 运行时行为配置
 agent:
-  model: qwen3.5-35b-a3b
-  permissionMode: ask
+  model: qwen3.6-flash-2026-04-16
+  permissionMode: plan
   maxTokens: 8096
   maxTurns: 50
-  memoryCondense: true
+  memoryCondense: false
   # 自动压缩上下文的 token 阈值（超过后用 LLM 生成摘要，替换早期历史）
   # 设为 0 可禁用自动压缩，手动用 /compact 命令触发
   autoCompactThreshold: 100000
@@ -127,7 +115,7 @@ gateway:
   # 用户列表（配置后前端显示用户名/密码登录界面）
   users:
     - username: admin
-      password: your-password
+      password: "123456"
 
 # 日志级别：debug | info | warn | error
 logging:
@@ -139,10 +127,27 @@ skillHub:
   url: https://skillhub.cn
   apiBase: https://api.skillhub.cn
 
-# 自定义提供商 —— 接入任意 OpenAI 兼容接口，配置后可在 llm.fallbacks 中使用
+# 自定义提供商 —— 接入任意 OpenAI / Anthropic 兼容接口
+# 配置后可在 llm.fallbacks 中通过 name 引用，也可通过 modelPrefixes 自动识别
 # customProviders:
 #   - name: MyLLM
 #     baseUrl: https://my-llm.example.com/v1
+#     transport: openai_chat              # openai_chat（默认）| anthropic_messages
+#     apiKeyEnvVar: MY_LLM_API_KEY        # 推荐：从环境变量读取 Key
+#     modelPrefixes: [myllm-, my-model]   # 可选：模型名前缀，用于自动推断提供商
+#     nativeWebSearch: false
+#     models:                             # 可选：完整模型参数（与 builtin YAML 格式一致）
+#       myllm-7b:
+#         contextWindow: 32768
+#         maxOutputTokens: 4096
+#         supportsToolUse: true
+#         description: 我的 7B 模型
+#       myllm-70b:
+#         contextWindow: 131072
+#         maxOutputTokens: 16384
+#         supportsImage: true
+#         supportsToolUse: true
+#         description: 我的 70B 多模态模型
 
 # MCP 服务器。也可单独维护 ~/.hrids/mcp.json（兼容 Claude Desktop 格式）
 # mcpServers:
@@ -162,7 +167,7 @@ multiAgent:
   # profiles:
   #   - name: code-reviewer
   #     description: 审查代码质量、安全性和最佳实践
-  #     model: claude-3-5-sonnet-20241022
+  #     model: claude-sonnet-4-6
   #     provider: anthropic
   #     allowedTools: [file_read, grep, glob]
   #     maxTurns: 15

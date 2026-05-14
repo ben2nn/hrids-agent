@@ -1,5 +1,5 @@
 ﻿import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { Box, Text, useApp } from 'ink'
+import { Box, Text, useApp, useInput } from 'ink'
 import { SplashScreen } from './SplashScreen.js'
 import { CommandHint } from './CommandHint.js'
 import { FileHint } from './FileHint.js'
@@ -67,33 +67,30 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [showFileHint, setShowFileHint] = useState(false)
   const [fileFilter, setFileFilter] = useState('')
   const [stderrOutput, setStderrOutput] = useState('')
-  const [scrollOffset, setScrollOffset] = useState(0)
   const MAX_VISIBLE_LINES = 50
-  const SCROLL_PAGE = 10   // PageUp/PageDown 步进
-  // pinned=true: 自动跟踪底部; pinned=false: 用户自由滚动
+  const SCROLL_PAGE = 10
+  // scrollRows: 内容向上滚动的行数（0 = 看最新消息，越大看得越早）
+  const [scrollRows, setScrollRows] = useState(0)
   const [pinned, setPinned] = useState(true)
   const pinnedRef = useRef(true)
-  // 同步 ref 以便闭包中读取最新值
   pinnedRef.current = pinned
 
   const jumpToBottom = useCallback(() => {
-    setPinned(true)
     pinnedRef.current = true
-    setMsgs(prev => {
-      setScrollOffset(Math.max(0, prev.length - MAX_VISIBLE_LINES))
-      return prev
-    })
+    setPinned(true)
+    setScrollRows(0)
   }, [])
 
   const push = useCallback((msg: DisplayMsg) => {
     setMsgs(prev => {
       const newMsgs = [...prev, msg]
       msgsLengthRef.current = newMsgs.length
-      if (pinnedRef.current) {
-        setScrollOffset(Math.max(0, newMsgs.length - MAX_VISIBLE_LINES))
-      }
       return newMsgs
     })
+    // pinned 时自动滚到底（scrollRows=0），非 pinned 保持当前位置
+    if (pinnedRef.current) {
+      setScrollRows(0)
+    }
   }, [])
 
   const cronQueueRef = useRef<CronJob[]>([])
@@ -386,43 +383,51 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     await runEngine(text)
   }, [commands, engine, push, exit, cmdCtx])
 
+  // Ctrl+C 通过 useKeystroke 处理（走 StdinReader 链路）
   useKeystroke((key) => {
-    // 非 loading 状态的 Ctrl+C 退出（loading 状态由下方原始 stdin 监听器处理）
     if (key.ctrl && key.name === 'c') {
-      if (!loadingRef.current) exit()
-    }
-    const maxOffset = Math.max(0, msgsLengthRef.current - MAX_VISIBLE_LINES)
-    // PageUp / PageDown — 页级滚动（不与 PromptInput 冲突）
-    if (key.name === 'pageup') {
-      setPinned(false)
-      setScrollOffset(prev => Math.max(0, prev - SCROLL_PAGE))
-    }
-    if (key.name === 'pagedown') {
-      setScrollOffset(prev => {
-        const next = Math.min(maxOffset, prev + SCROLL_PAGE)
-        if (next >= maxOffset) setPinned(true)
-        return next
-      })
-    }
-  })
-
-  // 直接监听 stdin 原始输入，确保 loading 期间也能捕获 Ctrl+C
-  // 非 loading 状态的 Ctrl+C 退出由上方 useKeystroke 处理（走正常按键链路）
-  // 注意：StdinReader 设置了 setEncoding('utf-8')，data 为 string 而非 Buffer
-  useEffect(() => {
-    const handler = (data: string) => {
-      if (data === '\x03' && loadingRef.current) {
+      if (loadingRef.current) {
         engine.abort()
         setLoading(false)
         loadingRef.current = false
         setStreamBuf('')
         setToolProgress('')
         push({ role: 'system', text: '⚠ 任务已中断（Ctrl+C）' })
+      } else {
+        exit()
       }
     }
-    process.stdin.on('data', handler)
-    return () => { process.stdin.off('data', handler) }
-  }, [engine, push])
+  })
+
+  // 滚动通过 Ink 的 useInput 处理（与 Ink 渲染管线原生集成）
+  useInput((input, key) => {
+    if (key.pageUp) {
+      setPinned(false)
+      setScrollRows(prev => prev + SCROLL_PAGE)
+    }
+    if (key.pageDown) {
+      setScrollRows(prev => {
+        const next = Math.max(0, prev - SCROLL_PAGE)
+        if (next === 0) setPinned(true)
+        return next
+      })
+    }
+    if (key.upArrow && !loadingRef.current) {
+      setPinned(false)
+      setScrollRows(prev => prev + 3)
+    }
+    if (key.downArrow && !loadingRef.current) {
+      setScrollRows(prev => {
+        const next = Math.max(0, prev - 3)
+        if (next === 0) setPinned(true)
+        return next
+      })
+    }
+    // End 键回到底部（Ink 的 useInput 不直接提供 end，用 Ctrl+End 代替）
+    if (input === '\x1b[F' || (key.ctrl && input === '>')) {
+      jumpToBottom()
+    }
+  })
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
@@ -437,7 +442,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       {/* 消息历史 */}
       <Box flexDirection="column" marginBottom={1}>
         {msgs
-          .slice(scrollOffset, scrollOffset + MAX_VISIBLE_LINES)
+          .slice(0, Math.max(0, msgs.length - scrollRows))
+          .slice(-MAX_VISIBLE_LINES)
           .map((m, i) => (
             <MessageCard key={m.id ?? i} role={m.role as MessageRole} text={m.text} color={m.color} />
           ))
@@ -503,7 +509,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       {/* 输入区域 */}
       <Box marginBottom={0}>
         {!pinned
-          ? <Text color={FG.faint}>  ▸ 查看历史中 -- End / PgDn 返回底部 · ↑↓ 逐行滚动</Text>
+          ? <Text color={FG.faint}>  ▸ 查看历史中 -- PgDn 返回底部 · ↑↓ 滚动</Text>
           : askUserPrompt
           ? (
             <Box flexDirection="column">
@@ -556,7 +562,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           {msgs.length > MAX_VISIBLE_LINES && (
             <>
               <Text color={FG.faint}> · </Text>
-              <Text>{scrollOffset + 1}-{Math.min(scrollOffset + MAX_VISIBLE_LINES, msgs.length)}/{msgs.length}</Text>
+              <Text>{Math.max(1, msgs.length - scrollRows - MAX_VISIBLE_LINES + 1)}-{Math.min(msgs.length, msgs.length - scrollRows)}/{msgs.length}</Text>
             </>
           )}
         </Text>

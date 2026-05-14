@@ -182,8 +182,8 @@ async function main() {
       }
 
       const model = opts.model ?? config.model
-      const memoryCondense = config.memoryCondense ?? false
-      const skillDistill = config.autoDistillSkill ?? false
+      const memoryCondense = config.agent?.memoryCondense ?? false
+      const skillDistill = config.agent?.autoDistillSkill ?? false
 
       // 后台清理过期会话（可通过 agent.autoPruneSessions 关闭，keepCount/maxAgeDays 可调）
       if (config.agent?.autoPruneSessions !== false) {
@@ -202,7 +202,7 @@ async function main() {
         resume: opts.resume,
         newSession: opts.newSession,
         cwd: opts.cwd,
-        agentCwd: config.agentCwd,
+        agentCwd: config.agent?.cwd,
       })
 
       // 创建 LLM 提供商（带状态回调）
@@ -234,7 +234,7 @@ async function main() {
       // 权限模式
       const permMode = opts.plan ? 'plan'
         : opts.craft ? 'craft'
-        : config.permissionMode
+        : config.agent?.permissionMode ?? 'ask'
 
       const permissions = new PermissionManager(permMode, async (req) => {
         process.stdout.write(`\n允许执行 "${req.description}"? [y/N/always] `)
@@ -287,10 +287,10 @@ async function main() {
         systemPrompt,
         registry,
         permissions,
-        maxTokens: config.maxTokens,
-        maxTurns: config.maxTurns,
-        maxBudgetUsd: config.maxBudgetUsd,
-        autoCompactThreshold: config.autoCompactThreshold,
+        maxTokens: config.agent?.maxTokens,
+        maxTurns: config.agent?.maxTurns,
+        maxBudgetUsd: config.agent?.maxBudgetUsd,
+        autoCompactThreshold: config.agent?.autoCompactThreshold,
       }, store)
 
       // 根据用户消息动态更新 systemPrompt（按任务类型注入扩展块）

@@ -32,7 +32,7 @@ export function setGatewayAskCallback(
   sessionId?: string,
 ): void {
   if (!sessionId) {
-    // 兼容旧调用方式（CLI/Server 模式，无 sessionId）
+    // CLI/Server 模式（无 sessionId），使用全局回调
     if (cb) gatewayCallbacks.set('__global__', cb)
     else gatewayCallbacks.delete('__global__')
     return
@@ -136,7 +136,7 @@ export const AskUserTool: ToolDef<typeof inputSchema> = {
       pendingResolve = makeAnswerResolver(input.options, resolve)
       pendingReject = reject
 
-      // 兼容旧的全局 Gateway 回调（__global__ key）
+      // CLI/Server 模式：使用全局 Gateway 回调
       const globalCb = gatewayCallbacks.get('__global__')
       if (globalCb) globalCb(input.question, input.options)
     })

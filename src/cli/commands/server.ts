@@ -16,9 +16,9 @@ export async function runServerCommand(opts: ServerCommandOpts): Promise<void> {
     sessionId: ctx.sessionId,
     initialCwd: ctx.initialCwd,
     model: ctx.model,
-    permMode: permMode ?? ctx.config.permissionMode,
-    memoryCondense: ctx.config.memoryCondense ?? false,
-    skillDistill: ctx.config.autoDistillSkill ?? false,
+    permMode: permMode ?? ctx.config.agent?.permissionMode ?? 'ask',
+    memoryCondense: ctx.config.agent?.memoryCondense ?? false,
+    skillDistill: ctx.config.agent?.autoDistillSkill ?? false,
     buildPromptForMessage: ctx.buildPromptForMessage,
   })
 }

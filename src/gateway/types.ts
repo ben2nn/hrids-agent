@@ -17,8 +17,7 @@ export interface CreateSessionRequest {
   provider?: string
   apiKey?: string
   baseUrl?: string
-  autoMode?: boolean
-  /** 权限模式（优先级高于 autoMode）：ask / craft / plan */
+  /** 权限模式：ask / craft / plan */
   permissionMode?: 'ask' | 'craft' | 'plan'
   cwd?: string
   resume?: string  // 恢复已有会话 ID

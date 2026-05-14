@@ -27,7 +27,7 @@ import { clearFileCache } from './FileReadTool.js'
 import { isCommandAllowed, isAllowed } from './shell/parse.js'
 import { runCommand } from './shell/exec.js'
 
-// 向后兼容：重新导出 cwd 管理（App.tsx 等模块依赖）
+// 重新导出 cwd 管理（App.tsx 等模块依赖）
 export { getGlobalCwd, setGlobalCwd, runWithCwd } from '../core/cwd.js'
 
 const log = logger.child({ component: 'bash-tool' })

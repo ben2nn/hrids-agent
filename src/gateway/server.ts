@@ -487,9 +487,9 @@ export function createGateway(config: GatewayConfig = {}) {
       const cfg = loadConfig()
       res.json({
         model: cfg.model,
-        permissionMode: cfg.permissionMode,
-        maxTokens: cfg.maxTokens,
-        maxTurns: cfg.maxTurns,
+        permissionMode: cfg.agent?.permissionMode ?? 'ask',
+        maxTokens: cfg.agent?.maxTokens,
+        maxTurns: cfg.agent?.maxTurns,
       })
     } catch (err) {
       res.status(500).json({ error: safeClientError(err) })
@@ -503,7 +503,7 @@ export function createGateway(config: GatewayConfig = {}) {
       const patch: Record<string, unknown> = {}
       if (body.model) patch.model = body.model
       if (body.permissionMode && ['ask', 'craft', 'plan'].includes(body.permissionMode)) {
-        patch.permissionMode = body.permissionMode
+        patch.agent = { permissionMode: body.permissionMode as 'ask' | 'craft' | 'plan' }
       }
       saveConfig(patch)
       res.json({ ok: true })

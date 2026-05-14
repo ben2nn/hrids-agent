@@ -41,7 +41,7 @@ export async function runDoctorCommand(): Promise<void> {
 
   console.log(`\n[模型] 默认模型: ${config.model ?? '未配置'}`)
   console.log(`\n[MCP] 已配置 ${config.mcpServers.length} 个 MCP 服务器`)
-  console.log(`\n[权限] 模式: ${config.permissionMode}`)
+  console.log(`\n[权限] 模式: ${config.agent?.permissionMode ?? 'ask'}`)
 
   console.log('\n' + '─'.repeat(40))
   if (issues === 0) {

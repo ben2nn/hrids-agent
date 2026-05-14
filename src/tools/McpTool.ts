@@ -185,7 +185,7 @@ export async function loadMcpTools(configs: McpServerConfig[], sessionId?: strin
 
 /**
  * 断开指定会话的所有 MCP 连接（Gateway 模式 destroySession 时调用）。
- * 不传 sessionId 时断开 CLI 模式的全局连接（向后兼容）。
+ * 不传 sessionId 时断开 CLI 模式的全局连接。
  */
 export async function disconnectAllMcp(sessionId?: string): Promise<void> {
   const sid = sessionId ?? CLI_SESSION_KEY

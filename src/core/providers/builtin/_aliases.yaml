@@ -1,0 +1,22 @@
+# 提供商别名映射
+aliases:
+  claude: anthropic
+  gpt: openai
+  deep-seek: deepseek
+  groq-cloud: groq
+  dashscope: aliyun
+  qwen: aliyun
+  alibaba: aliyun
+  alibaba-cloud: aliyun
+  glm: zhipu
+  zhipuai: zhipu
+  bigmodel: zhipu
+  nim: nvidia
+  nvidia-nim: nvidia
+  local: ollama
+  lmstudio: ollama
+  or: openrouter
+  moonshot: kimi
+  kimi-coding: kimi
+  gemini: google
+  google-ai: google

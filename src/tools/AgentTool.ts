@@ -1,7 +1,7 @@
 // 子智能体工具集
 //
 // 包含两套工具：
-// 1. agent（阻塞式）—— 派生子智能体并等待完成，返回完整结果。向后兼容。
+// 1. agent（阻塞式）—— 派生子智能体并等待完成，返回完整结果。
 // 2. agent_spawn / agent_wait / agent_cancel / agent_list（非阻塞式）—— 使用 AgentPool，
 //    spawn 立即返回 ID，wait 稍后获取结果。支持真正的并行执行。
 //
@@ -61,7 +61,7 @@ function getDefaultPool(mgr: TeamManager): AgentPool {
   return team.pool
 }
 
-// ── agent（阻塞式，向后兼容）──────────────────────────────────────────────
+// ── agent（阻塞式）──────────────────────────────────────────────
 
 const agentSchema = z.object({
   description: z.string().describe('3-5 个词描述任务'),

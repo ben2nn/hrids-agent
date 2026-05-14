@@ -87,7 +87,7 @@ export async function initCli(opts: BaseCliOpts & {
     resume: opts.resume,
     newSession: opts.newSession,
     cwd: opts.cwd,
-    agentCwd: config.agentCwd,
+    agentCwd: config.agent?.cwd,
   })
 
   let provider: LLMProvider
@@ -106,7 +106,7 @@ export async function initCli(opts: BaseCliOpts & {
     process.exit(1)
   }
 
-  const permMode = opts.permMode ?? config.permissionMode
+  const permMode = opts.permMode ?? config.agent?.permissionMode ?? 'ask'
   const permissions = opts.autoApprove
     ? new PermissionManager(permMode, async () => true)
     : new PermissionManager(permMode, async (req) => {
@@ -143,8 +143,8 @@ export async function initCli(opts: BaseCliOpts & {
   const registry = new ToolRegistry().registerAll(tools)
   const engine = new QueryEngine({
     provider, systemPrompt, registry, permissions,
-    maxTokens: config.maxTokens, maxTurns: config.maxTurns,
-    maxBudgetUsd: config.maxBudgetUsd, autoCompactThreshold: config.autoCompactThreshold,
+    maxTokens: config.agent?.maxTokens, maxTurns: config.agent?.maxTurns,
+    maxBudgetUsd: config.agent?.maxBudgetUsd, autoCompactThreshold: config.agent?.autoCompactThreshold,
   }, store)
 
   const buildPromptForMessage = async (msg: string): Promise<void> => {

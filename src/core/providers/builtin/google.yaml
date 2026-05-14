@@ -1,0 +1,52 @@
+# Google Gemini
+name: Google Gemini
+transport: openai_chat
+apiKeyEnvVars: [GOOGLE_API_KEY, GEMINI_API_KEY]
+defaultBaseUrl: https://generativelanguage.googleapis.com/v1beta/openai
+baseUrlEnvVar: GEMINI_BASE_URL
+modelPrefixes: [gemini-]
+
+nativeWebSearch: true
+webSearchMode:
+  type: tool
+  toolType: google_search
+
+models:
+  gemini-2.5-pro:
+    contextWindow: 1048576
+    maxOutputTokens: 65536
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: true
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.25
+    outputPrice: 10.0
+    description: Gemini 2.5 Pro，百万上下文多模态旗舰
+
+  gemini-2.5-flash:
+    contextWindow: 1048576
+    maxOutputTokens: 65536
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: true
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.15
+    outputPrice: 0.60
+    description: Gemini 2.5 Flash，快速低成本
+
+  gemini-2.0-flash:
+    contextWindow: 1048576
+    maxOutputTokens: 8192
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: true
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.10
+    outputPrice: 0.40
+    description: Gemini 2.0 Flash

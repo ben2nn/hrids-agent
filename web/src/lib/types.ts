@@ -101,8 +101,7 @@ export interface SessionInfo {
 export interface CreateSessionRequest {
   model?: string
   cwd?: string
-  autoMode?: boolean
-  /** 权限模式（优先级高于 autoMode）：ask / craft / plan */
+  /** 权限模式：ask / craft / plan */
   permissionMode?: 'ask' | 'craft' | 'plan'
   /** 恢复历史会话时传入旧会话 ID */
   resume?: string

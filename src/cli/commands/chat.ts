@@ -34,8 +34,8 @@ export async function runChatCommand(opts: ChatCommandOpts): Promise<void> {
     sessionId: ctx.sessionId,
     initialCwd: ctx.initialCwd,
     model: ctx.model,
-    memoryCondense: ctx.config.memoryCondense ?? false,
-    skillDistill: ctx.config.autoDistillSkill ?? false,
+    memoryCondense: ctx.config.agent?.memoryCondense ?? false,
+    skillDistill: ctx.config.agent?.autoDistillSkill ?? false,
     providerName: ctx.provider.name,
     buildPromptForMessage: ctx.buildPromptForMessage,
   })

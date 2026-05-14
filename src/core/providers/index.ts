@@ -20,8 +20,8 @@ export { AnthropicProvider } from './AnthropicProvider.js'
 export { OpenAIProvider } from './OpenAIProvider.js'
 export { FallbackProvider } from './FallbackProvider.js'
 export type { FallbackStatusEvent } from './FallbackProvider.js'
-export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel } from './registry.js'
-export type { ProviderDef, CustomProviderConfig } from './registry.js'
+export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel, resolveModelProfile, listProviderModels } from './registry.js'
+export type { ProviderDef, CustomProviderConfig, ModelProfile, ModelCategory } from './registry.js'
 export { loadProviderProfiles } from './ProviderProfileLoader.js'
 
 // ── ProviderOptions ───────────────────────────────────────────
@@ -66,7 +66,7 @@ export function createProvider(opts: ProviderOptions): LLMProvider {
   }
 
   // 3. 根据模型名前缀自动推断提供商
-  const inferred = inferProviderByModel(model)
+  const inferred = inferProviderByModel(model, customProviders)
   if (inferred) return buildFromDef(inferred, opts)
 
   // 4. 兜底：有 apiKey 则尝试 Anthropic

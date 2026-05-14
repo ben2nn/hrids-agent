@@ -13,6 +13,7 @@ import { KeystrokeProvider } from '../cli/ui/KeystrokeContext.js'
 import { getStdinReader } from '../cli/ui/StdinReader.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { LLMProvider } from '../core/providers/index.js'
+import { FallbackProvider } from '../core/providers/FallbackProvider.js'
 
 export interface InteractiveModeOpts {
   sessionId: string
@@ -116,6 +117,10 @@ export async function runInteractiveMode(
           onModelChange: (m: string) => {
             model = m
             saveConfig({ model: m })
+            // 同步更新 FallbackProvider 内部索引，使下次 stream() 直接从用户选择的模型开始
+            if (provider instanceof FallbackProvider) {
+              provider.selectModel(m)
+            }
           },
           onStderrReady: (cb: StderrListener) => {
             stderrCallback = cb

@@ -1,0 +1,219 @@
+# 阿里云百炼（DashScope）
+name: 阿里云百炼
+transport: openai_chat
+apiKeyEnvVars: [DASHSCOPE_API_KEY]
+defaultBaseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
+baseUrlEnvVar: DASHSCOPE_BASE_URL
+modelPrefixes: [qwen, qwq-, qvq-, tongyi-, MiniMax-]
+
+# provider 级默认（模型未单独配置时继承）
+nativeWebSearch: true
+webSearchMode:
+  type: param
+  key: enable_search
+  value: true
+
+# ── 模型列表 ──────────────────────────────────────────────────
+models:
+  # ── Qwen3.6 系列 ──
+  qwen3.6-max-preview:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.6
+    outputPrice: 6.4
+    description: Qwen3.6 旗舰，MoE 推理增强
+
+  qwen3.6-flash:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: Qwen3.6 轻量快速版
+
+  qwen3.6-flash-2026-04-16:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: Qwen3.6 Flash 快照版
+
+  # ── Qwen3.5 系列 ──
+  qwen3.5-plus-2026-04-20:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.8
+    outputPrice: 3.2
+    description: Qwen3.5 Plus 快照版
+
+  qwen3.5-35b-a3b:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: Qwen3.5 35B MoE（3B 激活），低成本推理
+
+  # ── Qwen VL 视觉系列 ──
+  qwen-vl-max:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 3.0
+    outputPrice: 9.0
+    description: Qwen 视觉旗舰，图文视频理解
+
+  qwen-vl-plus:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 1.5
+    outputPrice: 4.5
+    description: Qwen 视觉增强版
+
+  # ── Qwen Audio 音频系列 ──
+  qwen-audio-turbo:
+    contextWindow: 32768
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: Qwen 音频理解，语音对话
+
+  # ── Qwen Code 代码系列 ──
+  qwen-coder-plus:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: Qwen 代码专用模型
+
+  qwen-coder-turbo:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: Qwen 代码轻量版
+
+  # ── 通义千问基础系列 ──
+  qwen-plus:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.8
+    outputPrice: 3.2
+    description: 通义千问 Plus，均衡性能
+
+  qwen-turbo:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: 通义千问 Turbo，高速低成本
+
+  qwen-max:
+    contextWindow: 32768
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 2.4
+    outputPrice: 9.6
+    description: 通义千问 Max，最强基座
+
+  # ── QwQ 推理系列 ──
+  qwq-plus:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.6
+    outputPrice: 6.4
+    description: QwQ 推理增强模型
+
+  # ── MiniMax 系列（通过百炼调用） ──
+  MiniMax-M2.5:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: MiniMax M2.5 多模态模型

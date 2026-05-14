@@ -68,6 +68,36 @@ export class FallbackProvider implements LLMProvider {
     this.onStatus = onStatus
   }
 
+  /**
+   * 手动选择指定模型（由 /model 命令调用）。
+   * 在 providers 列表中查找匹配的 provider，找到后更新内部索引，
+   * 使下次 stream() 直接从该模型开始。
+   * 支持 "model" 或 "provider:model" 格式。
+   */
+  selectModel(model: string): boolean {
+    // 支持 "provider:model" 格式，提取冒号后的部分
+    const modelOnly = model.includes(':') ? model.split(':').slice(1).join(':') : model
+
+    if (this.groups.length > 0) {
+      for (let gi = 0; gi < this.groups.length; gi++) {
+        for (let mi = 0; mi < this.groups[gi].providers.length; mi++) {
+          if (this.groups[gi].providers[mi].model === modelOnly) {
+            this.currentGroupIdx = gi
+            this.currentModelIdx = mi
+            return true
+          }
+        }
+      }
+    }
+    for (let i = 0; i < this.providers.length; i++) {
+      if (this.providers[i].model === modelOnly) {
+        this.currentModelIdx = i
+        return true
+      }
+    }
+    return false
+  }
+
   private currentProvider(): LLMProvider {
     if (this.groups.length > 0) {
       return this.groups[this.currentGroupIdx].providers[this.currentModelIdx]
@@ -138,7 +168,8 @@ export class FallbackProvider implements LLMProvider {
 
             if (!hasContent && (chunk.type === 'text_delta' || chunk.type === 'tool_call' || chunk.type === 'thinking_delta')) {
               hasContent = true
-              ;[this.currentGroupIdx, this.currentModelIdx] = [localGroupIdx, localModelIdx]
+              // 不更新持久索引：fallback 只是临时应急，下次调用仍从首选模型开始
+              // 只有手动 /model 切换才应改变 currentGroupIdx/currentModelIdx
             }
             if (chunk.type === 'done') {
               if (!hasContent) {

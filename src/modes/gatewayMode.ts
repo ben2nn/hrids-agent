@@ -33,14 +33,14 @@ export async function runGatewayMode(opts: GatewayModeOpts): Promise<void> {
 
   const webUrl = `http://${opts.gatewayHost}:${opts.gatewayPort}`
 
-  // 注册 cron 触发回调：优先按 job.sessionId 路由，无归属时降级到知了会话（兼容旧数据）
+  // 注册 cron 触发回调：优先按 job.sessionId 路由，无归属时降级到知了会话
   setCronTriggerCallback((job) => {
     void (async () => {
       try {
-        // 优先使用 job 自身的 sessionId 归属（新数据）
+        // 优先使用 job 自身的 sessionId 归属
         let targetSessionId: string | undefined = job.sessionId
 
-        // 降级：无归属时回退到知了会话（兼容旧 cron 数据）
+        // 降级：无归属时回退到知了会话
         if (!targetSessionId) {
           const zhileFile = join(getConfigDir(), 'zhile-session.json')
           if (!existsSync(zhileFile)) {

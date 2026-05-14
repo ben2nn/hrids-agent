@@ -158,7 +158,7 @@ export class OpenAIProvider implements LLMProvider {
       }
       // 'param' 类型在 body 构建后处理
     } else if (this.config.nativeWebSearch) {
-      // 兼容旧配置：默认使用 web_search 工具
+      // 默认使用 web_search 工具
       oaiTools.push({ type: 'web_search' } as unknown as OAITool)
     }
 

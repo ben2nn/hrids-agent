@@ -260,27 +260,6 @@ export interface AgentConfig {
   /** Web 搜索引擎配置 */
   webSearch?: WebSearchConfig
 
-  // ── 向后兼容：旧版扁平字段（已迁移到 agent / logging 分组） ──
-  /** @deprecated 请使用 agent.permissionMode */
-  permissionMode?: 'ask' | 'craft' | 'plan'
-  /** @deprecated 请使用 agent.maxTokens */
-  maxTokens?: number
-  /** @deprecated 请使用 agent.maxTurns */
-  maxTurns?: number
-  /** @deprecated 请使用 agent.maxBudgetUsd */
-  maxBudgetUsd?: number
-  /** @deprecated 请使用 agent.cwd */
-  agentCwd?: string
-  /** @deprecated 请使用 agent.memoryCondense */
-  memoryCondense?: boolean
-  /** @deprecated 请使用 agent.autoDistillSkill */
-  autoDistillSkill?: boolean
-  /** @deprecated 请使用 logging.level */
-  logLevel?: 'debug' | 'info' | 'warn' | 'error'
-  /** @deprecated 请使用 logging.theme */
-  theme?: 'default' | 'minimal'
-  /** @deprecated API Key 已移入各模型 fallbacks 的 apiKey 字段 */
-  apiKeys?: Record<string, string>
 }
 
 // ── 规范化后的运行时配置（扁平化，供内部使用） ────────────────
@@ -354,30 +333,13 @@ function ensureConfigDir() {
 /**
  * 将原始配置规范化为 ResolvedConfig：
  * - 新格式（agent / logging 分组）优先
- * - 旧版扁平字段自动迁移（向后兼容）
  * - 过滤掉 _comment / _example 等注释字段
- * - 旧版 apiKeys 自动迁移：将 apiKeys[provider] 注入对应 fallback 条目（若该条目未设置 apiKey）
  */
 function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
   // 过滤注释字段
   const clean = Object.fromEntries(
     Object.entries(raw).filter(([k]) => !k.startsWith('_'))
   ) as Partial<AgentConfig>
-
-  // 旧版 apiKeys 迁移：将 key 注入各模型 fallbacks（不覆盖已有的 apiKey）
-  const legacyApiKeys = clean.apiKeys ?? {}
-  function injectApiKeys(cfg: ModelTypeConfig | undefined): ModelTypeConfig | undefined {
-    if (!cfg?.fallbacks) return cfg
-    return {
-      ...cfg,
-      fallbacks: cfg.fallbacks.map(fb => {
-        if (fb.apiKey) return fb
-        const key = legacyApiKeys[normalizeProvider(fb.provider)]
-          ?? legacyApiKeys[fb.provider]
-        return key ? { ...fb, apiKey: key } : fb
-      }),
-    }
-  }
 
   // 过滤 mcpServers / customProviders 中的示例条目
   if (clean.mcpServers) {
@@ -389,16 +351,16 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
       .filter(p => !p._example)
   }
 
-  // 合并 agent 分组（新格式优先，旧字段兜底）
+  // 合并 agent 分组
   const agent: Omit<Required<AgentBehaviorConfig>, 'maxBudgetUsd'> & { maxBudgetUsd?: number } = {
-    model:          clean.agent?.model           ?? clean.model           ?? DEFAULTS.agent.model,
-    permissionMode: clean.agent?.permissionMode ?? clean.permissionMode ?? DEFAULTS.agent.permissionMode,
-    maxTokens:      clean.agent?.maxTokens      ?? clean.maxTokens      ?? DEFAULTS.agent.maxTokens,
-    maxTurns:       clean.agent?.maxTurns        ?? clean.maxTurns        ?? DEFAULTS.agent.maxTurns,
-    maxBudgetUsd:   clean.agent?.maxBudgetUsd    ?? clean.maxBudgetUsd    ?? undefined,
-    cwd:            clean.agent?.cwd             ?? clean.agentCwd        ?? '',
-    memoryCondense: clean.agent?.memoryCondense  ?? clean.memoryCondense  ?? DEFAULTS.agent.memoryCondense,
-    autoDistillSkill: clean.agent?.autoDistillSkill ?? clean.autoDistillSkill ?? DEFAULTS.agent.autoDistillSkill,
+    model:          clean.agent?.model           ?? DEFAULTS.agent.model,
+    permissionMode: clean.agent?.permissionMode ?? DEFAULTS.agent.permissionMode,
+    maxTokens:      clean.agent?.maxTokens      ?? DEFAULTS.agent.maxTokens,
+    maxTurns:       clean.agent?.maxTurns        ?? DEFAULTS.agent.maxTurns,
+    maxBudgetUsd:   clean.agent?.maxBudgetUsd    ?? undefined,
+    cwd:            clean.agent?.cwd             ?? '',
+    memoryCondense: clean.agent?.memoryCondense  ?? DEFAULTS.agent.memoryCondense,
+    autoDistillSkill: clean.agent?.autoDistillSkill ?? DEFAULTS.agent.autoDistillSkill,
     autoPruneSessions: clean.agent?.autoPruneSessions ?? DEFAULTS.agent.autoPruneSessions,
     pruneKeepCount:    clean.agent?.pruneKeepCount    ?? DEFAULTS.agent.pruneKeepCount,
     pruneMaxAgeDays:   clean.agent?.pruneMaxAgeDays   ?? DEFAULTS.agent.pruneMaxAgeDays,
@@ -407,8 +369,8 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
 
   // 合并 logging 分组
   const logging: Required<LoggingConfig> = {
-    level: clean.logging?.level ?? clean.logLevel ?? DEFAULTS.logging.level,
-    theme: clean.logging?.theme ?? clean.theme    ?? DEFAULTS.logging.theme,
+    level: clean.logging?.level ?? DEFAULTS.logging.level,
+    theme: clean.logging?.theme ?? DEFAULTS.logging.theme,
   }
 
   // 合并 gateway 分组
@@ -438,16 +400,16 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
   }
 
   return {
-    // 基础字段（model 新规范位置为 agent.model，顶层 model 向后兼容）
+    // 基础字段
     model:    agent.model,
     provider: clean.provider,
     apiKey:   clean.apiKey,
     baseUrl:  clean.baseUrl,
     // 模型配置
-    llm:        injectApiKeys(clean.llm),
-    vision:     injectApiKeys(clean.vision),
-    speech:     injectApiKeys(clean.speech),
-    embedding:  injectApiKeys(clean.embedding) as EmbeddingConfig | undefined,
+    llm:        clean.llm,
+    vision:     clean.vision,
+    speech:     clean.speech,
+    embedding:  clean.embedding,
     // 存储
     vectorStore,
     // 分组配置
@@ -465,11 +427,11 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     // 多智能体
     multiAgent,
     toolPermissions,
-    // 展开扁平字段（供旧代码直接访问）
+    // 展开扁平字段（供内部代码直接访问）
     permissionMode:   agent.permissionMode,
     maxTokens:        agent.maxTokens,
     maxTurns:         agent.maxTurns,
-    maxBudgetUsd:     agent.maxBudgetUsd ?? undefined,
+    maxBudgetUsd:     agent.maxBudgetUsd,
     agentCwd:         agent.cwd || undefined,
     memoryCondense:   agent.memoryCondense,
     autoDistillSkill: agent.autoDistillSkill,

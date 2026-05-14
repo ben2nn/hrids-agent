@@ -114,8 +114,8 @@ export class SessionManager {
         })
       : createProviderFromConfig(agentConfig)
 
-    // 权限管理：permissionMode 优先；autoMode 兼容旧字段（映射到 craft）；否则读全局配置
-    const permMode = req.permissionMode ?? (req.autoMode ? 'craft' : agentConfig.permissionMode)
+    // 权限管理：permissionMode 优先；否则读全局配置
+    const permMode = req.permissionMode ?? agentConfig.agent?.permissionMode ?? 'ask'
     // 使用 provider 的实际模型名（createProviderFromEnv 时 model 变量可能是旧默认值）
     const actualModel = provider.model
     const session: ManagedSession = {
@@ -217,10 +217,10 @@ export class SessionManager {
       systemPrompt,
       registry,
       permissions,
-      maxTokens: agentConfig.maxTokens,
-      maxTurns: agentConfig.maxTurns,
-      maxBudgetUsd: agentConfig.maxBudgetUsd,
-      autoCompactThreshold: agentConfig.autoCompactThreshold,
+      maxTokens: agentConfig.agent?.maxTokens,
+      maxTurns: agentConfig.agent?.maxTurns,
+      maxBudgetUsd: agentConfig.agent?.maxBudgetUsd,
+      autoCompactThreshold: agentConfig.agent?.autoCompactThreshold,
       sessionCwd,
       uploadsDir: join(getConfigDir(), 'sessions', sessionId, 'uploads'),
     }, store)
@@ -837,8 +837,9 @@ ${writeTools.join('、')}
     }
 
     // 后台钩子：记忆提炼 + Skill 自动沉淀（不阻塞响应）
-    const memoryCondense = loadConfig().memoryCondense ?? false
-    const skillDistill = loadConfig().autoDistillSkill ?? false
+    const cfg = loadConfig()
+    const memoryCondense = cfg.agent?.memoryCondense ?? false
+    const skillDistill = cfg.agent?.autoDistillSkill ?? false
     void autoExtractMemories(session.engine, sessionId, session.provider, memoryCondense)
     void autoDistillSkill(session.engine, session.provider, skillDistill)
   }

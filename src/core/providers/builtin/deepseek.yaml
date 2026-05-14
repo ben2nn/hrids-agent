@@ -1,0 +1,62 @@
+# DeepSeek（深度求索）
+name: DeepSeek
+transport: openai_chat
+apiKeyEnvVars: [DEEPSEEK_API_KEY]
+defaultBaseUrl: https://api.deepseek.com/v1
+baseUrlEnvVar: DEEPSEEK_BASE_URL
+modelPrefixes: [deepseek-]
+
+nativeWebSearch: false
+
+models:
+  deepseek-v4-pro:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: DeepSeek V4 Pro，多模态推理旗舰
+
+  deepseek-v4-flash:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.27
+    outputPrice: 1.1
+    description: DeepSeek V4 Flash，快速低成本
+
+  deepseek-v3:
+    contextWindow: 65536
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.27
+    outputPrice: 1.1
+    description: DeepSeek V3，通用对话
+
+  deepseek-r1:
+    contextWindow: 65536
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.55
+    outputPrice: 2.19
+    description: DeepSeek R1，深度推理

@@ -44,8 +44,8 @@ export async function runRunCommand(message: string, opts: RunCommandOpts): Prom
     eventCount: ctx.engine.store.getEventCount(), title, lastUserMessage,
   })
   await Promise.allSettled([
-    autoExtractMemories(ctx.engine, ctx.sessionId, ctx.provider, ctx.config.memoryCondense ?? false),
-    autoDistillSkill(ctx.engine, ctx.provider, ctx.config.autoDistillSkill ?? false),
+    autoExtractMemories(ctx.engine, ctx.sessionId, ctx.provider, ctx.config.agent?.memoryCondense ?? false),
+    autoDistillSkill(ctx.engine, ctx.provider, ctx.config.agent?.autoDistillSkill ?? false),
   ])
   await disconnectAllMcp()
 }

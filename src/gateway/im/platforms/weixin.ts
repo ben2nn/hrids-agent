@@ -913,7 +913,7 @@ export class WeixinAdapter extends BasePlatformAdapter {
         const fullUrl = (imageItem?.media as Record<string, unknown> | undefined)?.full_url as string | undefined
         // aeskey：十六进制字符串，用于 AES-128-CBC 解密 CDN 加密图片
         const aeskey = String(imageItem?.aeskey ?? '').trim()
-        // 兼容旧格式：media_id
+        // media_id（旧格式）
         const mediaId = String(imageItem?.media_id ?? '')
         if (fullUrl) {
           mediaItems.push({ type: 'image', mediaId: '', fullUrl, aeskey: aeskey || undefined })

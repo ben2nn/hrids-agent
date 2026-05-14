@@ -1,0 +1,48 @@
+# NVIDIA NIM
+name: NVIDIA NIM
+transport: openai_chat
+apiKeyEnvVars: [NVIDIA_API_KEY]
+defaultBaseUrl: https://integrate.api.nvidia.com/v1
+baseUrlEnvVar: NVIDIA_BASE_URL
+
+nativeWebSearch: false
+
+models:
+  meta/llama-3.1-405b-instruct:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 3.0
+    outputPrice: 3.0
+    description: Llama 3.1 405B，NVIDIA 托管
+
+  meta/llama-3.1-70b-instruct:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.8
+    outputPrice: 0.8
+    description: Llama 3.1 70B，NVIDIA 托管
+
+  mistralai/mixtral-8x22b-instruct-v0.1:
+    contextWindow: 65536
+    maxOutputTokens: 16384
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 1.2
+    outputPrice: 1.2
+    description: Mixtral 8x22B，NVIDIA 托管

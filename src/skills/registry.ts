@@ -95,7 +95,7 @@ function resolveFileIncludes(body: string, skillMdDir: string): string {
 /**
  * 处理 {{args}} 占位符替换。
  * 如果 body 中包含 {{args}}，将其替换为实际参数；
- * 否则在末尾追加 ## 用户补充说明（保持向后兼容）。
+ * 否则在末尾追加 ## 用户补充说明。
  */
 function injectArgs(body: string, args: string): string {
   if (!args) return body

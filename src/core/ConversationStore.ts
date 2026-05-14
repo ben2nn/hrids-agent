@@ -409,7 +409,6 @@ export class ConversationStore {
   /**
    * 强制全量重写磁盘（用于 clearHistory 或 compact 后事件数减少的情况）。
    * 注意：事件日志是 append-only，正常情况下不会减少。
-   * 此方法主要用于兼容旧的 clearHistory 语义。
    */
   forceRewriteDisk(): void {
     if (!this.storage) return

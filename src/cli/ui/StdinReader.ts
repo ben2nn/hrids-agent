@@ -18,6 +18,9 @@ export class StdinReader {
   private inPaste: boolean = false
   private destroyed = false
   private boundHandler: ((data: string) => void) | null = null
+  // CSI 序列缓冲：处理 Windows ConPTY 分包发送的情况
+  private csiBuffer: string = ''
+  private csiTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor() {
     if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
@@ -36,6 +39,14 @@ export class StdinReader {
 
   private handleData(data: string) {
     if (this.destroyed) return
+
+    // 如果 CSI 缓冲区有未完成的序列，先拼接
+    if (this.csiBuffer) {
+      data = this.csiBuffer + data
+      this.csiBuffer = ''
+      if (this.csiTimer) { clearTimeout(this.csiTimer); this.csiTimer = null }
+    }
+
     if (data === '\x1b[200~') { this.inPaste = true; this.pasteBuffer = ''; return }
     if (data === '\x1b[201~') {
       this.inPaste = false
@@ -43,8 +54,11 @@ export class StdinReader {
       return
     }
     if (this.inPaste) { this.pasteBuffer += data; return }
+
     const key = this.parseKey(data)
-    if (key) this.emit(key)
+    if (key) {
+      this.emit(key)
+    }
   }
 
   private parseKey(data: string): KeyEvent | null {
@@ -67,6 +81,20 @@ export class StdinReader {
 
   private parseCSI(data: string, base: Omit<KeyEvent, 'name' | 'sequence'>): KeyEvent | null {
     const seq = data.slice(2)
+
+    // 不完整 CSI 序列（没有终结字符 a-z/A-Z/~），缓冲等待后续数据
+    if (!/[a-zA-Z~]$/.test(seq)) {
+      this.csiBuffer = data
+      this.csiTimer = setTimeout(() => {
+        // 超时：将缓冲内容作为原始按键处理
+        const buffered = this.csiBuffer
+        this.csiBuffer = ''
+        this.csiTimer = null
+        if (buffered) this.emitRaw(buffered)
+      }, 50)
+      return null
+    }
+
     if (seq === 'A') return { ...base, name: 'up', sequence: data }
     if (seq === 'B') return { ...base, name: 'down', sequence: data }
     if (seq === 'C') return { ...base, name: 'right', sequence: data }
@@ -76,7 +104,13 @@ export class StdinReader {
     if (seq === '3~') return { ...base, name: 'delete', sequence: data }
     if (seq === '5~') return { ...base, name: 'pageup', sequence: data }
     if (seq === '6~') return { ...base, name: 'pagedown', sequence: data }
+    if (seq === 'Z') return { ...base, name: 'tab', shift: true, sequence: data }
     return null
+  }
+
+  private emitRaw(data: string) {
+    const key = this.parseKey(data)
+    if (key) this.emit(key)
   }
 
   private emit(key: KeyEvent) {
@@ -89,6 +123,7 @@ export class StdinReader {
 
   destroy() {
     this.destroyed = true
+    if (this.csiTimer) { clearTimeout(this.csiTimer); this.csiTimer = null }
     if (this.boundHandler) {
       process.stdin.off('data', this.boundHandler)
       this.boundHandler = null

@@ -1,0 +1,62 @@
+# Kimi（Moonshot AI）
+name: Kimi
+transport: openai_chat
+apiKeyEnvVars: [KIMI_API_KEY]
+defaultBaseUrl: https://api.kimi.com/coding/v1
+baseUrlEnvVar: KIMI_BASE_URL
+modelPrefixes: [kimi-, moonshot-]
+
+nativeWebSearch: false
+
+models:
+  kimi-k2.5:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.8
+    outputPrice: 3.2
+    description: Kimi K2.5，编程与推理
+
+  kimi-k2.6:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: Kimi K2.6，编程与推理增强
+
+  moonshot-v1-128k:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.8
+    outputPrice: 3.2
+    description: Moonshot V1 128K 长上下文
+
+  moonshot-v1-8k:
+    contextWindow: 8192
+    maxOutputTokens: 4096
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.12
+    outputPrice: 0.48
+    description: Moonshot V1 8K 短上下文

@@ -1,0 +1,132 @@
+# Xiaomi MiMo
+name: Xiaomi MiMo
+transport: anthropic_messages
+apiKeyEnvVars: [XIAOMI_API_KEY, MIMO_API_KEY]
+defaultBaseUrl: https://token-plan-cn.xiaomimimo.com/anthropic
+baseUrlEnvVar: XIAOMI_BASE_URL
+modelPrefixes: [mimo-]
+
+nativeWebSearch: true
+webSearchMode:
+  type: tool
+  toolType: web_search
+
+models:
+  # ── MiMo V2.5 系列 ──
+  mimo-v2.5-pro:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: MiMo V2.5 Pro，多模态推理旗舰
+
+  mimo-v2.5:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: MiMo V2.5，均衡性能
+
+  mimo-v2.5-tts-voiceclone:
+    contextWindow: 8192
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: MiMo V2.5 TTS 声音克隆
+
+  mimo-v2.5-tts-voicedesign:
+    contextWindow: 8192
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.5
+    outputPrice: 2.0
+    description: MiMo V2.5 TTS 声音设计
+
+  mimo-v2.5-tts:
+    contextWindow: 8192
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: MiMo V2.5 TTS 语音合成
+
+  # ── MiMo V2 系列 ──
+  mimo-v2-pro:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.0
+    outputPrice: 4.0
+    description: MiMo V2 Pro，多模态推理
+
+  mimo-v2-omni:
+    contextWindow: 131072
+    maxOutputTokens: 16384
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: true
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.5
+    outputPrice: 6.0
+    description: MiMo V2 Omni，全模态理解
+
+  mimo-v2-tts:
+    contextWindow: 8192
+    maxOutputTokens: 8192
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: false
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: MiMo V2 TTS 语音合成
+
+  mimo-v2-flash:
+    contextWindow: 131072
+    maxOutputTokens: 8192
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: true
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 0.3
+    outputPrice: 1.2
+    description: MiMo V2 Flash，快速轻量

@@ -63,21 +63,13 @@ function parseRule(rule: string): ParsedRule {
 
 /**
  * 检查命令/内容是否匹配规则内容。
- * 支持三种匹配模式：
+ * 支持两种匹配模式：
  *   精确匹配：  "git add"    → 完全相等
- *   前缀匹配：  "git:*"      → 以 "git" 开头（旧语法兼容）
  *   通配符匹配："git *"      → 支持 * 作为任意字符序列
  */
 function matchesRuleContent(actual: string, ruleContent: string): boolean {
   const trimmed = actual.trim()
   const pattern = ruleContent.trim()
-
-  // 旧语法：prefix:* 前缀匹配
-  const prefixMatch = pattern.match(/^(.+):\*$/)
-  if (prefixMatch) {
-    const prefix = prefixMatch[1]
-    return trimmed === prefix || trimmed.startsWith(prefix + ' ') || trimmed.startsWith(prefix + '\t')
-  }
 
   // 无通配符：精确匹配
   if (!pattern.includes('*')) {
@@ -256,7 +248,7 @@ export class PermissionManager {
         return false
 
       case 'ask': {
-        // 会话内已批准：先查内容级 key，再查工具级 key（向后兼容）
+        // 会话内已批准：先查内容级 key，再查工具级 key
         const contentKey = req.ruleContent ? `${req.toolName}::${req.ruleContent}` : null
         if (contentKey && this.sessionApproved.has(contentKey)) return true
         if (this.sessionApproved.has(req.toolName)) return true
@@ -361,7 +353,7 @@ export class PermissionManager {
     this.rules = fresh
   }
 
-  // 移除某工具的所有持久化规则（兼容旧接口，按工具名前缀清除）
+  // 移除某工具的所有持久化规则（按工具名前缀清除）
   clearRules(toolName: string) {
     const matches = (rule: string) => parseRule(rule).toolName === toolName
     const fresh = loadRules()

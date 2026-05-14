@@ -1,0 +1,51 @@
+# OpenRouter（聚合器）
+name: OpenRouter
+transport: openai_chat
+apiKeyEnvVars: [OPENROUTER_API_KEY, OPENAI_API_KEY]
+defaultBaseUrl: https://openrouter.ai/api/v1
+baseUrlEnvVar: OPENROUTER_BASE_URL
+isAggregator: true
+
+nativeWebSearch: false
+
+# OpenRouter 是聚合平台，模型 ID 格式为 provider/model
+# 此处列出常用模型供参考，用户可自行添加
+models:
+  anthropic/claude-sonnet-4-6:
+    contextWindow: 200000
+    maxOutputTokens: 16000
+    supportsImage: true
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 3.0
+    outputPrice: 15.0
+    description: Claude Sonnet 4.6 via OpenRouter
+
+  google/gemini-2.5-pro:
+    contextWindow: 1048576
+    maxOutputTokens: 65536
+    supportsImage: true
+    supportsVideo: true
+    supportsAudio: true
+    supportsWebSearch: false
+    supportsThinking: true
+    supportsToolUse: true
+    inputPrice: 1.25
+    outputPrice: 10.0
+    description: Gemini 2.5 Pro via OpenRouter
+
+  meta-llama/llama-3.3-70b-instruct:
+    contextWindow: 131072
+    maxOutputTokens: 32768
+    supportsImage: false
+    supportsVideo: false
+    supportsAudio: false
+    supportsWebSearch: false
+    supportsThinking: false
+    supportsToolUse: true
+    inputPrice: 0.1
+    outputPrice: 0.1
+    description: Llama 3.3 70B via OpenRouter
