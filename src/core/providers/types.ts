@@ -7,11 +7,10 @@ import type { ToolDef } from '../Tool.js'
  * 模型功能类型，用于区分不同用途的模型：
  * - llm        大语言模型（纯文本对话、推理、代码生成）
  * - vision     视觉模型（图像理解、图文对话）
- * - multimodal 全模态大模型（文本 + 图像 + 音频输入/输出）
  * - speech     语音模型（TTS 文字转语音 / STT 语音转文字）
  * - embedding  向量模型（文本语义向量化，用于检索/记忆）
  */
-export type ModelType = 'llm' | 'vision' | 'multimodal' | 'speech' | 'embedding'
+export type ModelType = 'llm' | 'vision' | 'speech' | 'embedding'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -49,13 +48,21 @@ export interface StreamChunk {
   usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
 }
 
+/** 原生网络搜索配置方式 */
+export type WebSearchMode =
+  | { type: 'tool'; toolType: string }        // 通过工具类型，如 { type: 'web_search' }
+  | { type: 'param'; key: string; value: unknown }  // 通过请求参数，如 { enable_search: true }
+  | { type: 'custom' }                        // 自定义逻辑（在 Provider 中硬编码）
+
 export interface ProviderConfig {
   apiKey: string
   baseUrl?: string   // 自定义端点（Ollama、本地代理等）
   model: string
   modelType?: ModelType
-  /** 提供商是否支持原生联网搜索（通过 web_search 工具参数，LLM 内部搜索并返回结果） */
+  /** 提供商是否支持原生联网搜索 */
   nativeWebSearch?: boolean
+  /** 原生网络搜索配置方式 */
+  webSearchMode?: WebSearchMode
 }
 
 // 所有提供商必须实现的接口

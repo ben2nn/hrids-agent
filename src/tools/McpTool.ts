@@ -191,8 +191,17 @@ export async function disconnectAllMcp(sessionId?: string): Promise<void> {
   const sid = sessionId ?? CLI_SESSION_KEY
   const clients = _clientsBySession.get(sid)
   if (!clients) return
+
+  // 给每个 close 调用加超时，防止卡住
+  const closeWithTimeout = async (client: { close: () => Promise<void> }) => {
+    const timeout = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error('MCP close timeout')), 3000)
+    )
+    await Promise.race([client.close(), timeout])
+  }
+
   for (const [, pooled] of clients) {
-    try { await pooled.client.close() } catch { /* 忽略关闭错误 */ }
+    try { await closeWithTimeout(pooled.client) } catch { /* 忽略关闭错误/超时 */ }
   }
   _clientsBySession.delete(sid)
 

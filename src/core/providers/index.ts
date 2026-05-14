@@ -5,6 +5,7 @@ import { FallbackProvider } from './FallbackProvider.js'
 import type { LLMProvider, ModelType, ProviderConfig } from './types.js'
 import type { FallbackStatusEvent } from './FallbackProvider.js'
 import {
+  BUILTIN_PROVIDERS,
   getBuiltinProvider,
   getCustomProvider,
   inferProviderByModel,
@@ -87,7 +88,14 @@ function buildFromDef(def: ProviderDef, opts: ProviderOptions): LLMProvider {
   const baseUrl = opts.baseUrl ?? def.defaultBaseUrl
   const apiKey = opts.apiKey
 
-  const config: ProviderConfig = { apiKey: apiKey ?? '', baseUrl, model, modelType, nativeWebSearch: def.nativeWebSearch }
+  const config: ProviderConfig = {
+    apiKey: apiKey ?? '',
+    baseUrl,
+    model,
+    modelType,
+    nativeWebSearch: def.nativeWebSearch,
+    webSearchMode: def.webSearchMode,
+  }
 
   if (def.transport === 'anthropic_messages') {
     if (!apiKey) throw new Error(`缺少 ${def.name} 的 API Key，请在 llm.fallbacks 中为 ${def.id} 配置 apiKey`)
@@ -105,7 +113,7 @@ function resolveProviderDef(name: string, customs: CustomProviderConfig[]): Prov
   return getBuiltinProvider(name) ?? getCustomProvider(name, customs)
 }
 
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'openai', 'deepseek', 'groq', 'aliyun', 'zhipu','xiaomi', 'nvidia', 'ollama', 'openrouter', 'kimi', 'minimax', 'google']
+const BUILTIN_PROVIDER_IDS = BUILTIN_PROVIDERS.map(p => p.id)
 
 // ── 多模型 Fallback 工厂 ──────────────────────────────────────
 
@@ -141,7 +149,7 @@ interface TypedProviderContext {
 }
 
 /**
- * 从 ModelTypeConfig（config.yaml 中的 llm / vision / multimodal / speech）
+ * 从 ModelTypeConfig（config.yaml 中的 llm / vision / speech）
  * 创建对应的 LLMProvider，支持多平台 Fallback。
  * API Key 直接从各 fallback 条目的 apiKey 字段读取。
  */
@@ -220,17 +228,6 @@ export function createVisionProviderFromConfig(config: {
     typeConfig: config.vision,
     customProviders: config.customProviders,
     modelType: 'vision',
-  })
-}
-
-export function createMultimodalProviderFromConfig(config: {
-  multimodal?: ModelTypeConfig
-  customProviders?: CustomProviderConfig[]
-}): LLMProvider | null {
-  return createTypedProvider({
-    typeConfig: config.multimodal,
-    customProviders: config.customProviders,
-    modelType: 'multimodal',
   })
 }
 

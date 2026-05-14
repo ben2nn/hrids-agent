@@ -177,3 +177,10 @@ toolPermissions:
     - todo_append
     - todo_reset
   allowMcpTools: false
+
+# Web 搜索配置
+webSearch:
+  # 搜索引擎：searxng（默认）| mojeek
+  engine: searxng
+  # SearXNG 实例地址（engine=searxng 时使用）
+  endpoint: https://xng.hrids.com

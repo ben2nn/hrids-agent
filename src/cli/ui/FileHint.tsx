@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { Box, Text } from 'ink'
 import { glob } from 'glob'
-import { getGlobalCwd } from '../core/cwd.js'
+import { getGlobalCwd } from '../../core/cwd.js'
 import { resolve, relative } from 'path'
 
 interface Props {
@@ -16,16 +16,22 @@ const PRIORITY_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.py', '.md', '.json'
 export function FileHint({ filter, visible, onSelect }: Props) {
   const [files, setFiles] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
+  const searchSeqRef = useRef(0)  // 搜索序列号，用于取消过期搜索
 
-  // 搜索文件
+  // 搜索文件（带防抖和取消机制）
   const searchFiles = useCallback(async (pattern: string) => {
+    // 空 filter 时不搜索全量文件，避免大型项目卡顿
+    if (!pattern.trim()) {
+      setFiles([])
+      setLoading(false)
+      return
+    }
+
+    const seq = ++searchSeqRef.current
     setLoading(true)
     try {
       const cwd = getGlobalCwd()
-      // 使用 pattern 进行搜索，如果没有 filter 则显示常用文件
-      const searchPattern = pattern
-        ? `**/*${pattern}*`
-        : '**/*'
+      const searchPattern = `**/*${pattern}*`
 
       const results = await glob(searchPattern, {
         cwd,
@@ -33,6 +39,9 @@ export function FileHint({ filter, visible, onSelect }: Props) {
         absolute: true,
         ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**'],
       })
+
+      // 检查是否已被更新的搜索取代
+      if (seq !== searchSeqRef.current) return
 
       // 转换为相对路径并排序
       const resolvedRoot = resolve(cwd) + (process.platform === 'win32' ? '\\' : '/')
@@ -51,18 +60,23 @@ export function FileHint({ filter, visible, onSelect }: Props) {
           return a.localeCompare(b)
         })
 
-      setFiles(relativePaths.slice(0, 20))  // 最多显示 20 个文件
+      if (seq === searchSeqRef.current) {
+        setFiles(relativePaths.slice(0, 20))  // 最多显示 20 个文件
+      }
     } catch {
-      setFiles([])
+      if (seq === searchSeqRef.current) setFiles([])
     }
-    setLoading(false)
+    if (seq === searchSeqRef.current) setLoading(false)
   }, [])
 
-  // 当 filter 变化时搜索文件
+  // 当 filter 变化时搜索文件（300ms 防抖）
   useEffect(() => {
-    if (visible) {
-      searchFiles(filter)
+    if (!visible) {
+      setFiles([])
+      return
     }
+    const timer = setTimeout(() => searchFiles(filter), 300)
+    return () => clearTimeout(timer)
   }, [filter, visible, searchFiles])
 
   if (!visible || files.length === 0) return null

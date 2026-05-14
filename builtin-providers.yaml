@@ -1,0 +1,203 @@
+# 内置提供商定义
+# 此文件定义所有内置 LLM 提供商的元数据
+# 用户可在 ~/.hrids/providers/ 目录下创建同名文件覆盖配置
+
+providers:
+  anthropic:
+    name: Anthropic
+    transport: anthropic_messages
+    apiKeyEnvVars: [ANTHROPIC_API_KEY, ANTHROPIC_TOKEN]
+    baseUrlEnvVar: ANTHROPIC_BASE_URL
+    modelPrefixes: [claude-]
+    nativeWebSearch: true
+    webSearchMode:
+      type: tool
+      toolType: web_search_20250305
+    capabilities:
+      image: true
+      video: false
+      audio: false
+
+  openai:
+    name: OpenAI
+    transport: openai_chat
+    apiKeyEnvVars: [OPENAI_API_KEY]
+    defaultBaseUrl: https://api.openai.com/v1
+    baseUrlEnvVar: OPENAI_BASE_URL
+    modelPrefixes: [gpt-, o1, o3, o4]
+    nativeWebSearch: true
+    webSearchMode:
+      type: tool
+      toolType: web_search
+    capabilities:
+      image: true
+      video: true
+      audio: true
+
+  deepseek:
+    name: DeepSeek
+    transport: openai_chat
+    apiKeyEnvVars: [DEEPSEEK_API_KEY]
+    defaultBaseUrl: https://api.deepseek.com/v1
+    baseUrlEnvVar: DEEPSEEK_BASE_URL
+    modelPrefixes: [deepseek-]
+    capabilities:
+      image: true
+      video: false
+      audio: false
+
+  groq:
+    name: Groq
+    transport: openai_chat
+    apiKeyEnvVars: [GROQ_API_KEY]
+    defaultBaseUrl: https://api.groq.com/openai/v1
+    baseUrlEnvVar: GROQ_BASE_URL
+    modelPrefixes: [llama, mixtral, gemma, whisper]
+    capabilities:
+      image: true
+      video: false
+      audio: false
+
+  aliyun:
+    name: 阿里云百炼（DashScope）
+    transport: openai_chat
+    apiKeyEnvVars: [DASHSCOPE_API_KEY]
+    defaultBaseUrl: https://dashscope.aliyuncs.com/compatible-mode/v1
+    baseUrlEnvVar: DASHSCOPE_BASE_URL
+    modelPrefixes: [qwen, qwq-, qvq-, tongyi-, MiniMax-]
+    nativeWebSearch: true
+    webSearchMode:
+      type: param
+      key: enable_search
+      value: true
+    capabilities:
+      image: true
+      video: true
+      audio: true
+
+  xiaomi:
+    name: Xiaomi MiMo
+    transport: anthropic_messages
+    apiKeyEnvVars: [XIAOMI_API_KEY, MIMO_API_KEY]
+    defaultBaseUrl: https://token-plan-cn.xiaomimimo.com/anthropic
+    baseUrlEnvVar: XIAOMI_BASE_URL
+    modelPrefixes: [mimo-]
+    nativeWebSearch: true
+    webSearchMode:
+      type: tool
+      toolType: web_search
+    capabilities:
+      image: true
+      video: false
+      audio: false
+
+  zhipu:
+    name: 智谱 AI
+    transport: openai_chat
+    apiKeyEnvVars: [ZHIPU_API_KEY]
+    defaultBaseUrl: https://open.bigmodel.cn/api/paas/v4
+    baseUrlEnvVar: ZHIPU_BASE_URL
+    modelPrefixes: [glm-, cogview-, cogvideo-, embedding-]
+    nativeWebSearch: true
+    webSearchMode:
+      type: custom
+    capabilities:
+      image: true
+      video: true
+      audio: true
+
+  nvidia:
+    name: NVIDIA NIM
+    transport: openai_chat
+    apiKeyEnvVars: [NVIDIA_API_KEY]
+    defaultBaseUrl: https://integrate.api.nvidia.com/v1
+    baseUrlEnvVar: NVIDIA_BASE_URL
+    capabilities:
+      image: true
+      video: false
+      audio: false
+
+  ollama:
+    name: Ollama（本地）
+    transport: openai_chat
+    apiKeyEnvVars: []
+    defaultBaseUrl: http://localhost:11434/v1
+    baseUrlEnvVar: OLLAMA_BASE_URL
+    capabilities:
+      image: true
+      video: false
+      audio: false
+
+  openrouter:
+    name: OpenRouter
+    transport: openai_chat
+    apiKeyEnvVars: [OPENROUTER_API_KEY, OPENAI_API_KEY]
+    defaultBaseUrl: https://openrouter.ai/api/v1
+    baseUrlEnvVar: OPENROUTER_BASE_URL
+    isAggregator: true
+    capabilities:
+      image: true
+      video: true
+      audio: true
+
+  kimi:
+    name: Kimi（Moonshot AI）
+    transport: openai_chat
+    apiKeyEnvVars: [KIMI_API_KEY]
+    defaultBaseUrl: https://api.kimi.com/coding/v1
+    baseUrlEnvVar: KIMI_BASE_URL
+    modelPrefixes: [kimi-, moonshot-]
+    capabilities:
+      image: true
+      video: false
+      audio: false
+
+  minimax:
+    name: MiniMax
+    transport: openai_chat
+    apiKeyEnvVars: [MINIMAX_API_KEY]
+    defaultBaseUrl: https://api.minimax.io/v1
+    baseUrlEnvVar: MINIMAX_BASE_URL
+    capabilities:
+      image: true
+      video: true
+      audio: true
+
+  google:
+    name: Google Gemini
+    transport: openai_chat
+    apiKeyEnvVars: [GOOGLE_API_KEY, GEMINI_API_KEY]
+    defaultBaseUrl: https://generativelanguage.googleapis.com/v1beta/openai
+    baseUrlEnvVar: GEMINI_BASE_URL
+    modelPrefixes: [gemini-]
+    nativeWebSearch: true
+    webSearchMode:
+      type: tool
+      toolType: google_search
+    capabilities:
+      image: true
+      video: true
+      audio: true
+
+# 提供商别名映射
+aliases:
+  claude: anthropic
+  gpt: openai
+  deep-seek: deepseek
+  groq-cloud: groq
+  dashscope: aliyun
+  qwen: aliyun
+  alibaba: aliyun
+  alibaba-cloud: aliyun
+  glm: zhipu
+  zhipuai: zhipu
+  bigmodel: zhipu
+  nim: nvidia
+  nvidia-nim: nvidia
+  local: ollama
+  lmstudio: ollama
+  or: openrouter
+  moonshot: kimi
+  kimi-coding: kimi
+  gemini: google
+  google-ai: google

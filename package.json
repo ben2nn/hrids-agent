@@ -16,12 +16,13 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "dev": "tsx src/main.ts --craft",
-    "gateway": "npm run build:web && tsx src/main.ts --gateway",
+    "dev": "tsx src/cli/index.ts",
+    "dev:craft": "tsx src/cli/index.ts --craft",
+    "gateway": "npm run build:web && tsx src/cli/index.ts gateway",
     "build": "npm run build --prefix web && tsc",
     "build:web": "npm run build --prefix web",
     "build:core": "tsc",
-    "start": "node dist/main.js",
+    "start": "node dist/cli/index.js",
     "prepublishOnly": "npm run build",
     "test": "vitest --run",
     "test:watch": "vitest",

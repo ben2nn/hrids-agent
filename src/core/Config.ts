@@ -144,7 +144,7 @@ export interface SkillHubConfig {
 // ── Web 搜索配置 ───────────────────────────────────────────────
 
 export interface WebSearchConfig {
-  /** 搜索引擎：mojeek（默认）| searxng */
+  /** 搜索引擎：searxng（默认）| mojeek */
   engine?: 'mojeek' | 'searxng'
   /** SearXNG 实例地址（engine=searxng 时必填），例如 https://xng.hrids.com */
   endpoint?: string
@@ -230,8 +230,6 @@ export interface AgentConfig {
   llm?: ModelTypeConfig
   /** 视觉模型（图像理解，可选，未配置则复用 llm） */
   vision?: ModelTypeConfig
-  /** 全模态模型（文本+图像+音频，可选） */
-  multimodal?: ModelTypeConfig
   /** 语音模型（TTS/STT，可选） */
   speech?: ModelTypeConfig
   /** Embedding 模型（记忆检索，可选，未配置则降级 TF-IDF） */
@@ -323,7 +321,7 @@ const DEFAULTS = {
     theme: 'default' as const,
   },
   vectorStore: { backend: 'sqlite' as const },
-  webSearch: { engine: 'mojeek' as const },
+  webSearch: { engine: 'searxng' as const },
   skillHub: {
     url: 'https://skillhub.cn',
     apiBase: 'https://api.skillhub.cn',
@@ -448,7 +446,6 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     // 模型配置
     llm:        injectApiKeys(clean.llm),
     vision:     injectApiKeys(clean.vision),
-    multimodal: injectApiKeys(clean.multimodal),
     speech:     injectApiKeys(clean.speech),
     embedding:  injectApiKeys(clean.embedding) as EmbeddingConfig | undefined,
     // 存储
@@ -620,14 +617,14 @@ export function hasMainAgentConfig(): boolean {
 
 /**
  * 按提供商 ID 查找 API Key。
- * 依次从 llm / vision / multimodal / speech / embedding 的 fallbacks 中查找，
+ * 依次从 llm / vision / speech / embedding 的 fallbacks 中查找，
  * 最后兜底 config.apiKey（顶层内联 key）。
  */
 export function getApiKey(providerId: string): string | undefined {
   const config = loadConfig()
   const canonical = normalizeProvider(providerId)
   const modelTypes: Array<ModelTypeConfig | undefined> = [
-    config.llm, config.vision, config.multimodal, config.speech, config.embedding,
+    config.llm, config.vision, config.speech, config.embedding,
   ]
   for (const mt of modelTypes) {
     const found = mt?.fallbacks?.find(fb => normalizeProvider(fb.provider) === canonical)

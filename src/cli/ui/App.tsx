@@ -1,19 +1,23 @@
-﻿import React, { useState, useCallback, useRef, useEffect } from 'react'
-import { Box, Text, useInput, useApp } from 'ink'
-import TextInput from 'ink-text-input'
+﻿import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { Box, Text, useApp } from 'ink'
 import { SplashScreen } from './SplashScreen.js'
 import { CommandHint } from './CommandHint.js'
 import { FileHint } from './FileHint.js'
-import type { QueryEngine } from '../core/QueryEngine.js'
-import type { CommandRegistry } from '../core/CommandRegistry.js'
-import type { CommandContext } from '../core/CommandRegistry.js'
-import { setCronTriggerCallback } from '../tools/ScheduleCronTool.js'
-import type { CronJob } from '../tools/ScheduleCronTool.js'
-import { listSessions, loadSessionEvents, generateSessionId, archiveSession, listArchives } from '../core/SessionStore.js'
-import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
-import { setGlobalCwd } from '../tools/BashTool.js'
-import { resolveAskUser, getPendingAskUser } from '../tools/AskUserTool.js'
-import { loadConfig } from '../core/Config.js'
+import { PromptInput } from './PromptInput.js'
+import { MessageCard, type MessageRole } from './MessageCard.js'
+import { Spinner } from './Spinner.js'
+import { useKeystroke } from './KeystrokeContext.js'
+import { TONE, FG, STRIPE_BORDER } from './theme.js'
+import type { QueryEngine } from '../../core/QueryEngine.js'
+import type { CommandRegistry } from '../../core/CommandRegistry.js'
+import type { CommandContext } from '../../core/CommandRegistry.js'
+import { setCronTriggerCallback } from '../../tools/ScheduleCronTool.js'
+import type { CronJob } from '../../tools/ScheduleCronTool.js'
+import { listSessions, loadSessionEvents, generateSessionId, archiveSession, listArchives } from '../../core/SessionStore.js'
+import { getSessionWorkDirPath } from '../../core/ContextBuilder.js'
+import { setGlobalCwd } from '../../tools/BashTool.js'
+import { resolveAskUser, getPendingAskUser } from '../../tools/AskUserTool.js'
+import { loadConfig } from '../../core/Config.js'
 
 interface Props {
   engine: QueryEngine
@@ -43,97 +47,11 @@ interface DisplayMsg {
   color?: string   // 可选颜色覆盖（用于黄色 system 消息等）
 }
 
-const ROLE_COLOR: Record<MsgRole, string> = {
-  user:      'green',
-  assistant: 'white',
-  tool:      'cyan',
-  system:    'gray',
-  error:     'red',
-}
-
-const ROLE_PREFIX: Record<MsgRole, string> = {
-  user:      '你 › ',
-  assistant: '✦ ',
-  tool:      '',
-  system:    '• ',
-  error:     '✗ ',
-}
-
-// ── 工具输出差异化格式化 ──────────────────────────────────────────────────────
-
-/** web_search 输出格式化：识别 DuckDuckGo 卡片式结构 或 Anthropic 自然语言文本 */
-function formatWebSearch(out: string): string {
-  // DuckDuckGo 输出特征：包含 `---` 分隔符 + `**标题**` 格式
-  if (out.includes('---') && out.includes('**')) {
-    const blocks = out
-      .split(/\n---+\n/)
-      .map(b => b.trim())
-      .filter(Boolean)
-
-    // 找到实际结果块（跳过 "搜索结果（来源：...）：" 前缀行）
-    const resultBlocks = blocks.filter(b => b.includes('**'))
-
-    if (resultBlocks.length === 0) return out.slice(0, 500)
-
-    const lines: string[] = []
-    resultBlocks.forEach((block, idx) => {
-      // 解析：第一行是 **标题**，第二行是摘要，第三行是 URL
-      const parts = block.split('\n').map(l => l.trim()).filter(Boolean)
-      const title = parts[0]?.replace(/^\*\*|\*\*$/g, '') ?? ''
-      const snippet = parts[1] ?? ''
-      const url = parts[2] ?? ''
-
-      lines.push(`  ${idx + 1}. ${title}`)
-      if (snippet) lines.push(`     ${snippet.length > 80 ? snippet.slice(0, 80) + '…' : snippet}`)
-      if (url) lines.push(`     ${url}`)
-    })
-
-    lines.push(`  ─ 共 ${resultBlocks.length} 条结果`)
-    return lines.join('\n')
-  }
-
-  // Anthropic 自然语言输出：直接截断展示
-  return out.length > 600 ? out.slice(0, 600) + `\n  …（共 ${out.length} 字符）` : out
-}
-
-/** web_fetch 输出格式化：显示字数 + 正文预览 */
-function formatWebFetch(out: string, url: string): string {
-  const totalChars = out.length
-  const isTruncated = out.includes('[内容已截断，共')
-
-  // 提取实际正文（去掉末尾截断提示行）
-  const bodyEnd = out.lastIndexOf('\n\n[内容已截断')
-  const body = bodyEnd > 0 ? out.slice(0, bodyEnd) : out
-
-  const preview = body.slice(0, 300)
-  const previewLines = preview.split('\n').slice(0, 8).join('\n')
-
-  const lines: string[] = []
-  lines.push(`  来源: ${url}`)
-  lines.push(`  字数: ${totalChars.toLocaleString()} 字符${isTruncated ? '（已截断）' : ''}`)
-  lines.push(`  ${'─'.repeat(40)}`)
-  lines.push(previewLines.split('\n').map(l => `  ${l}`).join('\n'))
-  if (body.length > 300) lines.push(`  …（正文共 ${body.length.toLocaleString()} 字符）`)
-
-  return lines.join('\n')
-}
-
-/** 按工具名称差异化格式化输出，其他工具保持原有截断逻辑 */
-function formatToolOutput(toolName: string, out: string, toolInput?: Record<string, unknown>): string {
-  if (!out) return ''
-  if (toolName === 'web_search') return formatWebSearch(out)
-  if (toolName === 'web_fetch') {
-    const url = (toolInput?.url as string) ?? ''
-    return formatWebFetch(out, url)
-  }
-  // 默认：超 500 字符截断
-  return out.length > 500 ? out.slice(0, 500) + `\n…（共 ${out.length} 字符）` : out
-}
-
 export function App({ engine, commands, sessionId: initialSessionId, onModelChange, currentModel, providerName, getProviderName, onStderrReady }: Props) {
   const { exit } = useApp()
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState(initialSessionId)
+  const sessionIdRef = useRef(initialSessionId)
   const [msgs, setMsgs] = useState<DisplayMsg[]>([
     { role: 'system', text: `会话已启动 (${initialSessionId})  输入 /help 查看命令` },
   ])
@@ -150,66 +68,37 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [fileFilter, setFileFilter] = useState('')
   const [stderrOutput, setStderrOutput] = useState('')
   const [scrollOffset, setScrollOffset] = useState(0)
-  const MAX_VISIBLE_LINES = 50  // 最大可见行数
+  const MAX_VISIBLE_LINES = 50
+  const SCROLL_PAGE = 10   // PageUp/PageDown 步进
+  // pinned=true: 自动跟踪底部; pinned=false: 用户自由滚动
+  const [pinned, setPinned] = useState(true)
+  const pinnedRef = useRef(true)
+  // 同步 ref 以便闭包中读取最新值
+  pinnedRef.current = pinned
 
-  const push = useCallback((msg: DisplayMsg) => {
+  const jumpToBottom = useCallback(() => {
+    setPinned(true)
+    pinnedRef.current = true
     setMsgs(prev => {
-      const newMsgs = [...prev, msg]
-      // 新消息添加时自动滚动到底部
-      setScrollOffset(Math.max(0, newMsgs.length - MAX_VISIBLE_LINES))
-      return newMsgs
-    })
-  }, [])
-
-  // 原地更新指定 id 的消息；若找不到对应 id，则降级追加 fallback 消息
-  const updateMsg = useCallback((id: string, updater: (prev: DisplayMsg) => DisplayMsg, fallback?: DisplayMsg) => {
-    setMsgs(prev => {
-      const idx = prev.findIndex(m => m.id === id)
-      if (idx !== -1) {
-        // 找到：原地更新
-        return prev.map((m, i) => i === idx ? updater(m) : m)
-      }
-      // 未找到：降级追加 fallback 消息（若提供）
-      if (fallback) return [...prev, fallback]
+      setScrollOffset(Math.max(0, prev.length - MAX_VISIBLE_LINES))
       return prev
     })
   }, [])
 
-  // cron 触发队列：避免在 loading 时直接调用，排队等待
-  const cronQueueRef = useRef<CronJob[]>([])
-  const loadingRef = useRef(false)
-  // tool_log 批量缓冲：避免每行都触发重渲染导致 Ink 卡死
-  const toolLogBufRef = useRef<string[]>([])
-  const toolLogFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // 每个工具执行期间的日志，用于 tool_end 时持久化到历史
-  const currentToolLogsRef = useRef<string[]>([])
-  // 缓存当前工具的 input，供 tool_end 格式化时使用
-  const currentToolInputRef = useRef<Record<string, unknown>>({})
-  // 每个工具最多保留的日志行数（避免爬虫等大量输出撑爆界面）
-  const MAX_TOOL_LOG_LINES = 30
-
-  const flushToolLog = useCallback(() => {
-    if (toolLogBufRef.current.length === 0) return
-    const lines = toolLogBufRef.current.splice(0)
-    // 只更新临时进度状态，不写入 msgs 历史
-    setToolProgress(lines.join('\n'))
-    toolLogFlushRef.current = null
+  const push = useCallback((msg: DisplayMsg) => {
+    setMsgs(prev => {
+      const newMsgs = [...prev, msg]
+      msgsLengthRef.current = newMsgs.length
+      if (pinnedRef.current) {
+        setScrollOffset(Math.max(0, newMsgs.length - MAX_VISIBLE_LINES))
+      }
+      return newMsgs
+    })
   }, [])
 
-  const bufferToolLog = useCallback((line: string) => {
-    // 过滤 stderr 行，不在 CLI UI 中显示
-    //if (line.trimStart().startsWith('[stderr]')) return
-    // 同时记录到当前工具日志缓冲，供 tool_end 持久化
-    currentToolLogsRef.current.push(line)
-    toolLogBufRef.current.push(line)
-    // 50ms 内的日志合并成一条，超过 20 行立即 flush
-    if (toolLogBufRef.current.length >= 20) {
-      if (toolLogFlushRef.current) clearTimeout(toolLogFlushRef.current)
-      flushToolLog()
-    } else if (!toolLogFlushRef.current) {
-      toolLogFlushRef.current = setTimeout(flushToolLog, 50)
-    }
-  }, [flushToolLog])
+  const cronQueueRef = useRef<CronJob[]>([])
+  const loadingRef = useRef(false)
+  const msgsLengthRef = useRef(0)
 
   // 公共 engine 执行逻辑，供用户消息和 cron 触发共用
   const runEngine = useCallback(async (prompt: string, displayAs?: string) => {
@@ -223,13 +112,9 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         switch (ev.type) {
           case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
           case 'tool_start':
-            currentToolLogsRef.current = [] // 重置当前工具日志缓冲
-            currentToolInputRef.current = (ev.input as Record<string, unknown>) ?? {}
-            push({ id: ev.id, role: 'tool', text: `⚙ ${ev.name}  ${ev.description}` })
+            setToolProgress(`⚙ ${ev.name}`)
             // ask_user 工具：切换输入框为回答模式
             if (ev.name === 'ask_user') {
-              // tool_start 在 execute() 之前触发，pendingQuestion 尚未设置
-              // 直接从 tool_start 的 input 读取问题内容
               const askInput = ev.input as { question?: string; options?: string[] }
               const question = askInput?.question ?? ''
               const options = askInput?.options ?? []
@@ -237,42 +122,22 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
                 ? `❓ ${question}\n选项: ${options.map((o, i) => `${i + 1}. ${o}`).join('  ')}`
                 : `❓ ${question}`
               setAskUserPrompt(hint)
-              setLoading(false)           // 解锁输入框，让用户可以输入
-              loadingRef.current = false  // 同步更新 ref，防止 Ctrl+C 误触发 abort
+              setLoading(false)
+              loadingRef.current = false
             }
             break
-          case 'tool_log': bufferToolLog(`  ${ev.line}`); break
+          case 'tool_log': break  // 隐藏工具日志
           case 'tool_end': {
-            flushToolLog() // 确保残留日志先 flush
-            setToolProgress('') // 清空临时进度
-            setAskUserPrompt(null) // 清除 ask_user 提示（如果有）
+            setToolProgress('')
+            setAskUserPrompt(null)
             if (ev.name === 'ask_user') {
-              setLoading(true)           // 恢复 loading 状态，继续执行后续工具
-              loadingRef.current = true  // 同步更新 ref
+              setLoading(true)
+              loadingRef.current = true
             }
-            const logs = currentToolLogsRef.current
-            currentToolLogsRef.current = []
-            // 日志截断：超过 MAX_TOOL_LOG_LINES 行时保留最后 N 行并插入省略提示
-            const kept = logs.length > MAX_TOOL_LOG_LINES
-              ? [`  …（省略前 ${logs.length - MAX_TOOL_LOG_LINES} 行）`, ...logs.slice(-MAX_TOOL_LOG_LINES)]
-              : logs
-            const logSuffix = kept.length > 0 ? '\n' + kept.join('\n') : ''
             const result = ev.result
+            // 只显示工具错误，隐藏成功详情
             if (result.type === 'error') {
-              // 失败：追加日志 + 错误行，整块变红；降级时 push 独立消息
-              updateMsg(ev.id, prev => ({
-                ...prev,
-                text: prev.text + logSuffix + `\n✗ ${ev.name}: ${result.message}`,
-                color: 'red',
-              }), { role: 'error', text: `✗ ${ev.name}: ${result.message}` })
-            } else {
-              // 成功：按工具类型差异化格式化输出
-              const out = result.output ?? ''
-              const preview = formatToolOutput(ev.name, out, currentToolInputRef.current)
-              updateMsg(ev.id, prev => ({
-                ...prev,
-                text: prev.text + logSuffix + `\n✓ ${ev.name}${preview ? '\n' + preview : ''}`,
-              }), { role: 'tool', text: `✓ ${ev.name}${preview ? '\n' + preview : ''}` })
+              push({ role: 'error', text: `✗ ${ev.name}: ${result.message}` })
             }
             break
           }
@@ -284,7 +149,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 })); break
           case 'compact_start': push({ role: 'system', text: '⟳ 上下文过长，正在自动压缩历史...' }); break
           case 'compact_done': {
-            const archives = listArchives(sessionId)
+            const archives = listArchives(sessionIdRef.current)
             const archiveCount = archives.length
             const lastArchive = archives[archiveCount - 1]
             const msgCount = lastArchive?.messageCount ?? 0
@@ -363,8 +228,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     })
   }, [onStderrReady])
 
-  // 构建命令上下文
-  const cmdCtx: CommandContext = {
+  // 构建命令上下文（memoize 避免 handleSubmit 每次重建）
+  const cmdCtx: CommandContext = useMemo(() => ({
     clearHistory: () => engine.clearHistory(),
     compactHistory: async (summary: string) => {
       engine.compactHistory(summary)
@@ -385,12 +250,12 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     getMode: () => 'ask',
     sessionId,
     listSessions: () => listSessions(),
-    listArchives: () => listArchives(sessionId),
+    listArchives: () => listArchives(sessionIdRef.current),
     newSession: () => {
       const newId = generateSessionId()
       engine.clearHistory()
       setSessionId(newId)
-      // 重置工作目录到新的独立子目录，防止旧任务文件污染新任务
+      sessionIdRef.current = newId
       const newWorkDir = getSessionWorkDirPath(newId)
       setGlobalCwd(newWorkDir)
       try { process.chdir(newWorkDir) } catch { /* 忽略 */ }
@@ -401,6 +266,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       if (!events) return false
       engine.store.replaceEvents(events)
       setSessionId(id)
+      sessionIdRef.current = id
       push({ role: 'system', text: `已切换到会话 ${id}（${events.length} 条事件）` })
       return true
     },
@@ -409,7 +275,6 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       const models: Array<{ provider: string; model: string; isDefault?: boolean }> = []
       const defaultModel = config.agent?.model
 
-      // 从 llm.fallbacks 中提取所有模型
       if (config.llm?.fallbacks) {
         for (const group of config.llm.fallbacks) {
           for (const model of group.models) {
@@ -422,7 +287,6 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         }
       }
 
-      // 如果没有 fallbacks，使用默认模型
       if (models.length === 0 && defaultModel) {
         models.push({
           provider: config.provider || 'unknown',
@@ -433,7 +297,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
       return models
     },
-  }
+  }), [engine, sessionId, onModelChange, push, exit])
 
   // 处理输入变化，控制命令提示和文件提示显示
   const handleInputChange = useCallback((value: string) => {
@@ -469,8 +333,9 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   const handleSubmit = useCallback(async (value: string) => {
     const text = value.trim()
-    if (!text || loading) return
+    if (!text || loadingRef.current) return
     setInput('')
+    jumpToBottom()  // 发送消息时恢复自动滚动
     // 保留 SplashScreen，不在提交时隐藏
     setShowCommandHint(false)
     setCommandFilter('')
@@ -519,44 +384,45 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     // 普通消息 → 发给 LLM
     push({ role: 'user', text })
     await runEngine(text)
-  }, [loading, commands, engine, push, exit, cmdCtx])
+  }, [commands, engine, push, exit, cmdCtx])
 
-  useInput((_, key) => {
-    // useInput 作为备用，处理空闲状态下的 Ctrl+C 退出
-    if (key.ctrl && (key as { name?: string }).name === 'c') {
-      if (!loadingRef.current) {
-        exit()
-      }
+  useKeystroke((key) => {
+    // 非 loading 状态的 Ctrl+C 退出（loading 状态由下方原始 stdin 监听器处理）
+    if (key.ctrl && key.name === 'c') {
+      if (!loadingRef.current) exit()
     }
-    // 上下箭头滚动查看历史消息
-    if (key.upArrow) {
-      setScrollOffset(prev => Math.max(0, prev - 1))
+    const maxOffset = Math.max(0, msgsLengthRef.current - MAX_VISIBLE_LINES)
+    // PageUp / PageDown — 页级滚动（不与 PromptInput 冲突）
+    if (key.name === 'pageup') {
+      setPinned(false)
+      setScrollOffset(prev => Math.max(0, prev - SCROLL_PAGE))
     }
-    if (key.downArrow) {
-      setScrollOffset(prev => Math.min(msgs.length - MAX_VISIBLE_LINES, prev + 1))
+    if (key.name === 'pagedown') {
+      setScrollOffset(prev => {
+        const next = Math.min(maxOffset, prev + SCROLL_PAGE)
+        if (next >= maxOffset) setPinned(true)
+        return next
+      })
     }
   })
 
-  // 直接监听 stdin 原始字节，确保 loading 期间也能捕获 Ctrl+C（\x03）
+  // 直接监听 stdin 原始输入，确保 loading 期间也能捕获 Ctrl+C
+  // 非 loading 状态的 Ctrl+C 退出由上方 useKeystroke 处理（走正常按键链路）
+  // 注意：StdinReader 设置了 setEncoding('utf-8')，data 为 string 而非 Buffer
   useEffect(() => {
-    const handler = (data: Buffer) => {
-      // \x03 = Ctrl+C
-      if (data.length === 1 && data[0] === 0x03) {
-        if (loadingRef.current) {
-          engine.abort()
-          setLoading(false)
-          loadingRef.current = false
-          setStreamBuf('')
-          setToolProgress('')
-          push({ role: 'system', text: '⚠ 任务已中断（Ctrl+C）' })
-        } else {
-          exit()
-        }
+    const handler = (data: string) => {
+      if (data === '\x03' && loadingRef.current) {
+        engine.abort()
+        setLoading(false)
+        loadingRef.current = false
+        setStreamBuf('')
+        setToolProgress('')
+        push({ role: 'system', text: '⚠ 任务已中断（Ctrl+C）' })
       }
     }
     process.stdin.on('data', handler)
     return () => { process.stdin.off('data', handler) }
-  }, [engine, exit, push])
+  }, [engine, push])
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
@@ -573,26 +439,50 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         {msgs
           .slice(scrollOffset, scrollOffset + MAX_VISIBLE_LINES)
           .map((m, i) => (
-            <Box key={m.id ?? i} marginBottom={0}>
-              <Text color={m.color ?? ROLE_COLOR[m.role]}>
-                {ROLE_PREFIX[m.role]}{m.text}
-              </Text>
-            </Box>
+            <MessageCard key={m.id ?? i} role={m.role as MessageRole} text={m.text} color={m.color} />
           ))
         }
       </Box>
 
       {/* 工具执行中的临时进度日志（tool_end 后自动清空，不留在历史里） */}
       {loading && toolProgress && (
-        <Box marginBottom={1}>
-          <Text color="cyan" dimColor>{toolProgress}</Text>
+        <Box
+          borderStyle={STRIPE_BORDER}
+          borderColor={TONE.brand}
+          borderTop={false} borderRight={false} borderBottom={false}
+          paddingLeft={1} marginTop={1} width="100%"
+          flexDirection="column"
+        >
+          <Box>
+            <Text color={TONE.brand} bold>{'▣ '}</Text>
+            <Spinner color={TONE.brand} />
+            <Text color={FG.sub}> 执行中...</Text>
+          </Box>
+          <Box paddingLeft={2}>
+            <Text color="cyan" dimColor>{toolProgress.split('\n').slice(-5).join('\n')}</Text>
+          </Box>
         </Box>
       )}
 
       {/* 流式输出中的实时文本 */}
       {loading && streamBuf && (
-        <Box marginBottom={1}>
-          <Text color="white">✦ {streamBuf}</Text>
+        <Box
+          borderStyle={STRIPE_BORDER}
+          borderColor={TONE.brand}
+          borderTop={false} borderRight={false} borderBottom={false}
+          paddingLeft={1} marginTop={1} width="100%"
+          flexDirection="column"
+        >
+          <Box>
+            <Text color={TONE.brand} bold>{'◈ '}</Text>
+            <Spinner variant="circle" color={TONE.brand} />
+            <Text color={FG.sub}> 写作中...</Text>
+          </Box>
+          <Box paddingLeft={2} flexDirection="column">
+            {streamBuf.split('\n').slice(-6).map((line, i) => (
+              <Text key={i} color={FG.body}>{line}</Text>
+            ))}
+          </Box>
         </Box>
       )}
 
@@ -610,15 +500,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         onSelect={handleFileSelect}
       />
 
-      {/* 状态栏 */}
+      {/* 输入区域 */}
       <Box marginBottom={0}>
-        {askUserPrompt
+        {!pinned
+          ? <Text color={FG.faint}>  ▸ 查看历史中 -- End / PgDn 返回底部 · ↑↓ 逐行滚动</Text>
+          : askUserPrompt
           ? (
             <Box flexDirection="column">
               <Text color="yellow">{askUserPrompt}</Text>
                <Box>
-                <Text color="cyan">{'› '}</Text>
-                <TextInput
+                <PromptInput
                   value={input}
                   onChange={setInput}
                   onSubmit={handleSubmit}
@@ -628,14 +519,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             </Box>
           )
           : loading
-          ? <Text color="yellow" dimColor>▸ 思考中...</Text>
+          ? <Box><Spinner variant="circle" color={TONE.warn} /><Text color={TONE.warn}> 思考中...</Text></Box>
           : (
            <Box>
-              <Text color="cyan">{'› '}</Text>
-              <TextInput
+              <PromptInput
                 value={input}
                 onChange={handleInputChange}
                 onSubmit={handleSubmit}
+                disabled={loading}
                 placeholder="输入消息或 /命令..."
               />
             </Box>
@@ -645,18 +536,36 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
       {/* 底部状态栏 */}
       <Box marginTop={0}>
-        <Text dimColor>
-          {displayProvider}  {modelRef.current}
-          {costInfo && ` 输入 ${costInfo.inputTokens} / 输出 ${costInfo.outputTokens} tokens  累计 ${costInfo.costUsd.toFixed(4)}`}
-          {loading ? '  Ctrl+C 中断' : '  Ctrl+C 退出'}
-          {msgs.length > MAX_VISIBLE_LINES && `  ↑↓ 滚动查看历史 (${scrollOffset + 1}-${Math.min(scrollOffset + MAX_VISIBLE_LINES, msgs.length)}/${msgs.length})`}
+        <Text color={FG.faint}>{'─'.repeat(60)}</Text>
+      </Box>
+      <Box marginTop={0}>
+        <Text color={FG.meta}>
+          {displayProvider}
+          <Text color={FG.faint}> · </Text>
+          <Text color={TONE.brand}>{modelRef.current}</Text>
+          {costInfo && (
+            <>
+              <Text color={FG.faint}> · </Text>
+              <Text color={TONE.accent}>▸ ${costInfo.costUsd.toFixed(4)}</Text>
+              <Text color={FG.faint}> · </Text>
+              <Text>{costInfo.inputTokens.toLocaleString()} in / {costInfo.outputTokens.toLocaleString()} out</Text>
+            </>
+          )}
+          <Text color={FG.faint}> · </Text>
+          <Text color={loading ? TONE.warn : FG.faint}>{loading ? '◐ Ctrl+C 中断' : 'Ctrl+C 退出'}</Text>
+          {msgs.length > MAX_VISIBLE_LINES && (
+            <>
+              <Text color={FG.faint}> · </Text>
+              <Text>{scrollOffset + 1}-{Math.min(scrollOffset + MAX_VISIBLE_LINES, msgs.length)}/{msgs.length}</Text>
+            </>
+          )}
         </Text>
       </Box>
 
       {/* stderr 输出 */}
       {stderrOutput && (
         <Box marginTop={0}>
-          <Text color="gray" dimColor>{stderrOutput}</Text>
+          <Text color={FG.faint}>⚠ {stderrOutput}</Text>
         </Box>
       )}
     </Box>

@@ -8,11 +8,10 @@
  * 配置方式（config.yaml）：
  * ```yaml
  * webSearch:
- *   engine: searxng        # mojeek（默认）| searxng
+ *   engine: searxng        # searxng（默认）| mojeek
  *   endpoint: https://xng.hrids.com  # SearXNG 实例地址
  * ```
  *
- * 设计参考 DeepSeek-Reasonix web.ts
  */
 
 import { z } from 'zod'
@@ -195,8 +194,8 @@ async function searchSearxng(query: string, topK: number, endpoint: string): Pro
 
 async function webSearch(query: string, topK: number): Promise<{ results: SearchResult[]; engine: string }> {
   const config = loadConfig()
-  const engine = config.webSearch?.engine ?? 'mojeek'
-  const endpoint = config.webSearch?.endpoint ?? 'http://localhost:8080'
+  const engine = config.webSearch?.engine ?? 'searxng'
+  const endpoint = config.webSearch?.endpoint ?? 'https://xng.hrids.com'
 
   // SearXNG 优先，失败自动降级 Mojeek
   if (engine === 'searxng') {
@@ -205,13 +204,24 @@ async function webSearch(query: string, topK: number): Promise<{ results: Search
       return { results, engine: `SearXNG (${endpoint})` }
     } catch (searxErr) {
       process.stderr.write(`[web_search] SearXNG 失败，降级到 Mojeek: ${searxErr}\n`)
-      const results = await searchMojeek(query, topK)
-      return { results, engine: 'Mojeek (SearXNG 降级)' }
+      try {
+        const results = await searchMojeek(query, topK)
+        return { results, engine: 'Mojeek (SearXNG 降级)' }
+      } catch {
+        throw searxErr // 抛出原始 SearXNG 错误
+      }
     }
   }
 
-  const results = await searchMojeek(query, topK)
-  return { results, engine: 'Mojeek' }
+  // Mojeek 优先，失败自动降级 SearXNG
+  try {
+    const results = await searchMojeek(query, topK)
+    return { results, engine: 'Mojeek' }
+  } catch (mojeekErr) {
+    process.stderr.write(`[web_search] Mojeek 失败，降级到 SearXNG: ${mojeekErr}\n`)
+    const results = await searchSearxng(query, topK, endpoint)
+    return { results, engine: `SearXNG (Mojeek 降级)` }
+  }
 }
 
 // ── 结果格式化 ────────────────────────────────────────────────

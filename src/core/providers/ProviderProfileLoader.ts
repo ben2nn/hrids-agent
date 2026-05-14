@@ -2,7 +2,7 @@
 // 扩展 config.yaml 的 customProviders，支持从目录批量加载
 // 三层发现：内置 > 用户目录(~/.hrids/providers/) > 项目目录(.hrids/providers/)
 
-import { existsSync, readdirSync } from 'fs'
+import { existsSync, readdirSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { loadYamlFile } from '../YamlLoader.js'
@@ -10,6 +10,19 @@ import type { CustomProviderConfig } from './registry.js'
 
 const USER_PROVIDERS_DIR = join(homedir(), '.hrids', 'providers')
 const PROJECT_PROVIDERS_DIR = '.hrids/providers'
+
+/** 确保用户级 providers 目录存在 */
+export function ensureUserProvidersDir(): string {
+  if (!existsSync(USER_PROVIDERS_DIR)) {
+    mkdirSync(USER_PROVIDERS_DIR, { recursive: true })
+  }
+  return USER_PROVIDERS_DIR
+}
+
+/** 获取用户级 providers 目录路径 */
+export function getUserProvidersDir(): string {
+  return USER_PROVIDERS_DIR
+}
 
 /**
  * 从 YAML 文件目录加载自定义提供商配置

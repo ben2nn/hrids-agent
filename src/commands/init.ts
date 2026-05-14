@@ -3,6 +3,8 @@ import { join } from 'path'
 import { getConfigDir } from '../core/Config.js'
 import { saveYamlFile, loadYamlFile } from '../core/YamlLoader.js'
 import { DEFAULT_MAIN_AGENT_FILES } from '../core/coordinator/coordinatorPrompt.js'
+import { ensureUserProvidersDir } from '../core/providers/ProviderProfileLoader.js'
+import { BUILTIN_PROVIDERS } from '../core/providers/registry.js'
 
 const CONFIG_DIR = getConfigDir()
 const CONFIG_YAML_FILE = join(CONFIG_DIR, 'config.yaml')
@@ -62,6 +64,10 @@ const MINIMAL_CONFIG = {
   toolPermissions: {
     defaultDenyList: ['todo_write', 'todo_update', 'todo_append', 'todo_reset'],
     allowMcpTools: false,
+  },
+  webSearch: {
+    engine: 'searxng',
+    endpoint: 'https://xng.hrids.com',
   },
 }
 
@@ -232,6 +238,48 @@ export async function runInitCommand(opts: InitOptions = {}) {
   }
   console.log(`✓ 已创建角色模板目录: ${rolesDir}/（${roleFiles.length} 个 role）`)
 
+  // ── providers/：自定义提供商目录 ─────────────────────────
+  const providersDir = ensureUserProvidersDir()
+
+  // 初始化内置提供商 YAML 文件
+  let providerCount = 0
+  for (const def of BUILTIN_PROVIDERS) {
+    const providerPath = join(providersDir, `${def.id}.yaml`)
+    if (!existsSync(providerPath) || opts.force) {
+      const yaml = `# ${def.name}
+name: ${def.name}
+transport: ${def.transport}
+apiKeyEnvVars: [${def.apiKeyEnvVars.join(', ')}]
+${def.defaultBaseUrl ? `defaultBaseUrl: ${def.defaultBaseUrl}` : '# defaultBaseUrl: https://api.example.com/v1'}
+${def.baseUrlEnvVar ? `baseUrlEnvVar: ${def.baseUrlEnvVar}` : '# baseUrlEnvVar: MY_API_BASE_URL'}
+${def.modelPrefixes?.length ? `modelPrefixes: [${def.modelPrefixes.join(', ')}]` : '# modelPrefixes: [model-prefix-]'}
+`
+      writeFileSync(providerPath, yaml, 'utf-8')
+      providerCount++
+    }
+  }
+
+  // 创建自定义提供商示例
+  const exampleProviderPath = join(providersDir, '_example.yaml')
+  if (!existsSync(exampleProviderPath)) {
+    const exampleProvider = `# 自定义提供商示例
+# 文件名即提供商 ID（去掉 .yaml 后缀），也可通过 name 字段覆盖
+# 将此文件复制为 your-provider.yaml 并修改配置
+
+name: MyCustomLLM
+baseUrl: https://api.example.com/v1
+# 传输协议：openai_chat（默认）| anthropic_messages
+transport: openai_chat
+# API Key 环境变量名（推荐）或直接内联
+apiKeyEnvVar: MY_API_KEY
+# apiKey: sk-xxxxxxxx
+# 是否支持原生联网搜索
+nativeWebSearch: false
+`
+    writeFileSync(exampleProviderPath, exampleProvider, 'utf-8')
+  }
+  console.log(`✓ 已创建自定义提供商目录: ${providersDir}/（${providerCount} 个内置提供商）`)
+
   // ── config.yaml：最后生成（目录创建不受 config.yaml 是否存在影响）──
   if (!configExists || opts.force) {
     const examplePath = findExampleConfig()
@@ -251,7 +299,9 @@ export async function runInitCommand(opts: InitOptions = {}) {
   console.log(`     ${CONFIG_YAML_FILE}`)
   console.log('  2. （可选）编辑主智能体提示词：')
   console.log(`     ${mainAgentDir}/IDENTITY.md`)
-  console.log('  3. 运行: hrids-agent\n')
+  console.log('  3. （可选）添加自定义提供商：')
+  console.log(`     ${providersDir}/`)
+  console.log('  4. 运行: hrids-agent\n')
   console.log('💡 支持的提供商及对应 API Key 环境变量：')
   console.log('   阿里云百炼  DASHSCOPE_API_KEY   qwen-max / qwen-plus')
   console.log('   Anthropic   ANTHROPIC_API_KEY   claude-3-5-sonnet-20241022')

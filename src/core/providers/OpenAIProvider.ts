@@ -149,8 +149,16 @@ export class OpenAIProvider implements LLMProvider {
     const oaiMessages = toOAIMessages(messages, systemPrompt)
     const oaiTools = tools.length > 0 ? tools.map(toOAITool) : []
 
-    // 原生联网搜索：向 LLM 传入 web_search 工具，LLM 内部搜索并返回结果
-    if (this.config.nativeWebSearch) {
+    // 原生联网搜索配置
+    const webSearchMode = this.config.webSearchMode
+    if (this.config.nativeWebSearch && webSearchMode) {
+      if (webSearchMode.type === 'tool') {
+        // 通过工具方式：添加指定类型的工具
+        oaiTools.push({ type: webSearchMode.toolType } as unknown as OAITool)
+      }
+      // 'param' 类型在 body 构建后处理
+    } else if (this.config.nativeWebSearch) {
+      // 兼容旧配置：默认使用 web_search 工具
       oaiTools.push({ type: 'web_search' } as unknown as OAITool)
     }
 
@@ -162,6 +170,11 @@ export class OpenAIProvider implements LLMProvider {
       stream_options: { include_usage: true },
     }
     if (oaiTools.length > 0) body.tools = oaiTools
+
+    // 原生联网搜索：通过请求参数方式
+    if (this.config.nativeWebSearch && webSearchMode?.type === 'param') {
+      body[webSearchMode.key] = webSearchMode.value
+    }
 
     // ── 请求体诊断日志（脱敏：base64 图片只打长度）──────────────────────────
     const debugMessages = oaiMessages.map(m => {

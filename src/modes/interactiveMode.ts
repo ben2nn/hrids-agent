@@ -8,7 +8,9 @@ import { disconnectAllMcp } from '../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js'
 import { saveConfig } from '../core/Config.js'
-import { App } from '../tui/App.js'
+import { App } from '../cli/ui/App.js'
+import { KeystrokeProvider } from '../cli/ui/KeystrokeContext.js'
+import { getStdinReader } from '../cli/ui/StdinReader.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { LLMProvider } from '../core/providers/index.js'
 
@@ -85,13 +87,8 @@ export async function runInteractiveMode(
     void autoDistillSkill(engine, provider, skillDistill)
   }
 
-  // ── 禁用终端回显 ──
-  // 必须在 render() 前设置，防止击键被终端直接回显到光标位置（与 InkRenderer 冲突导致光标漂移）
-  if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-    process.stdin.setRawMode(true)
-  }
-
   // ── 进入 alternate screen（参考 claude-code 的 DEC 1049 方案）──
+  // StdinReader 会在 KeystrokeProvider 挂载时自动设置 raw mode
   process.stdout.write('\x1b[?1049h\x1b[H')
 
   // stderr 回调容器：App 挂载后设置 listener
@@ -108,36 +105,40 @@ export async function runInteractiveMode(
 
   try {
     const { waitUntilExit } = render(
-      React.createElement(App, {
-        engine,
-        commands: registry,
-        sessionId,
-        currentModel: model,
-        providerName: opts.providerName,
-        getProviderName: () => ({ name: provider.name, model: provider.model }),
-        onModelChange: (m: string) => {
-          model = m
-          saveConfig({ model: m })
-        },
-        onStderrReady: (cb: StderrListener) => {
-          stderrCallback = cb
-          // 将 App 挂载前缓冲的 stderr 输出发送给 App
-          for (const text of earlyStderrBuffer) {
-            cb(text)
-          }
-          earlyStderrBuffer.length = 0
-        },
-      }),
+      React.createElement(KeystrokeProvider, null,
+        React.createElement(App, {
+          engine,
+          commands: registry,
+          sessionId,
+          currentModel: model,
+          providerName: opts.providerName,
+          getProviderName: () => ({ name: provider.name, model: provider.model }),
+          onModelChange: (m: string) => {
+            model = m
+            saveConfig({ model: m })
+          },
+          onStderrReady: (cb: StderrListener) => {
+            stderrCallback = cb
+            // 将 App 挂载前缓冲的 stderr 输出发送给 App
+            for (const text of earlyStderrBuffer) {
+              cb(text)
+            }
+            earlyStderrBuffer.length = 0
+          },
+        }),
+      ),
     )
 
     await waitUntilExit()
   } finally {
-    // ── 清理：恢复 stderr + raw mode + 退出 alternate screen ──
+    // ── 清理：恢复 stderr + 退出 alternate screen ──
     restoreStderr()
-    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-      process.stdin.setRawMode(false)
-    }
     process.stdout.write('\x1b[?1049l')
+    // 销毁 StdinReader（恢复 raw mode + pause stdin）并移除所有残留监听器
+    getStdinReader().destroy()
+    process.stdin.removeAllListeners('data')
+    // unref stdin，防止阻止进程退出
+    process.stdin.unref()
     await disconnectAllMcp()
   }
 }

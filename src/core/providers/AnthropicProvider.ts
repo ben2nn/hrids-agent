@@ -16,11 +16,13 @@ export class AnthropicProvider implements LLMProvider {
 
   private client: Anthropic
   private nativeWebSearch: boolean
+  private webSearchMode: import('./types.js').WebSearchMode | undefined
 
   constructor(config: ProviderConfig) {
     this.model = config.model
     this.modelType = config.modelType ?? 'llm'
     this.nativeWebSearch = config.nativeWebSearch ?? false
+    this.webSearchMode = config.webSearchMode
     this.client = new Anthropic({
       apiKey: config.apiKey,
       baseURL: config.baseUrl,
@@ -59,7 +61,10 @@ export class AnthropicProvider implements LLMProvider {
       : []
     // 原生联网搜索：Claude 内部搜索并返回结果
     if (this.nativeWebSearch) {
-      anthropicTools.push({ type: 'web_search_20250305', name: 'web_search' } as unknown as Anthropic.Tool)
+      const toolType = this.webSearchMode?.type === 'tool'
+        ? this.webSearchMode.toolType
+        : 'web_search_20250305'
+      anthropicTools.push({ type: toolType, name: 'web_search' } as unknown as Anthropic.Tool)
     }
 
     // 重试由外层 FallbackProvider 统一处理
