@@ -2,7 +2,7 @@
 
 ## Context
 
-将 `refercode/claude-code-main` 的终端交互界面与逻辑完整复刻到 `hrids-agent` 项目。采用标准 Ink 渲染引擎，从消息渲染层开始，渐进式完成全部 6 个阶段。
+将 `refercode/claude-code-main` 的终端交互界面与逻辑完整复刻到 `hrids-agent` 项目。采用标准 Ink 渲染引擎，从消息渲染层开始，渐进式完成全部 5 个阶段（流式工具执行已拆分为独立计划）。
 
 ## 架构对比
 
@@ -12,7 +12,7 @@
 | 状态管理 | createStore + Context | useState 散布在 App.tsx | 引入轻量 Store |
 | 消息列表 | VirtualMessageList (虚拟滚动) | ✅ 已实现：scroll-store.ts + CardStream.tsx | 保持现有实现 |
 | 输入组件 | Vim 模式 + 粘贴折叠 + 命令补全 | 基础历史记录 | 增强输入体验 |
-| 工具执行 | StreamingToolExecutor (流式并行) | ToolScheduler (批量调度) | 支持流式并行 |
+| 工具执行 | StreamingToolExecutor (流式并行) | ToolScheduler (批量调度) | 独立计划 |
 | 布局 | FullscreenLayout (scrollable + pinned + overlay) | 简单 Box 布局 | 分层布局 |
 
 ## 分阶段实施计划
@@ -98,9 +98,9 @@
 - OVERSCAN_CARDS=2 缓冲 + 16ms 事件节流
 - pinned 自动跟踪 + 键盘滚动（PageUp/Down, Arrow keys）
 
-### 阶段 3：输入增强（原阶段 4）
+### 阶段 3：输入增强
 
-#### 4.1 增强 PromptInput.tsx
+#### 3.1 增强 PromptInput.tsx
 - **修改** `src/cli/ui/PromptInput.tsx`
 - 新增功能：
   - Vim 模式：Normal/Insert/Visual 模式 + 状态指示
@@ -110,58 +110,43 @@
   - 多行编辑：Shift+Enter 换行
 - 参考：`refercode/.../components/PromptInput/PromptInput.tsx`
 
-#### 4.2 PromptInputFooter.tsx
+#### 3.2 PromptInputFooter.tsx
 - **新建** `src/cli/ui/PromptInputFooter.tsx`
 - 快捷键提示、当前模式、队列命令数
 
-#### 4.3 增强 CommandHint.tsx
+#### 3.3 增强 CommandHint.tsx
 - **修改** `src/cli/ui/CommandHint.tsx`
 - 模糊匹配、描述内联、方向键导航
 
-### 阶段 4：流式工具执行
+### ~~阶段 4：流式工具执行~~ → 独立计划
 
-#### 4.1 StreamingToolExecutor.ts
-- **新建** `src/core/StreamingToolExecutor.ts`
-- 流式接收 LLM 响应时边收边执行工具
-- 并发控制：isConcurrencySafe=true 并行，否则独占
-- 结果缓冲 + 有序输出
-- 参考：`refercode/.../services/tools/StreamingToolExecutor.ts`
+已拆分为独立计划：`docs/plans/streaming-tool-executor.md`
 
-#### 4.2 增强 QueryEngine.ts
-- **修改** `src/core/QueryEngine.ts`
-- 新增 `sendStreaming()` 方法，yield 工具调用
-- 集成 StreamingToolExecutor
-- 保持 `send()` 向后兼容
+### 阶段 4：布局与权限 UI
 
-#### 4.3 增强 ToolScheduler.ts
-- **修改** `src/core/ToolScheduler.ts`
-- 新增 `scheduleStreaming()` 支持增量调度
-
-### 阶段 5：布局与权限 UI
-
-#### 5.1 FullscreenLayout.tsx
+#### 4.1 FullscreenLayout.tsx
 - **新建** `src/cli/ui/FullscreenLayout.tsx`
 - 分层：scrollable（消息）+ pinned（spinner+prompt）+ overlay（权限对话框）+ modal（斜杠命令）
 - 参考：`refercode/.../components/FullscreenLayout.tsx`
 
-#### 5.2 重构 App.tsx
+#### 4.2 重构 App.tsx
 - **修改** `src/cli/ui/App.tsx`
 - 拆分为：App → MainScreen + StatusBar + PermissionDialog
 - 使用 FullscreenLayout + AppState Store
 
-#### 5.3 StatusNotices.tsx
+#### 4.3 StatusNotices.tsx
 - **新建** `src/cli/ui/StatusNotices.tsx`
 - 模型信息、成本追踪、会话信息、连接状态
 
-#### 5.4 PermissionRequest.tsx
+#### 4.4 PermissionRequest.tsx
 - **新建** `src/cli/ui/PermissionRequest.tsx`
 - 工具权限请求对话框：工具名、输入摘要、Allow/Deny/Always Allow
 
-#### 5.5 BypassModeDialog.tsx
+#### 4.5 BypassModeDialog.tsx
 - **新建** `src/cli/ui/BypassModeDialog.tsx`
 - 跳过权限模式对话框 + 安全警告
 
-#### 5.6 AskUserQuestion — 用户提问交互系统（增强现有实现）
+#### 4.6 AskUserQuestion — 用户提问交互系统（增强现有实现）
 
 **现状**：已有 `src/tools/AskUserTool.ts`，支持单问题 + 文本选项，UI 仅在输入框显示提示文字。
 
@@ -215,9 +200,9 @@
 
 ## 文件清单
 
-### 新建文件（约 53 个）
+### 新建文件（约 52 个）
 ```
-# 阶段 1-5：核心 UI（24 个）
+# 阶段 1-4：核心 UI（23 个）
 src/cli/ui/store.ts
 src/cli/ui/AppState.ts
 src/cli/ui/MessageRow.tsx
@@ -229,7 +214,6 @@ src/cli/ui/FullscreenLayout.tsx
 src/cli/ui/StatusNotices.tsx
 src/cli/ui/PermissionRequest.tsx
 src/cli/ui/BypassModeDialog.tsx
-src/core/StreamingToolExecutor.ts
 src/cli/ui/ask-user/AskUserQuestionView.tsx
 src/cli/ui/ask-user/QuestionView.tsx
 src/cli/ui/ask-user/SubmitQuestionsView.tsx
@@ -242,7 +226,7 @@ src/cli/ui/CommandOptionSelect.tsx
 src/cli/commands/config/ConfigView.tsx
 src/cli/commands/help/HelpView.tsx
 
-# 阶段 6：补充交互（约 29 个）
+# 阶段 5：补充交互（约 29 个）
 src/cli/ui/permissions/BashPermissionRequest.tsx
 src/cli/ui/permissions/FileEditPermissionRequest.tsx
 src/cli/ui/permissions/FilesystemPermissionRequest.tsx
@@ -274,14 +258,12 @@ src/cli/ui/agents/AgentEditor.tsx
 src/cli/ui/agents/CreateAgentWizard.tsx
 ```
 
-### 修改文件（9 个）
+### 修改文件（6 个）
 ```
-src/cli/ui/App.tsx              — 主要重构：引入 store、VirtualMessageList、FullscreenLayout、AskUserQuestionView
+src/cli/ui/App.tsx              — 主要重构：引入 store、FullscreenLayout、AskUserQuestionView
 src/cli/ui/PromptInput.tsx      — 添加 Vim 模式、粘贴折叠、命令补全
 src/cli/ui/CommandHint.tsx      — 添加模糊匹配、导航
 src/cli/ui/MessageCard.tsx      — 逐步废弃，兼容保留
-src/core/QueryEngine.ts         — 添加流式工具执行
-src/core/ToolScheduler.ts       — 添加流式调度
 src/core/PermissionManager.ts   — 添加 shouldDefer 工具识别 + interactiveHandler
 src/tools/AskUserTool.ts        — 扩展多问题 schema + 向后兼容
 src/modes/interactiveMode.ts    — 更新 App 结构
@@ -294,7 +276,6 @@ refercode/.../state/store.ts
 refercode/.../components/PromptInput/PromptInput.tsx
 refercode/.../components/PromptInput/inputPaste.ts
 refercode/.../components/FullscreenLayout.tsx
-refercode/.../services/tools/StreamingToolExecutor.ts
 refercode/.../components/MessageRow.tsx
 refercode/.../components/Messages.tsx
 refercode/.../components/FileEditToolDiff.tsx
@@ -363,20 +344,16 @@ refercode/.../components/agents/
 
 **虚拟滚动**：✅ 已实现（scroll-store.ts + CardStream.tsx）
 
-**流式工具执行**：
-- QueryEngine.send() 保持不变（向后兼容）
-- 新增 sendStreaming() yield 工具调用
-- StreamingToolExecutor 接收增量工具调用
-- 复用现有 ToolRegistry.dispatch() 执行
+**流式工具执行**：→ 独立计划 `docs/plans/streaming-tool-executor.md`
 
 **状态管理迁移**：
 - 渐进式：先新建 Store，再逐步迁移 useState
 - 保留简单场景的 useState
 - Store + React Context 双重注入
 
-### 阶段 6：补充交互系统
+### 阶段 5：补充交互系统
 
-#### 6.1 工具特定权限 UI（按需实现）
+#### 5.1 工具特定权限 UI（按需实现）
 - **新建** `src/cli/ui/permissions/BashPermissionRequest.tsx` — 命令展示 + 破坏性警告
 - **新建** `src/cli/ui/permissions/FileEditPermissionRequest.tsx` — Diff 预览
 - **新建** `src/cli/ui/permissions/FilesystemPermissionRequest.tsx` — 只读工具权限
@@ -384,32 +361,32 @@ refercode/.../components/agents/
 - 其他工具权限 UI 按需扩展
 - 参考：`refercode/.../components/permissions/` 目录
 
-#### 6.2 错误与中断处理
+#### 5.2 错误与中断处理
 - **新建** `src/cli/ui/InterruptedByUser.tsx` — 中断提示："What should Claude do instead?"
 - **新建** `src/cli/ui/ToolErrorMessage.tsx` — 工具错误展示（截断 + 详细模式切换）
 - **新建** `src/cli/ui/ToolCanceledMessage.tsx` — 工具取消消息
 - **修改** `src/cli/ui/App.tsx` — 集成 Ctrl+C 双击退出逻辑
 - 参考：`refercode/.../components/InterruptedByUser.tsx`、`FallbackToolUseErrorMessage.tsx`
 
-#### 6.3 文件引用与快速打开
+#### 5.3 文件引用与快速打开
 - **新建** `src/cli/ui/QuickOpenDialog.tsx` — Ctrl+Shift+P 模糊文件查找 + 语法高亮预览
 - **新建** `src/cli/ui/GlobalSearchDialog.tsx` — Ctrl+Shift+F ripgrep 搜索 + 上下文预览
 - **新建** `src/cli/ui/FuzzyPicker.tsx` — 通用模糊搜索组件（被 QuickOpen/GlobalSearch/HistorySearch 复用）
 - **修改** `src/cli/ui/PromptInput.tsx` — 支持 @file 引用解析
 - 参考：`refercode/.../components/QuickOpenDialog.tsx`、`GlobalSearchDialog.tsx`
 
-#### 6.4 模型切换
+#### 5.4 模型切换
 - **新建** `src/cli/ui/ModelPicker.tsx` — 模型选择列表 + Effort 级别切换 + Fast 模式
 - **修改** `src/cli/ui/App.tsx` — /model 命令触发 ModelPicker
 - 参考：`refercode/.../components/ModelPicker.tsx`
 
-#### 6.5 会话管理
+#### 5.5 会话管理
 - **新建** `src/cli/ui/ResumeSession.tsx` — 会话恢复列表（按仓库过滤 + 相对时间）
 - **新建** `src/cli/ui/HistorySearch.tsx` — Ctrl+R 历史搜索 + FuzzyPicker
 - **新建** `src/cli/ui/SessionPreview.tsx` — 会话日志预览
 - 参考：`refercode/.../components/ResumeTask.tsx`、`HistorySearchDialog.tsx`
 
-#### 6.6 对话框基础组件（Design System）
+#### 5.6 对话框基础组件（Design System）
 - **新建** `src/cli/ui/design-system/Dialog.tsx` — 基础对话框（Ctrl+CD 退出 + overlay 注册）
 - **新建** `src/cli/ui/design-system/Select.tsx` — 选择列表（键盘导航）
 - **新建** `src/cli/ui/design-system/Tabs.tsx` — Tab 导航
@@ -417,19 +394,19 @@ refercode/.../components/agents/
 - **新建** `src/cli/ui/design-system/LoadingState.tsx` — 加载指示器
 - 参考：`refercode/.../components/design-system/`
 
-#### 6.7 任务系统（后台任务）
+#### 5.7 任务系统（后台任务）
 - **新建** `src/cli/ui/tasks/BackgroundTasksDialog.tsx` — 后台任务列表（列表/详情视图）
 - **新建** `src/cli/ui/tasks/TaskProgress.tsx` — 任务进度展示（Shell/Agent 不同样式）
 - **新建** `src/cli/ui/tasks/TaskStatusIcon.tsx` — 状态图标（play/tick/cross/warning）
 - 参考：`refercode/.../components/tasks/`
 
-#### 6.8 成本与上下文
+#### 5.8 成本与上下文
 - **新建** `src/cli/ui/CostThresholdDialog.tsx` — 成本警告（$5 阈值通知）
 - **新建** `src/cli/ui/ContextVisualization.tsx` — 上下文使用率可视化
 - **新建** `src/cli/ui/ContextSuggestions.tsx` — 上下文优化建议
 - 参考：`refercode/.../components/CostThresholdDialog.tsx`、`ContextVisualization.tsx`
 
-#### 6.9 Agent 管理
+#### 5.9 Agent 管理
 - **新建** `src/cli/ui/agents/AgentsMenu.tsx` — Agent 管理主菜单
 - **新建** `src/cli/ui/agents/AgentDetail.tsx` — Agent 详情
 - **新建** `src/cli/ui/agents/AgentEditor.tsx` — Agent 配置编辑器

@@ -400,6 +400,13 @@ export class ConversationStore {
     this.savedEventCount = this.eventLog.length
   }
 
+  /** 替换存储后端并重新加载事件（用于延迟初始化和会话切换） */
+  switchStorage(sessionDir: string): void {
+    this.storage = new JsonlEventStorage(sessionDir)
+    this.eventLog = this.storage.loadEvents()
+    this.savedEventCount = this.eventLog.length
+  }
+
   /** 增量保存新事件到磁盘 */
   saveToDisk(): void {
     if (!this.storage) return

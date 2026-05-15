@@ -20,7 +20,7 @@ import { resetEmbeddingProvider, migrateOldMemoryStore } from './memory/index.js
 import { logger } from './core/logger.js'
 
 import { setupProvider } from './bootstrap/setupProvider.js'
-import { setupSession } from './bootstrap/setupSession.js'
+import { prepareSession, initSessionStorage } from './bootstrap/setupSession.js'
 import { runGatewayMode } from './modes/gatewayMode.js'
 import { runPrintMode } from './modes/printMode.js'
 import { runServerMode } from './modes/serverMode.js'
@@ -197,8 +197,8 @@ async function main() {
         })
       }
 
-      // 初始化会话和工作目录
-      const { sessionId, store, initialCwd } = await setupSession({
+      // 初始化会话 ID 和工作目录（不创建会话存储，首次提问时才创建）
+      const { sessionId, initialCwd } = prepareSession({
         resume: opts.resume,
         newSession: opts.newSession,
         cwd: opts.cwd,
@@ -282,6 +282,7 @@ async function main() {
       const systemPrompt = await buildSystemContext(initialPrompt)
 
       const registry = new ToolRegistry().registerAll(tools)
+      // 不传 store，首次提问时才初始化会话存储
       const engine = new QueryEngine({
         provider,
         systemPrompt,
@@ -291,7 +292,9 @@ async function main() {
         maxTurns: config.agent?.maxTurns,
         maxBudgetUsd: config.agent?.maxBudgetUsd,
         autoCompactThreshold: config.agent?.autoCompactThreshold,
-      }, store)
+      })
+
+      const initSession = (sid: string) => initSessionStorage(engine, sid)
 
       // 根据用户消息动态更新 systemPrompt（按任务类型注入扩展块）
       const buildPromptForMessage = async (msg: string): Promise<void> => {
@@ -313,6 +316,7 @@ async function main() {
         memoryCondense,
         skillDistill,
         buildPromptForMessage,
+        initSession,
       }
 
       // 非交互模式（-p）

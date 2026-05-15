@@ -98,9 +98,6 @@ export class SessionManager {
     // 确定会话工作目录：优先使用请求中指定的 cwd，resume 时沿用原会话目录，否则新建独立目录
     const sessionCwd = req.cwd ?? resumeMeta?.workDir ?? getSessionWorkDirPath(sessionId)
 
-    log.info('创建会话', { sessionId, model, autoMode: req.autoMode, cwd: sessionCwd })
-    auditLog({ sessionId, action: 'session_create', resource: sessionId, result: 'allowed', details: { model } })
-
     // 创建 LLM 提供商
     // 若请求显式指定了 model/provider/apiKey，则用 createProvider 精确创建；
     // 否则走 config.yaml 的 llm.fallbacks / model 多模型 fallback 配置
@@ -114,10 +111,14 @@ export class SessionManager {
         })
       : createProviderFromConfig(agentConfig)
 
-    // 权限管理：permissionMode 优先；否则读全局配置
+        // 权限管理：permissionMode 优先；否则读全局配置
     const permMode = req.permissionMode ?? agentConfig.agent?.permissionMode ?? 'ask'
     // 使用 provider 的实际模型名（createProviderFromEnv 时 model 变量可能是旧默认值）
     const actualModel = provider.model
+
+    log.info('创建会话', { sessionId, model, permMode: permMode, cwd: sessionCwd })
+    auditLog({ sessionId, action: 'session_create', resource: sessionId, result: 'allowed', details: { model } })
+
     const session: ManagedSession = {
       info: {
         id: sessionId,

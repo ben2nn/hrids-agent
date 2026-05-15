@@ -5,6 +5,7 @@ import { getConfigDir } from '../core/Config.js'
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../core/cwd.js'
 import { ConversationStore, JsonlEventStorage } from '../core/ConversationStore.js'
+import type { QueryEngine } from '../core/QueryEngine.js'
 
 export interface SessionSetupResult {
   sessionId: string
@@ -65,4 +66,19 @@ export async function setupSession(opts: SessionSetupOpts): Promise<SessionSetup
   setGlobalCwd(initialCwd)
 
   return { sessionId, store, initialCwd }
+}
+
+// ── 延迟会话创建 ──────────────────────────────────────────────────
+// 启动时不创建会话存储，第一次提问时才初始化
+
+export function prepareSession(opts: SessionSetupOpts): { sessionId: string; initialCwd: string } {
+  const sessionId = opts.resume ?? generateSessionId()
+  const initialCwd = opts.cwd ?? opts.agentCwd ?? process.cwd()
+  setGlobalCwd(initialCwd)
+  return { sessionId, initialCwd }
+}
+
+export function initSessionStorage(engine: QueryEngine, sessionId: string): void {
+  const sessionDir = join(getConfigDir(), 'sessions', sessionId)
+  engine.store.switchStorage(sessionDir)
 }

@@ -1,7 +1,7 @@
 ﻿import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { Box, Text, useApp, useInput, measureElement } from 'ink'
 import type { DOMElement } from 'ink'
-import { SplashScreen } from './SplashScreen.js'
+// SplashScreen 由 CardStream 内部根据 role='splash' 渲染
 import { CommandHint } from './CommandHint.js'
 import { FileHint } from './FileHint.js'
 import { PromptInput } from './PromptInput.js'
@@ -18,6 +18,7 @@ import type { CommandContext } from '../../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../../tools/ScheduleCronTool.js'
 import type { CronJob } from '../../tools/ScheduleCronTool.js'
 import { listSessions, loadSessionEvents, generateSessionId, archiveSession, listArchives } from '../../core/SessionStore.js'
+import { projectForDisplay } from '../../core/projections.js'
 import { getSessionWorkDirPath } from '../../core/ContextBuilder.js'
 import { setGlobalCwd } from '../../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../../tools/AskUserTool.js'
@@ -34,9 +35,11 @@ interface Props {
   getProviderName?: () => { name: string; model: string }
   // 可选：stderr 拦截回调注册（由 interactiveMode 注入，将 stderr 输出显示为系统消息）
   onStderrReady?: (callback: (text: string) => void) => void
+  // 可选：首次提问时延迟初始化会话存储（传入当前 sessionId）
+  onFirstMessage?: (sessionId: string) => void
 }
 
-type MsgRole = 'user' | 'assistant' | 'tool' | 'system' | 'error'
+type MsgRole = 'user' | 'assistant' | 'tool' | 'system' | 'error' | 'splash'
 
 interface CostInfo {
   inputTokens: number
@@ -49,16 +52,19 @@ interface DisplayMsg {
   role: MsgRole
   text: string
   color?: string   // 可选颜色覆盖（用于黄色 system 消息等）
+  splashProps?: { version: string; model: string; providerName: string; projectPath: string }
 }
 
-export function App({ engine, commands, sessionId: initialSessionId, onModelChange, currentModel, providerName, getProviderName, onStderrReady }: Props) {
+export function App({ engine, commands, sessionId: initialSessionId, onModelChange, currentModel, providerName, getProviderName, onStderrReady, onFirstMessage }: Props) {
   const { exit } = useApp()
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState(initialSessionId)
   const sessionIdRef = useRef(initialSessionId)
   const [msgs, setMsgs] = useState<DisplayMsg[]>([
-    { role: 'system', text: `会话已启动 (${initialSessionId})  输入 /help 查看命令` },
+    { id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: currentModel, providerName, projectPath: process.cwd() } },
+    { role: 'system', text: '输入 /help 查看命令' },
   ])
+  const sessionReadyRef = useRef(false)
   const [loading, setLoading] = useState(false)
   const [streamBuf, setStreamBuf] = useState('')   // 当前流式文本缓冲
   const [toolProgress, setToolProgress] = useState('')  // 工具执行中的临时日志，不写入 msgs
@@ -71,6 +77,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [showFileHint, setShowFileHint] = useState(false)
   const [fileFilter, setFileFilter] = useState('')
   const [stderrOutput, setStderrOutput] = useState('')
+  const [statusBarContent, setStatusBarContent] = useState('')
   const idCounterRef = useRef(0)
   const store = useScrollStore()
   const { rows: termRows, cols: termCols } = useTerminalSize()
@@ -111,7 +118,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     setStreamBuf('')
     let assistantText = ''
     try {
-      for await (const ev of engine.send(prompt)) {
+      for await (const ev of engine.sendStreaming(prompt)) {
         switch (ev.type) {
           case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
           case 'tool_start':
@@ -259,10 +266,15 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       engine.clearHistory()
       setSessionId(newId)
       sessionIdRef.current = newId
+      sessionReadyRef.current = false  // 重置，下次发送时重新初始化存储
       const newWorkDir = getSessionWorkDirPath(newId)
       setGlobalCwd(newWorkDir)
       try { process.chdir(newWorkDir) } catch { /* 忽略 */ }
-      push({ role: 'system', text: `已创建新会话 (${newId})\n工作目录: ${newWorkDir}` })
+      setMsgs([
+        { id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: modelRef.current, providerName: displayProvider, projectPath: newWorkDir } },
+        { role: 'system', text: `已创建新会话 (${newId})\n工作目录: ${newWorkDir}` },
+      ])
+      store.scrollToBottom()
     },
     switchSession: (id: string) => {
       const events = loadSessionEvents(id)
@@ -270,7 +282,23 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       engine.store.replaceEvents(events)
       setSessionId(id)
       sessionIdRef.current = id
-      push({ role: 'system', text: `已切换到会话 ${id}（${events.length} 条事件）` })
+      sessionReadyRef.current = false  // 重置，下次发送时重新初始化存储
+
+      // 清空当前消息，载入历史会话内容
+      const displayMsgs = projectForDisplay(events)
+      const converted: DisplayMsg[] = displayMsgs.map((dm, i) => ({
+        id: `hist-${i}`,
+        role: dm.role,
+        text: dm.content,
+      }))
+      setMsgs([
+        { id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: modelRef.current, providerName: displayProvider, projectPath: process.cwd() } },
+        { role: 'system', text: `已载入会话 ${id.slice(0, 12)}（${events.length} 条事件）载入成功` },
+        ...converted,
+      ])
+
+      // 重置滚动状态：锁定到底部，恢复输入框
+      store.scrollToBottom()
       return true
     },
     getAvailableModels: () => {
@@ -373,6 +401,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       const result = await cmd.execute(parsed.args, cmdCtx)
       if (result.type === 'exit') { exit(); return }
       if (result.type === 'message') { push({ role: 'system', text: result.text }); return }
+      if (result.type === 'status') { setStatusBarContent(result.text); return }
       if (result.type === 'noop') return
 
       // inject：将 skill prompt 作为用户消息发给 LLM
@@ -384,10 +413,17 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       return
     }
 
+    // 首次提问时延迟初始化会话存储
+    if (!sessionReadyRef.current) {
+      sessionReadyRef.current = true
+      onFirstMessage?.(sessionIdRef.current)
+      push({ role: 'system', text: `会话已启动 (${sessionIdRef.current})` })
+    }
+
     // 普通消息 → 发给 LLM
     push({ role: 'user', text })
     await runEngine(text)
-  }, [commands, engine, push, exit, cmdCtx])
+  }, [commands, engine, push, exit, cmdCtx, onFirstMessage])
 
   // Ctrl+C 通过 useKeystroke 处理（走 StdinReader 链路）
   useKeystroke((key) => {
@@ -429,17 +465,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
-      {/* 可滚动区域：SplashScreen + 消息历史 */}
-      <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
-        <SplashScreen
-          version="1.0.0"
-          model={modelRef.current}
-          providerName={displayProvider}
-          projectPath={process.cwd()}
+      {/* 可滚动区域：消息历史（含 SplashScreen） */}
+      <Box ref={streamRef} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+        <CardStream
+          key={sessionId}
+          msgs={msgs}
+          viewportHeight={streamHeight}
+          cols={termCols}
         />
-        <Box ref={streamRef} flexGrow={1} flexShrink={1} minHeight={0}>
-          <CardStream msgs={msgs} viewportHeight={streamHeight} cols={termCols} />
-        </Box>
       </Box>
 
       {/* 工具执行中的临时进度日志（tool_end 后自动清空，不留在历史里） */}
@@ -534,29 +567,32 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
       {/* 底部状态栏 */}
       <Box marginTop={0}>
-        <Text color={FG.faint}>{'─'.repeat(60)}</Text>
+        <Text color={FG.faint}>{'─'.repeat(90)}</Text>
       </Box>
       <Box marginTop={0}>
         <Text color={FG.meta}>
+          <Text color={FG.faint}>会话: </Text>
+          <Text color={TONE.accent}>{sessionIdRef.current}</Text>
+           {msgs.length > 1 && (
+            <>
+              <Text color={FG.faint}> · </Text>
+              <Text>{msgs.length} 消息</Text>
+            </>
+          )}
+          <Text color={FG.faint}> | </Text>
           {displayProvider}
           <Text color={FG.faint}> · </Text>
           <Text color={TONE.brand}>{modelRef.current}</Text>
           {costInfo && (
             <>
-              <Text color={FG.faint}> · </Text>
+              <Text color={FG.faint}> | </Text>
               <Text color={TONE.accent}>▸ ${costInfo.costUsd.toFixed(4)}</Text>
               <Text color={FG.faint}> · </Text>
               <Text>{costInfo.inputTokens.toLocaleString()} in / {costInfo.outputTokens.toLocaleString()} out</Text>
             </>
           )}
-          <Text color={FG.faint}> · </Text>
+          <Text color={FG.faint}> | </Text>
           <Text color={loading ? TONE.warn : FG.faint}>{loading ? '◐ Ctrl+C 中断' : 'Ctrl+C 退出'}</Text>
-          {msgs.length > 1 && (
-            <>
-              <Text color={FG.faint}> · </Text>
-              <Text>{msgs.length} msgs</Text>
-            </>
-          )}
         </Text>
       </Box>
 
@@ -564,6 +600,15 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       {stderrOutput && (
         <Box marginTop={0}>
           <Text color={FG.faint}>⚠ {stderrOutput}</Text>
+        </Box>
+      )}
+
+      {/* 状态栏下方的交互信息（如 /sessions 列表） */}
+      {statusBarContent && (
+        <Box flexDirection="column" marginTop={0}>
+          {statusBarContent.split('\n').map((line, i) => (
+            <Text key={i} color={FG.sub}>{line}</Text>
+          ))}
         </Box>
       )}
     </Box>

@@ -15,7 +15,7 @@ import { TeamManager } from '../../core/coordinator/TeamManager.js'
 import { migrateOldMemoryStore } from '../../memory/index.js'
 import { logger } from '../../core/logger.js'
 import { setupProvider } from '../../bootstrap/setupProvider.js'
-import { setupSession } from '../../bootstrap/setupSession.js'
+import { prepareSession, initSessionStorage } from '../../bootstrap/setupSession.js'
 import type { LLMProvider } from '../../core/providers/index.js'
 import type { ConversationStore } from '../../core/ConversationStore.js'
 
@@ -36,6 +36,8 @@ export interface InitResult {
   initialCwd: string
   model: string
   buildPromptForMessage: (msg: string) => Promise<void>
+  /** 延迟初始化会话存储（首次提问时调用，传入当前 sessionId） */
+  initSession: (sessionId: string) => void
 }
 
 export function fallbackStatusHandler(event: { type: string; provider: string; model: string; delayMs?: number; reason?: string }) {
@@ -83,7 +85,7 @@ export async function initCli(opts: BaseCliOpts & {
     })
   }
 
-  const { sessionId, store, initialCwd } = await setupSession({
+  const { sessionId, initialCwd } = prepareSession({
     resume: opts.resume,
     newSession: opts.newSession,
     cwd: opts.cwd,
@@ -141,11 +143,14 @@ export async function initCli(opts: BaseCliOpts & {
   const systemPrompt = await buildSystemContext(initialPrompt)
 
   const registry = new ToolRegistry().registerAll(tools)
+  // 不传 store，首次提问时才初始化会话存储
   const engine = new QueryEngine({
     provider, systemPrompt, registry, permissions,
     maxTokens: config.agent?.maxTokens, maxTurns: config.agent?.maxTurns,
     maxBudgetUsd: config.agent?.maxBudgetUsd, autoCompactThreshold: config.agent?.autoCompactThreshold,
-  }, store)
+  })
+
+  const initSession = (sid: string) => initSessionStorage(engine, sid)
 
   const buildPromptForMessage = async (msg: string): Promise<void> => {
     const types = classifyTask(msg)
@@ -155,5 +160,5 @@ export async function initCli(opts: BaseCliOpts & {
     engine.setSystemPrompt(fullPrompt)
   }
 
-  return { config, provider, engine, sessionId, store, initialCwd, model, buildPromptForMessage }
+  return { config, provider, engine, sessionId, store: engine.store, initialCwd, model, buildPromptForMessage, initSession }
 }

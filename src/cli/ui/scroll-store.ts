@@ -241,13 +241,14 @@ export function createScrollStore(): ScrollStore {
       // 4. 找 startIndex：从顶部累加高度，找到 scrollOffset 落在哪张卡片
       let cursor = 0
       let startIndex = 0
+      const lastIdx = heights.length - 1
       for (let i = 0; i < heights.length; i++) {
         if (cursor + heights[i] > scrollOffset) {
           startIndex = i
           break
         }
         cursor += heights[i]
-        startIndex = i + 1
+        startIndex = Math.min(i + 1, lastIdx)
       }
 
       // 5. topSpacer：startIndex 之前所有卡片的总高度
@@ -258,11 +259,13 @@ export function createScrollStore(): ScrollStore {
 
       // 7. 找 endIndex：从 startIndex 累加直到填满 viewportHeight
       let accum = 0
-      let endIndex = startIndex
+      let endIndex = startIndex + 1
       for (let i = startIndex; i < heights.length; i++) {
         accum += heights[i]
-        endIndex = i + 1
-        if (accum >= viewportHeight) break
+        if (accum >= viewportHeight) {
+          endIndex = i + 1
+          break
+        }
       }
 
       // 8. overscan：上下各多渲染几张卡片，避免滚动时白屏

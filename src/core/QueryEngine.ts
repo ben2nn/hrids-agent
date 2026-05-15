@@ -1132,6 +1132,444 @@ ${contentToSummarize}
     }
   }
 
+  // ── 流式工具执行核心（不含 store 写入）────────────────────────────────────
+  // 与 executeOneTool 相同的逻辑，但不写入 ConversationStore（由调用方控制写入时机）
+  private async *executeOneToolCore(
+    tc: { id: string; name: string; input: unknown },
+  ): AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: ContentBlock }> {
+    const startTime = Date.now()
+    let execStatus: 'success' | 'error' | 'denied' | 'aborted' = 'success'
+    let outputPreview: string | undefined
+    let errorSummary: string | undefined
+    const logQueue: string[] = []
+    const onLog = (line: string) => { logQueue.push(line) }
+
+    try {
+      const prepared = await this.validateAndPrepareTool(tc)
+      for (const ev of prepared.events) yield ev
+
+      if (!prepared.ok) {
+        execStatus = prepared.execStatus
+        errorSummary = prepared.errorSummary
+        yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: prepared.resultContent, is_error: true } }
+        return
+      }
+
+      const { tool, effectiveInput } = prepared
+
+      const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
+      const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
+        ? inputTimeout + 5000
+        : 60 * 60 * 1000
+
+      const toolPromise: Promise<ToolResult> = tool.execute(effectiveInput as never, { onLog })
+        .then(r => r)
+        .catch((e: unknown) => ({
+          type: 'error' as const,
+          message: `工具执行异常 [${tc.name}]: ${e instanceof Error ? e.message : String(e)}`,
+        }))
+
+      const timeoutPromise: Promise<ToolResult> = new Promise(resolve =>
+        setTimeout(() => resolve({ type: 'error', message: `工具执行超时（超过 ${TOOL_TIMEOUT_MS / 1000}s）：${tc.name}` }), TOOL_TIMEOUT_MS))
+
+      let abortListener: (() => void) | undefined
+      const abortPromise: Promise<ToolResult> = new Promise(resolve => {
+        abortListener = () => resolve({ type: 'error', message: '任务已被中止' })
+        this.abortController.signal.addEventListener('abort', abortListener, { once: true })
+      })
+
+      const racePromise = Promise.race([toolPromise, timeoutPromise, abortPromise])
+
+      let finalResult: ToolResult | undefined = undefined
+      while (true) {
+        const raceOrTick = await Promise.race([
+          racePromise,
+          new Promise<'tick'>(r => setTimeout(() => r('tick'), 30)),
+        ])
+        while (logQueue.length > 0) {
+          yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
+        }
+        if (raceOrTick !== 'tick') {
+          finalResult = raceOrTick
+          break
+        }
+      }
+
+      if (abortListener) {
+        this.abortController.signal.removeEventListener('abort', abortListener)
+      }
+
+      while (logQueue.length > 0) {
+        yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
+      }
+
+      if (this.abortController.signal.aborted) {
+        execStatus = 'aborted'
+        errorSummary = '任务已被中止'
+        this.store.markToolCallPruned(tc.id)
+        yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: '任务已被中止' } }
+        return
+      }
+
+      yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult }
+      log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type })
+
+      const post = this.postExecution(tc, tool, finalResult)
+      outputPreview = post.outputPreview
+      yield { type: '__tool_result__', block: post.block }
+
+    } finally {
+      this.store.appendEvents(createToolExecutionEvent(
+        tc.id, tc.name, Date.now() - startTime, execStatus,
+        this.currentRequestId ?? undefined, outputPreview, errorSummary,
+      ))
+    }
+  }
+
+  // ── 流式工具执行版 send ─────────────────────────────────────────────────
+  // 与 send() 相同的语义，但工具在 LLM 流式输出期间立即开始执行（不等 LLM 结束）
+  async *sendStreaming(userMessage: string | Message): AsyncGenerator<StreamEvent> {
+    if (this.running) {
+      log.warn('并发保护触发：上一个任务仍在执行中', { historyLength: this.store.getEventCount() })
+      yield { type: 'error', message: '上一个任务仍在执行中，请等待完成后再发送新消息' }
+      return
+    }
+    this.running = true
+    this.abortController = new AbortController()
+
+    const requestStartTime = Date.now()
+    this.costs.reset()
+    const costBefore = this.costs.getCostUsd()
+    const usageBefore = this.costs.getUsage()
+    let exitStatus: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied' = 'completed'
+    this.totalToolCalls = 0
+    this.stormBreaker.reset()
+    let errorMessage: string | undefined
+
+    const msgText = typeof userMessage === 'string'
+      ? userMessage
+      : (Array.isArray((userMessage as Message).content)
+          ? ((userMessage as Message).content as ContentBlock[])
+              .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+              .map(b => b.text).join('')
+          : String((userMessage as Message).content))
+    if (this.onBeforeSend) {
+      try { await this.onBeforeSend(msgText) } catch { /* 钩子失败不阻断执行 */ }
+    }
+
+    let processedContent: string | ContentBlock[] = typeof userMessage === 'string' ? userMessage : (userMessage as Message).content
+    if (typeof processedContent === 'string' && this.config.sessionCwd) {
+      try {
+        processedContent = await this.preprocessUserMessage(processedContent)
+      } catch (err) {
+        log.warn('图片预处理失败', { error: String(err) })
+      }
+    }
+    const hasImageBlocks = Array.isArray(processedContent) &&
+      (processedContent as ContentBlock[]).some(b => b.type === 'image')
+
+    const originalText = typeof userMessage === 'string' ? userMessage : msgText
+
+    if (hasImageBlocks) {
+      this.store.setLatestPreprocessed(
+        Array.isArray(processedContent) ? processedContent as ContentBlock[] : null,
+      )
+    }
+
+    this.store.appendEvents(createUserMessageEvent(
+      originalText,
+      this.currentRequestId ?? undefined,
+      this.currentTrigger,
+      this.currentCronDescription,
+    ))
+
+    if (this.activeTodoSnapshot === null) {
+      try {
+        const existing = loadTodos()
+        if (existing.length > 0) {
+          this.activeTodoSnapshot = existing
+          log.debug('任务快照预热：从磁盘读取到已有任务', { count: existing.length })
+        }
+      } catch {
+        // 读取失败不影响主流程，快照保持 null
+      }
+    }
+
+    const isCraftMode = this.config.permissions.getMode() === 'craft'
+    const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? 50)
+
+    log.debug('sendStreaming 开始', { eventCount: this.store.getEventCount(), estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
+
+    const maxBudgetUsd = this.config.maxBudgetUsd
+    const autoCompactThreshold = this.config.autoCompactThreshold ?? 100000
+    let turns = 0
+    let lastKnownInputTokens = 0
+    let maxOutputTokensRecoveryCount = 0
+
+    // ── 事件队列（工具执行 → 主循环）────────────────────────
+    type QueueItem = { event: StreamEvent } | { done: true; toolCallId: string; result?: ContentBlock }
+    let queueResolve: (() => void) | null = null
+    const eventQueue: QueueItem[] = []
+    const waitQueue = (): Promise<void> => new Promise<void>(resolve => { queueResolve = resolve })
+    const pushQueue = (item: QueueItem): void => {
+      eventQueue.push(item)
+      if (queueResolve) { queueResolve(); queueResolve = null }
+    }
+    const drainQueue = (): QueueItem[] => {
+      const items = [...eventQueue]
+      eventQueue.length = 0
+      return items
+    }
+
+    try {
+      while (turns < maxTurns) {
+        if (this.abortController.signal.aborted) {
+          exitStatus = 'aborted'
+          break
+        }
+        turns++
+
+        log.debug(`第 ${turns} 轮开始（流式）`, {
+          eventCount: this.store.getEventCount(),
+          estimatedTokens: this.getEstimatedTokens(),
+          lastKnownInputTokens,
+          maxTurns: isCraftMode ? 'unlimited' : maxTurns,
+        })
+
+        // 成本预算检查
+        if (maxBudgetUsd !== undefined && this.costs.getCostUsd() >= maxBudgetUsd) {
+          exitStatus = 'budget_exceeded'
+          yield { type: 'budget_exceeded', costUsd: this.costs.getCostUsd(), limitUsd: maxBudgetUsd }
+          break
+        }
+
+        // autocompact
+        const tokenCount = lastKnownInputTokens > 0
+          ? lastKnownInputTokens
+          : this.getEstimatedTokens()
+        const latestHasImage = this.store.getLatestPreprocessed() !== null
+        const absoluteMaxTokens = autoCompactThreshold * 3
+        if ((!latestHasImage && tokenCount > autoCompactThreshold) || tokenCount > absoluteMaxTokens) {
+          yield { type: 'compact_start' }
+          const summary = await this.generateCompactSummary()
+          if (this.onBeforeCompact) {
+            try { await this.onBeforeCompact(summary) } catch { /* 归档失败不阻断压缩 */ }
+          }
+          this.compactHistory(summary)
+          lastKnownInputTokens = 0
+          yield { type: 'compact_done', summary }
+        }
+
+        // ── 流式调用 LLM，同时立即执行工具 ────────────────────
+        let fullText = ''
+        let thinkingText = ''
+        const toolCalls: Array<{ id: string; name: string; input: unknown }> = []
+        let hitMaxOutputTokens = false
+        let llmError = false
+
+        const inFlight = new Map<string, { resolve: (block?: ContentBlock) => void }>()
+
+        const isPlanMode = this.config.permissions.getMode() === 'plan'
+        const toolsForLLM = this.chatMode
+          ? []
+          : this.config.registry.getToolsForLLM(isPlanMode)
+
+        try {
+          const liveTodo = buildLiveTodoContext(this.activeTodoSnapshot)
+          const systemPromptForThisTurn = liveTodo
+            ? [...this.config.systemPrompt, liveTodo]
+            : this.config.systemPrompt
+
+          const rawMessages = projectForLLM(this.store.getEventLog(), {
+            latestPreprocessed: this.store.getLatestPreprocessed(),
+            prunedToolCallIds: this.store.getPrunedToolCallIds(),
+          })
+
+          const { messages: afterOldPrune, prunedIds: oldPruned } = pruneOldToolResults(rawMessages)
+          const { messages: afterBudget, prunedIds: budgetPruned } = applyToolResultBudget(afterOldPrune)
+          const projectedMessages = pruneOldImageBlocks(afterBudget)
+
+          for (const id of oldPruned) this.store.markToolCallPruned(id)
+          for (const id of budgetPruned) this.store.markToolCallPruned(id)
+
+          for await (const chunk of this.config.provider.stream(
+            projectedMessages,
+            toolsForLLM,
+            systemPromptForThisTurn,
+            this.config.maxTokens ?? 8096,
+            this.abortController.signal,
+          )) {
+            if (this.abortController.signal.aborted) break
+
+            if (chunk.type === 'thinking_delta' && chunk.delta) {
+              thinkingText += chunk.delta
+            } else if (chunk.type === 'text_delta' && chunk.delta) {
+              fullText += chunk.delta
+              yield { type: 'text_delta', delta: chunk.delta }
+            } else if (chunk.type === 'tool_call' && chunk.toolCall) {
+              toolCalls.push(chunk.toolCall)
+              // ★ 关键：立即启动工具执行（不等 LLM 流结束）
+              const tc = chunk.toolCall
+              let resolveRef: (block?: ContentBlock) => void = () => {}
+              inFlight.set(tc.id, { resolve: (block) => resolveRef(block) })
+              void (async () => {
+                let resultBlock: ContentBlock | undefined
+                try {
+                  for await (const ev of this.executeOneToolCore(tc)) {
+                    if ('type' in ev && ev.type === '__tool_result__') {
+                      resultBlock = ev.block
+                    } else {
+                      pushQueue({ event: ev as StreamEvent })
+                    }
+                  }
+                } catch { /* 工具执行异常 */ }
+                pushQueue({ done: true, toolCallId: tc.id, result: resultBlock })
+              })()
+            } else if (chunk.type === 'usage' && chunk.usage) {
+              this.costs.add({
+                inputTokens: chunk.usage.inputTokens,
+                outputTokens: chunk.usage.outputTokens,
+                cacheReadTokens: chunk.usage.cacheReadTokens ?? 0,
+                cacheWriteTokens: chunk.usage.cacheWriteTokens ?? 0,
+              })
+              const costUsd = this.costs.getCostUsd()
+              yield {
+                type: 'usage',
+                inputTokens: chunk.usage.inputTokens,
+                outputTokens: chunk.usage.outputTokens,
+                costUsd,
+              }
+              if (maxBudgetUsd !== undefined && costUsd >= maxBudgetUsd) {
+                yield { type: 'budget_exceeded', costUsd, limitUsd: maxBudgetUsd }
+                exitStatus = 'budget_exceeded'
+                break
+              }
+            } else if (chunk.type === 'stop_reason' && chunk.stopReason === 'max_tokens') {
+              hitMaxOutputTokens = true
+            }
+
+            // 交错：有工具事件就先 yield
+            for (const item of drainQueue()) {
+              if ('event' in item) yield item.event
+              if ('done' in item) {
+                inFlight.get(item.toolCallId)?.resolve(item.result)
+                inFlight.delete(item.toolCallId)
+              }
+            }
+          }
+        } catch (err) {
+          const errMsg = String(err)
+          log.error('LLM 请求失败', { turn: turns, error: errMsg })
+          yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` }
+          yield { type: 'error', message: errMsg }
+          if (!this.abortController.signal.aborted) {
+            this.store.appendEvents(createSystemEvent(
+              'error_recovery',
+              `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。`,
+              this.currentRequestId ?? undefined,
+            ))
+          }
+          llmError = true
+        }
+        if (llmError || exitStatus === 'budget_exceeded') break
+
+        // LLM 流结束后，立即写入 assistant_message（确保 tool_result 之前有 assistant_message）
+        const toolCallEvents = toolCalls.length > 0
+          ? toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input }))
+          : undefined
+        const cleanText = fullText
+          .replace(HEARTBEAT_DONE, '')
+          .replace(HEARTBEAT_CONTINUE, '')
+          .trim()
+        if (cleanText || thinkingText || toolCallEvents) {
+          this.store.appendEvents(createAssistantMessageEvent(
+            cleanText,
+            toolCallEvents,
+            this.currentRequestId ?? undefined,
+            thinkingText || undefined,
+          ))
+        }
+
+        if (hasImageBlocks && turns === 1) {
+          this.store.setLatestPreprocessed(null)
+        }
+
+        // 无工具调用：心跳判定
+        if (toolCalls.length === 0) {
+          const heartbeat = this.resolveHeartbeat(fullText, hitMaxOutputTokens, maxOutputTokensRecoveryCount, turns, maxTurns)
+          maxOutputTokensRecoveryCount = heartbeat.newRecoveryCount
+          if (heartbeat.action === 'continue') continue
+          break
+        }
+
+        // ★ 等待所有后台工具完成，yield 剩余事件
+        while (inFlight.size > 0) {
+          await waitQueue()
+          for (const item of drainQueue()) {
+            if ('event' in item) yield item.event
+            if ('done' in item) {
+              // 写入 tool_result 到 store
+              if (item.result) {
+                this.store.appendEvents(createToolResultEvent(
+                  item.toolCallId,
+                  toolCalls.find(tc => tc.id === item.toolCallId)?.name ?? 'unknown',
+                  item.result.type === 'tool_result' ? (item.result as { content: string }).content : '',
+                  item.result.type === 'tool_result' ? ((item.result as { is_error?: boolean }).is_error === true) : false,
+                  this.currentRequestId ?? undefined,
+                ))
+              }
+              inFlight.delete(item.toolCallId)
+            }
+          }
+        }
+        if (this.abortController.signal.aborted) break
+      }
+
+      if (turns >= maxTurns) {
+        exitStatus = 'turn_limit'
+        yield { type: 'interrupted', reason: 'turn_limit', message: `已达到最大执行轮次 ${maxTurns}，任务可能未完成。发送"继续"可恢复执行。` }
+        yield { type: 'turn_limit', turns }
+        this.store.appendEvents(createSystemEvent(
+          'turn_limit',
+          `[系统提示] 任务因达到最大轮次限制（${maxTurns} 轮）而中断，尚未完成。请继续执行剩余工作。`,
+          this.currentRequestId ?? undefined,
+        ))
+      }
+      if (this.abortController.signal.aborted) {
+        exitStatus = 'aborted'
+        yield { type: 'interrupted', reason: 'aborted', message: '任务已被中止。发送"继续"可恢复执行。' }
+        this.store.appendEvents(createSystemEvent(
+          'user_abort',
+          '[系统提示] 任务被用户中止。如需继续，请发送指令。',
+          this.currentRequestId ?? undefined,
+        ))
+      }
+    } catch (err) {
+      exitStatus = 'error'
+      errorMessage = String(err)
+      yield { type: 'error', message: `消息处理失败: ${errorMessage}` }
+    } finally {
+      const usageAfter = this.costs.getUsage()
+      this.store.appendEvents(createRequestCompleteEvent(
+        this.currentRequestId ?? undefined,
+        exitStatus,
+        turns,
+        this.totalToolCalls,
+        Date.now() - requestStartTime,
+        usageAfter.inputTokens - usageBefore.inputTokens,
+        usageAfter.outputTokens - usageBefore.outputTokens,
+        this.costs.getCostUsd() - costBefore,
+        errorMessage,
+      ))
+
+      this.running = false
+      if (this.onAfterSend) {
+        try { this.onAfterSend() } catch { /* 钩子失败不阻断 */ }
+      }
+      yield { type: 'done' }
+    }
+  }
+
   abort() {
     this.abortController.abort()
     // 强制释放锁，防止 generator 未被消费时 running 永久为 true

@@ -24,6 +24,8 @@ export interface InteractiveModeOpts {
   skillDistill: boolean
   providerName: string
   buildPromptForMessage: (msg: string) => Promise<void>
+  /** 延迟初始化会话存储（首次提问时调用，传入当前 sessionId） */
+  initSession?: (sessionId: string) => void
 }
 
 // ── stderr 拦截器 ──────────────────────────────────────────────────────────
@@ -57,7 +59,7 @@ export async function runInteractiveMode(
   provider: LLMProvider,
   opts: InteractiveModeOpts,
 ): Promise<void> {
-  const { sessionId, initialCwd, memoryCondense, skillDistill, buildPromptForMessage } = opts
+  const { sessionId, initialCwd, memoryCondense, skillDistill, buildPromptForMessage, initSession } = opts
   let { model } = opts
 
   // 注册斜杠命令
@@ -116,6 +118,7 @@ export async function runInteractiveMode(
           currentModel: model,
           providerName: opts.providerName,
           getProviderName: () => ({ name: provider.name, model: provider.model }),
+          onFirstMessage: initSession,
           onModelChange: (m: string) => {
             model = m
             saveConfig({ model: m })

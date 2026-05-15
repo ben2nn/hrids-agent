@@ -3,6 +3,7 @@ import { Box, measureElement } from 'ink'
 import type { DOMElement } from 'ink'
 import { MessageCard } from './MessageCard.js'
 import type { MessageRole } from './MessageCard.js'
+import { SplashScreen } from './SplashScreen.js'
 import { useScrollStore } from './ScrollProvider.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
@@ -12,6 +13,7 @@ interface DisplayMsg {
   role: string
   text: string
   color?: string
+  splashProps?: { version: string; model: string; providerName: string; projectPath: string }
 }
 
 interface CardStreamProps {
@@ -38,11 +40,14 @@ function MeasuredCard({ msg }: { msg: DisplayMsg }) {
 
   return (
     <Box ref={ref} flexShrink={0} marginBottom={1}>
-      <MessageCard
-        role={msg.role as MessageRole}
-        text={msg.text}
-        color={msg.color}
-      />
+      {msg.role === 'splash' && msg.splashProps
+        ? <SplashScreen {...msg.splashProps} />
+        : <MessageCard
+            role={msg.role as MessageRole}
+            text={msg.text}
+            color={msg.color}
+          />
+      }
     </Box>
   )
 }

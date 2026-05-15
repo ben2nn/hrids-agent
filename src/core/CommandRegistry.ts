@@ -32,6 +32,7 @@ export interface CommandContext {
 
 export type CommandResult =
   | { type: 'message'; text: string }
+  | { type: 'status'; text: string }   // 显示在状态栏下方（不进入消息流）
   | { type: 'inject'; prompt: string; allowedTools?: string[] }  // allowedTools 限制 skill 执行时可用的工具集
   | { type: 'exit' }
   | { type: 'noop' }
@@ -273,12 +274,12 @@ export function createBuiltinCommands(_apiKey: string, _model: string): SlashCom
       async execute(args, ctx) {
         const limit = parseInt(args.trim()) || 10
         const list = ctx.listSessions().slice(0, limit)
-        if (list.length === 0) return { type: 'message', text: '没有历史会话。' }
+        if (list.length === 0) return { type: 'status', text: '没有历史会话。' }
         const lines = list.map((s, i) => {
           const active = s.id === ctx.sessionId ? ' ◀ 当前' : ''
           return `  ${i + 1}. [${s.updatedAt.slice(0, 16)}] ${s.title.slice(0, 40)}${active}\n     ID: ${s.id}  消息数: ${s.messageCount}  模型: ${s.model}`
         })
-        return { type: 'message', text: `历史会话（共 ${list.length} 条）:\n${lines.join('\n')}` }
+        return { type: 'status', text: `历史会话（共 ${list.length} 条）:\n${lines.join('\n')}` }
       },
     },
     {
