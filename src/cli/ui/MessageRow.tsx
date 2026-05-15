@@ -45,7 +45,6 @@ function MessageRowImpl({ msg, columns, isLoading }: MessageRowProps) {
       borderRight={false}
       borderBottom={false}
       paddingLeft={1}
-      marginTop={1}
       width="100%"
       flexDirection="column"
     >

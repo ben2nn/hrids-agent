@@ -28,7 +28,7 @@ function MeasuredCard({ msg, cols }: { msg: DisplayMsg; cols: number }) {
   })
 
   return (
-    <Box ref={ref} flexShrink={0} marginBottom={1}>
+    <Box ref={ref} flexShrink={0}>
       {msg.role === 'splash' && msg.splashProps
         ? <SplashScreen {...msg.splashProps} />
         : <MessageRow msg={msg} columns={cols} />

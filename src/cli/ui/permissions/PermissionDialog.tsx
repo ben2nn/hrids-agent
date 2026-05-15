@@ -4,6 +4,7 @@ import { FileEditPermissionRequest } from './FileEditPermissionRequest.js'
 import { FilesystemPermissionRequest } from './FilesystemPermissionRequest.js'
 import { FallbackPermissionRequest } from './FallbackPermissionRequest.js'
 import type { PermissionDecision } from '../PermissionRequest.js'
+import { getToolDisplayName } from '../theme.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -87,8 +88,10 @@ export function PermissionDialog({
  * 根据工具名称判断工具类型
  */
 export function getPermissionToolType(toolName: string): PermissionToolType {
-  if (toolName === 'bash' || toolName === 'BashTool') return 'bash'
-  if (toolName === 'file_edit' || toolName === 'FileEditTool') return 'file_edit'
-  if (toolName === 'read' || toolName === 'FileReadTool' || toolName === 'glob' || toolName === 'GlobTool') return 'filesystem'
+  const name = toolName.toLowerCase()
+  if (name === 'bash' || name === 'bashtool') return 'bash'
+  if (name === 'file_edit' || name === 'fileedittool' || name === 'edit') return 'file_edit'
+  if (name === 'file_read' || name === 'filereadtool' || name === 'read' ||
+      name === 'glob' || name === 'globtool' || name === 'grep' || name === 'greptool') return 'filesystem'
   return 'fallback'
 }

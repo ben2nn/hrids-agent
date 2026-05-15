@@ -111,22 +111,7 @@ export async function initCli(opts: BaseCliOpts & {
   const permMode = opts.permMode ?? config.agent?.permissionMode ?? 'ask'
   const permissions = opts.autoApprove
     ? new PermissionManager(permMode, async () => true)
-    : new PermissionManager(permMode, async (req) => {
-        process.stdout.write(`\n允许执行 "${req.description}"? [y/N/always] `)
-        return new Promise(resolve => {
-          const handler = (data: Buffer) => {
-            process.stdin.removeListener('data', handler)
-            const ans = data.toString().trim().toLowerCase()
-            if (ans === 'always') {
-              permissions.approvePermanent(req.toolName)
-              resolve(true)
-            } else {
-              resolve(ans === 'y')
-            }
-          }
-          process.stdin.once('data', handler)
-        })
-      })
+    : new PermissionManager(permMode)
 
   const mcpTools = config.mcpServers.length > 0 ? await loadMcpTools(config.mcpServers) : []
   const tools = [

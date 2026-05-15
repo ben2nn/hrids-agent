@@ -6,10 +6,11 @@ import { FileHint } from './FileHint.js'
 import { HelpView } from '../commands/help/HelpView.js'
 import { ConfigView } from '../commands/config/ConfigView.js'
 import { PromptInput } from './PromptInput.js'
+import { SessionList } from './SessionList.js'
 // MessageCard 由 CardStream 内部使用
 import { Spinner } from './Spinner.js'
 import { useKeystroke } from './KeystrokeContext.js'
-import { TONE, FG, STRIPE_BORDER } from './theme.js'
+import { TONE, FG, STRIPE_BORDER, getToolDisplayName } from './theme.js'
 import { CardStream } from './CardStream.js'
 import { useScrollStore, useScrollSnapshot } from './ScrollProvider.js'
 import { useTerminalSize } from './useTerminalSize.js'
@@ -73,6 +74,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [streamBuf, setStreamBuf] = useState('')   // 当前流式文本缓冲
   const [toolProgress, setToolProgress] = useState('')  // 工具执行中的临时日志，不写入 msgs
   const [askUserPrompt, setAskUserPrompt] = useState<string | null>(null)  // ask_user 等待时的提示文字
+  const [permissionRequest, setPermissionRequest] = useState<{
+    key: string
+    toolName: string
+    description: string
+    ruleContent?: string
+    resolve: (granted: boolean) => void
+    selectedIndex: number
+  } | null>(null)
   const [costInfo, setCostInfo] = useState<CostInfo | null>(null)
   const modelRef = useRef(currentModel)
   const [displayProvider, setDisplayProvider] = useState(providerName)
@@ -83,6 +92,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [stderrOutput, setStderrOutput] = useState('')
   const [statusBarContent, setStatusBarContent] = useState('')
   const [activeModal, setActiveModal] = useState<'help' | 'config' | null>(null)
+  const [showSessionList, setShowSessionList] = useState(false)
   const [completedTools, setCompletedTools] = useState<Array<{ name: string; ok: boolean }>>([])
   const idCounterRef = useRef(0)
   const store = useScrollStore()
@@ -124,7 +134,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
           case 'thinking_delta': thinkingText += ev.delta; if (!assistantText) setStreamBuf(`💭 ${thinkingText.slice(-200)}`); break
           case 'tool_start':
-            setToolProgress(`⚙ ${ev.name}`)
+            setToolProgress(`⚙ ${getToolDisplayName(ev.name)}`)
             // ask_user 工具：切换输入框为回答模式
             if (ev.name === 'ask_user') {
               const askInput = ev.input as { question?: string; options?: string[] }
@@ -150,11 +160,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             const result = ev.result
             // 只显示工具错误，隐藏成功详情
             if (result.type === 'error') {
-              push({ role: 'error', text: `✗ ${ev.name}: ${result.message}` })
+              push({ role: 'error', text: `✗ ${getToolDisplayName(ev.name)}: ${result.message}` })
             }
             break
           }
           case 'permission_denied': push({ role: 'system', text: `⚠ 已拒绝: ${ev.description}`, color: 'yellow' }); break
+          case 'permission_request':
+            // 权限请求通过 onPermissionRequest 回调处理，这里不需要额外处理
+            break
           case 'usage': setCostInfo(prev => ({
   inputTokens: (prev?.inputTokens ?? 0) + ev.inputTokens,
   outputTokens: (prev?.outputTokens ?? 0) + ev.outputTokens,
@@ -243,6 +256,24 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     }
     return () => { engine.onBeforeCompact = null }
   }, [engine, sessionId])
+
+  // 注册权限请求回调：显示权限请求 UI
+  useEffect(() => {
+    engine.onPermissionRequest = async (req) => {
+      const key = `${req.toolName}::${req.description}`
+      return new Promise<boolean>((resolve) => {
+        setPermissionRequest({
+          key,
+          toolName: req.toolName,
+          description: req.description,
+          ruleContent: req.ruleContent,
+          resolve,
+          selectedIndex: 0,
+        })
+      })
+    }
+    return () => { engine.onPermissionRequest = null }
+  }, [engine])
 
   // 注册 stderr 拦截回调：将 process.stderr 输出存储到状态，在底部显示
   useEffect(() => {
@@ -405,6 +436,12 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       return
     }
 
+    // 处理不带 / 前缀的 sessions 命令
+    if (text.trim().toLowerCase() === 'sessions') {
+      setShowSessionList(true)
+      return
+    }
+
     // 处理斜杠命令
     const parsed = commands.parse(text)
     if (parsed) {
@@ -414,6 +451,10 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       }
       if (parsed.name === 'config') {
         setActiveModal('config')
+        return
+      }
+      if (parsed.name === 'sessions') {
+        setShowSessionList(true)
         return
       }
 
@@ -468,6 +509,33 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   // 滚动通过 Ink 的 useInput 处理（与 Ink 渲染管线原生集成）
   useInput((input, key) => {
+    // 权限请求模式：导航和选择处理
+    if (permissionRequest) {
+      if (key.upArrow) {
+        setPermissionRequest(prev => prev ? { ...prev, selectedIndex: Math.max(0, prev.selectedIndex - 1) } : null)
+      } else if (key.downArrow) {
+        setPermissionRequest(prev => prev ? { ...prev, selectedIndex: Math.min(2, prev.selectedIndex + 1) } : null)
+      } else if (key.return) {
+        const { selectedIndex, toolName, ruleContent, resolve } = permissionRequest
+        if (selectedIndex === 0) {
+          // Allow
+          resolve(true)
+        } else if (selectedIndex === 1) {
+          // Deny
+          resolve(false)
+        } else {
+          // Always Allow
+          engine.approveSessionPermission(toolName, ruleContent)
+          resolve(true)
+        }
+        setPermissionRequest(null)
+      } else if (key.escape) {
+        permissionRequest.resolve(false)
+        setPermissionRequest(null)
+      }
+      return
+    }
+
     if (key.pageUp) {
       store.setPinned(false)
       store.scroll(10)
@@ -626,6 +694,71 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     />
   )
 
+  // ─── 权限对话框（覆盖在状态栏下方）────────────────────────────────────────
+  const permissionOverlay = permissionRequest ? (
+    <Box flexDirection="column" borderStyle="double" borderColor={TONE.warn} paddingX={1} marginX={1}>
+      <Text color={TONE.warn} bold>⚠ 权限请求</Text>
+      <Box paddingLeft={1} marginTop={1}>
+        <Text>
+          <Text color={FG.faint}>工具: </Text>
+          <Text color={TONE.brand} bold>{getToolDisplayName(permissionRequest.toolName)}</Text>
+        </Text>
+      </Box>
+      <Box paddingLeft={1}>
+        <Text>
+          <Text color={FG.faint}>操作: </Text>
+          <Text color={FG.body}>{permissionRequest.description}</Text>
+        </Text>
+      </Box>
+      {permissionRequest.ruleContent && (
+        <Box paddingLeft={1}>
+          <Text>
+            <Text color={FG.faint}>内容: </Text>
+            <Text color={FG.sub}>{permissionRequest.ruleContent.slice(0, 100)}</Text>
+          </Text>
+        </Box>
+      )}
+      <Box marginTop={1} flexDirection="column" paddingLeft={1}>
+        <Text color={permissionRequest.selectedIndex === 0 ? TONE.ok : FG.body}>
+          {permissionRequest.selectedIndex === 0 ? '▸ ' : '  '}<Text bold>Allow</Text>
+          <Text color={FG.faint}> — 本次允许</Text>
+        </Text>
+        <Text color={permissionRequest.selectedIndex === 1 ? TONE.err : FG.body}>
+          {permissionRequest.selectedIndex === 1 ? '▸ ' : '  '}<Text bold>Deny</Text>
+          <Text color={FG.faint}> — 本次拒绝</Text>
+        </Text>
+        <Text color={permissionRequest.selectedIndex === 2 ? TONE.warn : FG.body}>
+          {permissionRequest.selectedIndex === 2 ? '▸ ' : '  '}<Text bold>Always Allow</Text>
+          <Text color={FG.faint}> — 始终允许此操作</Text>
+        </Text>
+      </Box>
+      <Box marginTop={1} paddingLeft={1}>
+        <Text color={FG.faint} dimColor>↑↓ 导航 · Enter 选择 · Esc 取消</Text>
+      </Box>
+    </Box>
+  ) : undefined
+
+  // ─── 会话列表 ─────────────────────────────────────────────────────────────
+  const handleSessionSelect = useCallback((selectedSessionId: string) => {
+    setShowSessionList(false)
+    // 切换到选中的会话
+    if (selectedSessionId !== sessionIdRef.current) {
+      const success = cmdCtx.switchSession(selectedSessionId)
+      if (!success) {
+        push({ role: 'error', text: `切换会话失败: ${selectedSessionId}` })
+      }
+    }
+  }, [cmdCtx, push])
+
+  const sessionListOverlay = showSessionList ? (
+    <SessionList
+      sessions={listSessions()}
+      pageSize={5}
+      onSelect={handleSessionSelect}
+      onCancel={() => setShowSessionList(false)}
+    />
+  ) : undefined
+
   // ─── 模态内容 ──────────────────────────────────────────────────────────────
   const modalContent = activeModal === 'help'
     ? <HelpView commands={commands.toCommands(cmdCtx)} onClose={() => setActiveModal(null)} />
@@ -633,12 +766,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     ? <ConfigView ctx={cmdCtx as any} onClose={() => setActiveModal(null)} />
     : undefined
 
+  // ─── 合并 overlay ─────────────────────────────────────────────────────────
+  const overlay = permissionOverlay || sessionListOverlay
+
   return (
     <Box paddingX={0} paddingY={0}>
       <FullscreenLayout
         scrollable={scrollableContent}
         bottom={bottomContent}
         statusBar={statusBar}
+        overlay={overlay}
         modal={modalContent}
       />
     </Box>

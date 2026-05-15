@@ -17,6 +17,8 @@ export interface PermissionRequest {
   description: string
   isReadonly: boolean
   isDestructive?: boolean
+  /** 是否在 plan 模式下可用（todo/plan 等规划工具） */
+  planSafe?: boolean
   // 工具操作涉及的文件路径（用于路径级权限检查）
   filePath?: string
   // 用于规则内容匹配的字符串（bash 工具传命令内容，文件工具传路径）
@@ -173,8 +175,9 @@ export class PermissionManager {
   // 拒绝追踪（会话内，不持久化）
   private denial: DenialState = { consecutive: 0, total: 0 }
 
-  constructor(mode: PermissionMode, onAsk: PermissionCallback) {
+  constructor(mode: PermissionMode, onAsk: PermissionCallback = async () => false) {
     this.mode = mode
+    this.onAsk = onAsk
     this.onAsk = onAsk
     this.rules = loadRules()
   }
@@ -244,7 +247,8 @@ export class PermissionManager {
         return true
 
       case 'plan':
-        // plan 模式：所有写操作一律拒绝，alwaysAllow/alwaysAsk 均无效
+        // plan 模式：planSafe 工具允许执行，其他写操作一律拒绝
+        if (req.planSafe) return true
         return false
 
       case 'ask': {
@@ -378,5 +382,12 @@ export class PermissionManager {
 
   isPlanMode(): boolean {
     return this.mode === 'plan'
+  }
+
+  /**
+   * 设置权限询问回调（用于 CLI/Gateway 动态替换询问方式）
+   */
+  setOnAsk(onAsk: PermissionCallback) {
+    this.onAsk = onAsk
   }
 }

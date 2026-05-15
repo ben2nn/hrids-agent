@@ -136,6 +136,70 @@ export const BUILTIN_ALLOWLIST: ReadonlyArray<string> = [
   'npx tsc',
   'python -c',
   'node -e',
+
+  // ── PowerShell 只读命令 ──
+  // 文件系统查看
+  'Get-ChildItem',
+  'Get-Content',
+  'Get-Location',
+  'Get-Item',
+  'Get-ItemProperty',
+  'Get-FileHash',
+  // 系统信息
+  'Get-Host',
+  'Get-Process',
+  'Get-Service',
+  'Get-ComputerInfo',
+  'Get-Date',
+  'Get-Help',
+  'Get-Command',
+  'Get-Module',
+  'Get-Variable',
+  'Get-ExecutionPolicy',
+  'Get-PSDrive',
+  'Get-PSProvider',
+  // 网络
+  'Test-Connection',
+  'Get-NetIPAddress',
+  'Get-NetAdapter',
+  'Get-NetRoute',
+  'Resolve-DnsName',
+  // 版本/信息
+  'Get-PSVersion',
+  '$PSVersionTable',
+  // PowerShell 别名（常用只读）
+  'gci',   // Get-ChildItem
+  'gc',    // Get-Content
+  'gl',    // Get-Location
+  'gi',    // Get-Item
+  'ghy',   // Get-History
+  'gps',   // Get-Process
+  'gsv',   // Get-Service
+  'gu',    // Get-Unique
+  'gal',   // Get-Alias
+  'group', // Group-Object
+  'measure', // Measure-Object
+  'select', // Select-Object
+  'sort',  // Sort-Object
+  'where', // Where-Object
+  'ft',    // Format-Table
+  'fl',    // Format-List
+  'fw',    // Format-Wide
+  'oh',    // Out-Host
+  // Windows 内置只读命令
+  'dir',
+  'type',
+  'ver',
+  'vol',
+  'tasklist',
+  'systeminfo',
+  'ipconfig',
+  'netstat',
+  'whoami',
+  'hostname',
+  'tree',
+  'findstr',
+  'more',
 ]
 
 /** 用于检测链式操作符的正则（排除引号内的内容） */

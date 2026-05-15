@@ -2,7 +2,7 @@ import type { LLMProvider } from './providers/index.js'
 import type { ToolDef, ToolResult } from './Tool.js'
 import { isReadOnlyCall } from './Tool.js'
 import type { ToolRegistry } from './ToolRegistry.js'
-import type { PermissionManager } from './PermissionManager.js'
+import type { PermissionManager, PermissionRequest } from './PermissionManager.js'
 import { CostTracker } from './CostTracker.js'
 import { logger, modelLog } from './logger.js'
 import { auditLog } from './audit.js'
@@ -130,6 +130,7 @@ export type StreamEvent =
   | { type: 'tool_start'; id: string; name: string; input: unknown; description: string }
   | { type: 'tool_log'; id: string; name: string; line: string }
   | { type: 'tool_end'; id: string; name: string; result: ToolResult }
+  | { type: 'permission_request'; toolName: string; description: string; isReadonly: boolean; isDestructive?: boolean; ruleContent?: string; key: string }
   | { type: 'permission_denied'; id: string; toolName: string; description: string }
   | { type: 'usage'; inputTokens: number; outputTokens: number; costUsd: number }
   | { type: 'turn_limit'; turns: number }
@@ -159,6 +160,8 @@ export class QueryEngine {
   onBeforeSend: ((message: string) => Promise<void>) | null = null
   // 每次 send 完成后的钩子
   onAfterSend: (() => void) | null = null
+  // 权限请求回调（由外部注册，用于显示权限请求 UI）
+  onPermissionRequest: ((req: PermissionRequest) => Promise<boolean>) | null = null
   // 当前请求的 requestId，用于关联消息分组
   private currentRequestId: string | null = null
   // 当前请求的触发来源
@@ -479,10 +482,22 @@ ${contentToSummarize}
     // 第二道：PermissionManager 策略决策
     const filePath = tool.getFilePath?.(tc.input as never)
     const ruleContent = tool.getRuleContent?.(tc.input as never)
-    const allowed = await this.config.permissions.check({
+    const permReq: PermissionRequest = {
       toolName: tc.name, description, isReadonly: isReadOnlyCall(tool, tc.input),
-      isDestructive: tool.isDestructive, filePath, ruleContent,
-    })
+      isDestructive: tool.isDestructive, planSafe: tool.planSafe, filePath, ruleContent,
+    }
+
+    // 如果设置了 onPermissionRequest 回调，使用回调处理权限请求
+    let allowed: boolean
+    if (this.onPermissionRequest && !permReq.isReadonly) {
+      allowed = await this.onPermissionRequest(permReq)
+      // 如果用户允许，更新 PermissionManager 的会话内批准
+      if (allowed) {
+        this.config.permissions.approveSession(tc.name, ruleContent)
+      }
+    } else {
+      allowed = await this.config.permissions.check(permReq)
+    }
     if (!allowed) {
       log.info('权限拒绝', { toolName: tc.name, description })
       auditLog({ action: 'permission_denied', resource: tc.name, result: 'denied', permissionMode: this.config.permissions.getMode(), details: { description } })
@@ -1483,23 +1498,34 @@ ${contentToSummarize}
         if (llmError || exitStatus === 'budget_exceeded') break
 
         // LLM 流结束后，立即写入 assistant_message（确保 tool_result 之前有 assistant_message）
-        const toolCallEvents = toolCalls.length > 0
-          ? toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input }))
-          : undefined
         const cleanText = fullText
           .replace(HEARTBEAT_DONE, '')
           .replace(HEARTBEAT_CONTINUE, '')
           .trim()
-        if (cleanText || thinkingText || toolCallEvents) {
-          modelLog.write('[sendStreaming-v2] 写入 assistant_message', { cleanTextLen: cleanText.length, thinkingLen: thinkingText.length, toolCalls: toolCallEvents?.length ?? 0, preview: cleanText.slice(0, 50) })
+
+        // 有文本内容时，写入文本消息
+        if (cleanText || thinkingText) {
+          modelLog.write('[sendStreaming-v2] 写入 assistant_message（文本）', { cleanTextLen: cleanText.length, thinkingLen: thinkingText.length, preview: cleanText.slice(0, 50) })
           this.store.appendEvents(createAssistantMessageEvent(
             cleanText,
-            toolCallEvents,
+            undefined,
             this.currentRequestId ?? undefined,
             thinkingText || undefined,
           ))
-          modelLog.write('[sendStreaming-v2] store 写入完成', { eventCount: this.store.getEventCount() })
-        } else {
+        }
+
+        // 每个工具调用单独写入一条 assistant_message
+        for (const tc of toolCalls) {
+          const toolCallEvent = [{ id: tc.id, name: tc.name, input: tc.input }]
+          modelLog.write('[sendStreaming-v2] 写入 assistant_message（工具）', { toolName: tc.name, toolId: tc.id })
+          this.store.appendEvents(createAssistantMessageEvent(
+            '',
+            toolCallEvent,
+            this.currentRequestId ?? undefined,
+          ))
+        }
+
+        if (!cleanText && !thinkingText && toolCalls.length === 0) {
           modelLog.write('[sendStreaming-v2] 跳过写入（无内容）', { fullTextLen: fullText.length, cleanTextLen: cleanText.length, thinkingLen: thinkingText.length })
         }
 
@@ -1592,6 +1618,13 @@ ${contentToSummarize}
 
   isRunning(): boolean {
     return this.running
+  }
+
+  /**
+   * 会话内批准权限（用于 CLI UI 的"始终允许"选项）
+   */
+  approveSessionPermission(toolName: string, ruleContent?: string) {
+    this.config.permissions.approveSession(toolName, ruleContent)
   }
 
   clearHistory() {

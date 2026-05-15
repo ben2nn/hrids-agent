@@ -92,23 +92,8 @@ export function projectForDisplay(events: readonly ConversationEvent[]): Display
       }
 
       case 'assistant_message': {
-        // 助手文本
-        if (ev.text.trim()) {
-          const dm: DisplayMessage = {
-            role: 'assistant',
-            content: ev.text,
-            timestamp: ev.timestamp,
-          }
-          if (ev.thinking) dm.thinking = ev.thinking
-          if (ev.requestId) dm.requestId = ev.requestId
-          // 仅在该 requestId 的最后一个 assistant 消息上附加 cost，避免多轮重复计算
-          if (ev.requestId && lastAssistantIdxByRequestId.get(ev.requestId) === evIdx) {
-            const cost = costByRequestId.get(ev.requestId)
-            if (cost) dm.usage = cost
-          }
-          messages.push(dm)
-        }
-        // 工具卡片
+        // 构建工具卡片
+        const toolCards: DisplayToolCard[] = []
         if (ev.toolCalls) {
           for (const tc of ev.toolCalls) {
             const result = toolResultMap.get(tc.id)
@@ -121,16 +106,26 @@ export function projectForDisplay(events: readonly ConversationEvent[]): Display
             }
             if (result) card.result = result.content
             if (ev.requestId) card.requestId = ev.requestId
-
-            // 作为独立的 tool 类型消息返回
-            messages.push({
-              role: 'assistant',
-              content: '',
-              timestamp: ev.timestamp + 1,
-              requestId: ev.requestId,
-              toolCards: [card],
-            })
+            toolCards.push(card)
           }
+        }
+
+        // 助手文本 + 工具卡片合并为一条消息
+        if (ev.text.trim() || toolCards.length > 0) {
+          const dm: DisplayMessage = {
+            role: 'assistant',
+            content: ev.text,
+            timestamp: ev.timestamp,
+          }
+          if (ev.thinking) dm.thinking = ev.thinking
+          if (ev.requestId) dm.requestId = ev.requestId
+          if (toolCards.length > 0) dm.toolCards = toolCards
+          // 仅在该 requestId 的最后一个 assistant 消息上附加 cost，避免多轮重复计算
+          if (ev.requestId && lastAssistantIdxByRequestId.get(ev.requestId) === evIdx) {
+            const cost = costByRequestId.get(ev.requestId)
+            if (cost) dm.usage = cost
+          }
+          messages.push(dm)
         }
         break
       }

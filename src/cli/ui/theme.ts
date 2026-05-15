@@ -52,3 +52,45 @@ export const STRIPE_BORDER = {
   left: '▎',
   right: ' ', bottomLeft: ' ', bottom: ' ', bottomRight: ' ',
 } as const
+
+/** 工具名称 → 显示名称映射 */
+export const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  // 文件操作
+  file_read:   '读取',
+  file_write:  '写入',
+  file_edit:   '编辑',
+  // 搜索
+  glob:        '搜索',
+  grep:        '搜索',
+  // Shell
+  bash:        '命令',
+  // 计划/任务
+  plan_create: '计划',
+  plan_update: '计划',
+  plan_list:   '计划',
+  plan_read:   '计划',
+  todo_write:  '任务',
+  todo_update: '任务',
+  todo_append: '任务',
+  todo_read:   '任务',
+  todo_reset:  '任务',
+  // 网络
+  web_search:  '搜索',
+  web_fetch:   '获取',
+  // Agent
+  ask_user:    '提问',
+  agent:       '代理',
+}
+
+/**
+ * 获取工具的显示名称
+ * 优先使用映射表，否则将 snake_case 转为 Title Case
+ */
+export function getToolDisplayName(toolName: string): string {
+  if (TOOL_DISPLAY_NAMES[toolName]) return TOOL_DISPLAY_NAMES[toolName]
+  // fallback: snake_case → Title Case
+  return toolName
+    .split('_')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ')
+}
