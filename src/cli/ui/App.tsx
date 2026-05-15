@@ -1,6 +1,5 @@
 ﻿import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { Box, Text, useApp, useInput, measureElement } from 'ink'
-import type { DOMElement } from 'ink'
+import { Box, Text, useApp, useInput } from 'ink'
 // SplashScreen 由 CardStream 内部根据 role='splash' 渲染
 import { CommandSuggestions } from './CommandSuggestions.js'
 import { FileHint } from './FileHint.js'
@@ -87,20 +86,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [completedTools, setCompletedTools] = useState<Array<{ name: string; ok: boolean }>>([])
   const idCounterRef = useRef(0)
   const store = useScrollStore()
-  const { rows: termRows, cols: termCols } = useTerminalSize()
-
-  // 消息区域高度：通过 measureElement 测量实际可用高度
-  const streamRef = useRef<DOMElement>(null)
-  const [streamHeight, setStreamHeight] = useState(Math.max(5, termRows - 23))
-
-  useEffect(() => {
-    if (!streamRef.current) return
-    const { height } = measureElement(streamRef.current)
-    if (height <= 0) modelLog.write('[App] streamHeight 异常', { height, streamHeight, termRows, termCols })
-    if (height > 0 && height !== streamHeight) {
-      setStreamHeight(height)
-    }
-  })
+  const { cols: termCols } = useTerminalSize()
 
   const push = useCallback((msg: DisplayMsg) => {
     const id = msg.id ?? `msg-${++idCounterRef.current}`
@@ -502,11 +488,10 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   // ─── 可滚动区域：消息历史 ────────────────────────────────────────────────
   const scrollableContent = (
-    <Box ref={streamRef} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} paddingX={1}>
+    <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} paddingX={1}>
       <CardStream
         key={sessionId}
         msgs={msgs}
-        viewportHeight={streamHeight}
         cols={termCols}
       />
     </Box>

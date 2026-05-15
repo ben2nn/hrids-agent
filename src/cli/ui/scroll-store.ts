@@ -12,12 +12,13 @@ export interface ScrollSnapshot {
   scrollVersion: number      // 每次滚动递增，供消费者触发视觉反馈
 }
 
+export type ViewportItem =
+  | { type: 'spacer'; height: number }
+  | { type: 'live'; msgId: string; index: number }
+
 export interface ViewportState {
-  startIndex: number         // 第一个可见卡片索引
-  endIndex: number           // 最后一个可见卡片索引（不含）
-  topSpacer: number          // 上方不可见区域行高
-  bottomSpacer: number       // 下方不可见区域行高
-  marginTop: number          // 首张卡片部分可见时的负偏移
+  items: ViewportItem[]       // 渲染列表：spacer 或 live
+  scrollOffset: number        // 当前滚动偏移（用于 marginTop={-scrollOffset}）
   pinned: boolean
   totalHeight: number
   maxScroll: number
@@ -41,7 +42,7 @@ export interface ScrollStore {
 const SCROLL_ARROW_ROWS = 3
 const SCROLL_PAGE_ROWS = 10
 const COALESCE_MS = 16
-const OVERSCAN_CARDS = 2  // 视口上下各多渲染几张卡片
+const OVERSCAN_CARDS = 2
 
 // ─── CJK 宽字符宽度计算 ────────────────────────────────────────────────────
 
@@ -230,66 +231,52 @@ export function createScrollStore(): ScrollStore {
         totalHeight += h
       }
 
-      // 2. maxScroll：可滚动的最大偏移量
+      // 2. maxScroll
       const maxScroll = Math.max(0, totalHeight - viewportHeight)
 
-      // 3. pinned 时用实时计算的 maxScroll（避免 store 中的 scrollOffset 因高度变化而过期）
+      // 3. scrollOffset：pinned 时实时用 maxScroll
       const scrollOffset = state.pinned
         ? maxScroll
         : Math.max(0, Math.min(state.scrollOffset, maxScroll))
 
-      // 4. 找 startIndex：从顶部累加高度，找到 scrollOffset 落在哪张卡片
+      // 4. 可见窗口（参照 DeepSeek-Reasonix：scrollOffset ± viewportHeight + buffer）
+      const VISIBLE_BUFFER_ROWS = 30
+      const winStart = Math.max(0, scrollOffset - VISIBLE_BUFFER_ROWS)
+      const winEnd = scrollOffset + viewportHeight + VISIBLE_BUFFER_ROWS
+
+      // 5. 遍历所有卡片，生成 items：可见的渲染为 live，不可见的累积为 spacer
+      const items: ViewportItem[] = []
+      let pendingSpacer = 0
       let cursor = 0
-      let startIndex = 0
-      const lastIdx = heights.length - 1
-      for (let i = 0; i < heights.length; i++) {
-        if (cursor + heights[i] > scrollOffset) {
-          startIndex = i
-          break
+
+      for (let i = 0; i < msgs.length; i++) {
+        const h = heights[i]
+        const cardEnd = cursor + h
+        const overlaps = cardEnd > winStart && cursor < winEnd
+        const needsMeasure = msgs[i].id != null && !cardHeights.has(msgs[i].id!)
+
+        if (overlaps || needsMeasure) {
+          // 需要实时渲染的卡片
+          if (pendingSpacer > 0) {
+            items.push({ type: 'spacer', height: pendingSpacer })
+            pendingSpacer = 0
+          }
+          items.push({ type: 'live', msgId: msgs[i].id ?? `auto-${i}`, index: i })
+        } else {
+          // 不可见，累积为 spacer
+          pendingSpacer += h
         }
-        cursor += heights[i]
-        startIndex = Math.min(i + 1, lastIdx)
+        cursor = cardEnd
       }
 
-      // 5. topSpacer：startIndex 之前所有卡片的总高度
-      const topSpacer = cursor
-
-      // 6. marginTop：首张卡片部分可见时的负偏移，使其正确对齐视口顶部
-      const marginTop = -(scrollOffset - topSpacer)
-
-      // 7. 找 endIndex：从 startIndex 累加直到填满 viewportHeight
-      let accum = 0
-      let endIndex = startIndex + 1
-      for (let i = startIndex; i < heights.length; i++) {
-        accum += heights[i]
-        if (accum >= viewportHeight) {
-          endIndex = i + 1
-          break
-        }
+      // 尾部 spacer
+      if (pendingSpacer > 0) {
+        items.push({ type: 'spacer', height: pendingSpacer })
       }
-
-      // 8. overscan：上下各多渲染几张卡片，避免滚动时白屏
-      startIndex = Math.max(0, startIndex - OVERSCAN_CARDS)
-      endIndex = Math.min(msgs.length, endIndex + OVERSCAN_CARDS)
-
-      // 9. 重新计算 topSpacer（含 overscan）
-      let newTopSpacer = 0
-      for (let i = 0; i < startIndex; i++) newTopSpacer += heights[i]
-
-      // 10. bottomSpacer：endIndex 之后所有卡片的总高度
-      let visibleHeight = 0
-      for (let i = startIndex; i < endIndex; i++) visibleHeight += heights[i]
-      const bottomSpacer = Math.max(0, totalHeight - newTopSpacer - visibleHeight)
-
-      // 11. 修正 marginTop（相对 overscan 后的 topSpacer）
-      const adjustedMarginTop = -(scrollOffset - newTopSpacer)
 
       return {
-        startIndex,
-        endIndex,
-        topSpacer: newTopSpacer,
-        bottomSpacer,
-        marginTop: adjustedMarginTop,
+        items,
+        scrollOffset,
         pinned: state.pinned,
         totalHeight,
         maxScroll,
