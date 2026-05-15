@@ -1,13 +1,17 @@
 ﻿import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { Box, Text, useApp, useInput } from 'ink'
+import { Box, Text, useApp, useInput, measureElement } from 'ink'
+import type { DOMElement } from 'ink'
 import { SplashScreen } from './SplashScreen.js'
 import { CommandHint } from './CommandHint.js'
 import { FileHint } from './FileHint.js'
 import { PromptInput } from './PromptInput.js'
-import { MessageCard, type MessageRole } from './MessageCard.js'
+// MessageCard 由 CardStream 内部使用
 import { Spinner } from './Spinner.js'
 import { useKeystroke } from './KeystrokeContext.js'
 import { TONE, FG, STRIPE_BORDER } from './theme.js'
+import { CardStream } from './CardStream.js'
+import { useScrollStore, useScrollSnapshot } from './ScrollProvider.js'
+import { useTerminalSize } from './useTerminalSize.js'
 import type { QueryEngine } from '../../core/QueryEngine.js'
 import type { CommandRegistry } from '../../core/CommandRegistry.js'
 import type { CommandContext } from '../../core/CommandRegistry.js'
@@ -67,31 +71,33 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [showFileHint, setShowFileHint] = useState(false)
   const [fileFilter, setFileFilter] = useState('')
   const [stderrOutput, setStderrOutput] = useState('')
-  const MAX_VISIBLE_LINES = 50
-  const SCROLL_PAGE = 10
-  // scrollRows: 内容向上滚动的行数（0 = 看最新消息，越大看得越早）
-  const [scrollRows, setScrollRows] = useState(0)
-  const [pinned, setPinned] = useState(true)
-  const pinnedRef = useRef(true)
-  pinnedRef.current = pinned
+  const idCounterRef = useRef(0)
+  const store = useScrollStore()
+  const { rows: termRows, cols: termCols } = useTerminalSize()
 
-  const jumpToBottom = useCallback(() => {
-    pinnedRef.current = true
-    setPinned(true)
-    setScrollRows(0)
-  }, [])
+  // 消息区域高度：通过 measureElement 测量实际可用高度
+  const streamRef = useRef<DOMElement>(null)
+  const [streamHeight, setStreamHeight] = useState(Math.max(5, termRows - 23))
+
+  useEffect(() => {
+    if (!streamRef.current) return
+    const { height } = measureElement(streamRef.current)
+    if (height > 0 && height !== streamHeight) {
+      setStreamHeight(height)
+    }
+  })
 
   const push = useCallback((msg: DisplayMsg) => {
+    const id = msg.id ?? `msg-${++idCounterRef.current}`
     setMsgs(prev => {
-      const newMsgs = [...prev, msg]
+      const newMsgs = [...prev, { ...msg, id }]
       msgsLengthRef.current = newMsgs.length
       return newMsgs
     })
-    // pinned 时自动滚到底（scrollRows=0），非 pinned 保持当前位置
-    if (pinnedRef.current) {
-      setScrollRows(0)
+    if (store.getState().pinned) {
+      store.scrollToBottom()
     }
-  }, [])
+  }, [store])
 
   const cronQueueRef = useRef<CronJob[]>([])
   const loadingRef = useRef(false)
@@ -332,7 +338,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     const text = value.trim()
     if (!text || loadingRef.current) return
     setInput('')
-    jumpToBottom()  // 发送消息时恢复自动滚动
+    store.scrollToBottom()  // 发送消息时恢复自动滚动
     // 保留 SplashScreen，不在提交时隐藏
     setShowCommandHint(false)
     setCommandFilter('')
@@ -402,52 +408,38 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   // 滚动通过 Ink 的 useInput 处理（与 Ink 渲染管线原生集成）
   useInput((input, key) => {
     if (key.pageUp) {
-      setPinned(false)
-      setScrollRows(prev => prev + SCROLL_PAGE)
+      store.setPinned(false)
+      store.scroll(10)
     }
     if (key.pageDown) {
-      setScrollRows(prev => {
-        const next = Math.max(0, prev - SCROLL_PAGE)
-        if (next === 0) setPinned(true)
-        return next
-      })
+      store.scroll(-10)
     }
     if (key.upArrow && !loadingRef.current) {
-      setPinned(false)
-      setScrollRows(prev => prev + 3)
+      store.setPinned(false)
+      store.scroll(3)
     }
     if (key.downArrow && !loadingRef.current) {
-      setScrollRows(prev => {
-        const next = Math.max(0, prev - 3)
-        if (next === 0) setPinned(true)
-        return next
-      })
+      store.scroll(-3)
     }
     // End 键回到底部（Ink 的 useInput 不直接提供 end，用 Ctrl+End 代替）
     if (input === '\x1b[F' || (key.ctrl && input === '>')) {
-      jumpToBottom()
+      store.scrollToBottom()
     }
   })
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
-      {/* 启动画面 */}
-      <SplashScreen
-        version="1.0.0"
-        model={modelRef.current}
-        providerName={displayProvider}
-        projectPath={process.cwd()}
-      />
-
-      {/* 消息历史 */}
-      <Box flexDirection="column" marginBottom={1}>
-        {msgs
-          .slice(0, Math.max(0, msgs.length - scrollRows))
-          .slice(-MAX_VISIBLE_LINES)
-          .map((m, i) => (
-            <MessageCard key={m.id ?? i} role={m.role as MessageRole} text={m.text} color={m.color} />
-          ))
-        }
+      {/* 可滚动区域：SplashScreen + 消息历史 */}
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+        <SplashScreen
+          version="1.0.0"
+          model={modelRef.current}
+          providerName={displayProvider}
+          projectPath={process.cwd()}
+        />
+        <Box ref={streamRef} flexGrow={1} flexShrink={1} minHeight={0}>
+          <CardStream msgs={msgs} viewportHeight={streamHeight} cols={termCols} />
+        </Box>
       </Box>
 
       {/* 工具执行中的临时进度日志（tool_end 后自动清空，不留在历史里） */}
@@ -508,7 +500,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
       {/* 输入区域 */}
       <Box marginBottom={0}>
-        {!pinned
+        {!useScrollSnapshot(s => s.pinned)
           ? <Text color={FG.faint}>  ▸ 查看历史中 -- PgDn 返回底部 · ↑↓ 滚动</Text>
           : askUserPrompt
           ? (
@@ -559,10 +551,10 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           )}
           <Text color={FG.faint}> · </Text>
           <Text color={loading ? TONE.warn : FG.faint}>{loading ? '◐ Ctrl+C 中断' : 'Ctrl+C 退出'}</Text>
-          {msgs.length > MAX_VISIBLE_LINES && (
+          {msgs.length > 1 && (
             <>
               <Text color={FG.faint}> · </Text>
-              <Text>{Math.max(1, msgs.length - scrollRows - MAX_VISIBLE_LINES + 1)}-{Math.min(msgs.length, msgs.length - scrollRows)}/{msgs.length}</Text>
+              <Text>{msgs.length} msgs</Text>
             </>
           )}
         </Text>
