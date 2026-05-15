@@ -308,6 +308,7 @@ export class OpenAIProvider implements LLMProvider {
             choices?: Array<{
               delta?: {
                 content?: string
+                reasoning_content?: string
                 tool_calls?: Array<{
                   index: number
                   id?: string
@@ -320,6 +321,10 @@ export class OpenAIProvider implements LLMProvider {
           }
 
           const delta = chunk.choices?.[0]?.delta
+          // DeepSeek 等 OpenAI 兼容 API 通过 reasoning_content 返回思考内容
+          if (delta?.reasoning_content) {
+            yield { type: 'thinking_delta', delta: delta.reasoning_content }
+          }
           if (delta?.content) {
             totalTextLen += delta.content.length
             yield { type: 'text_delta', delta: delta.content }

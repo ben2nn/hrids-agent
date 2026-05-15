@@ -88,6 +88,11 @@ export interface DisplayMessage {
   cronDescription?: string
   requestId?: string
   timestamp: number
+  usage?: {
+    inputTokens: number
+    outputTokens: number
+    cost: number
+  }
 }
 
 /**
@@ -130,6 +135,7 @@ function convertToServerDisplayMessages(
           timestamp: dm.timestamp,
           ...(dm.thinking ? { thinking: dm.thinking } : {}),
           ...(dm.requestId ? { requestId: dm.requestId } : {}),
+          ...(dm.usage ? { usage: { inputTokens: dm.usage.inputTokens, outputTokens: dm.usage.outputTokens, cost: dm.usage.costUsd } } : {}),
         })
       }
       if (dm.toolCards) {

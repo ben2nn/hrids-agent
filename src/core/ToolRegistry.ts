@@ -255,8 +255,8 @@ export class ToolRegistry {
       return { type: 'error', message: `unknown tool: ${name}` }
     }
 
-    // Plan-mode 检查（支持 readOnlyCheck 动态检查）
-    if (this._planMode && !isReadOnlyCall(tool, args)) {
+    // Plan-mode 检查（支持 readOnlyCheck 动态检查，planSafe 工具豁免）
+    if (this._planMode && !isReadOnlyCall(tool, args) && !tool.planSafe) {
       return { type: 'error', message: `${name}: unavailable in plan mode — this is a read-only exploration phase.` }
     }
 
@@ -328,7 +328,7 @@ export class ToolRegistry {
     const tools = this.getAll()
     if (!isPlanMode) return tools
     return tools.map(t =>
-      (t.readonly || t.readOnlyCheck) ? t : {
+      (t.readonly || t.readOnlyCheck || t.planSafe) ? t : {
         ...t,
         description: t.description + '\n[Plan 模式：此工具当前不可用，调用将被拒绝]',
       }

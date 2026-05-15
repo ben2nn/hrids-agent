@@ -284,6 +284,11 @@ export interface DisplayMessage {
   requestId?: string
   timestamp: number
   toolCards?: DisplayToolCard[]
+  usage?: {
+    inputTokens: number
+    outputTokens: number
+    costUsd: number
+  }
 }
 
 // ── 对话存储 ────────────────────────────────────────────────────

@@ -168,8 +168,9 @@ export class FallbackProvider implements LLMProvider {
 
             if (!hasContent && (chunk.type === 'text_delta' || chunk.type === 'tool_call' || chunk.type === 'thinking_delta')) {
               hasContent = true
-              // 不更新持久索引：fallback 只是临时应急，下次调用仍从首选模型开始
-              // 只有手动 /model 切换才应改变 currentGroupIdx/currentModelIdx
+              // fallback 成功 → 记住当前位置，下次直接从该模型开始
+              this.currentGroupIdx = localGroupIdx
+              this.currentModelIdx = localModelIdx
             }
             if (chunk.type === 'done') {
               if (!hasContent) {

@@ -760,11 +760,24 @@ ${readonlyTools.join('、')}
 ### 不可用工具（写操作，调用将被拒绝）
 ${writeTools.join('、')}
 
+### 特殊可用工具（规划相关，plan 模式下允许使用）
+- todo_write：创建任务计划
+- todo_update：更新任务状态
+- todo_append：追加任务
+- todo_reset：重置任务计划
+- todo_read：读取任务状态
+- plan_create：创建计划并持久化到文件
+- plan_update：更新计划内容
+- plan_list：列出所有计划
+- plan_read：读取指定计划
+
 ### 你的任务
 1. 使用只读工具充分了解现状：可以读文件、搜索代码、搜索网络信息、询问用户等
 2. 制定详细的执行计划：列出每一步要做什么、修改哪些文件、执行什么命令
-3. 不要尝试调用写操作工具，即使调用也会被系统拒绝
-4. 计划完成后，告知用户"已完成规划，请切换到执行模式后继续"
+3. 调用 todo_write 创建任务计划（plan 模式下可用）
+4. 调用 plan_create 将计划持久化到 ~/.hrids/plans/ 目录
+5. 不要尝试调用其他写操作工具，即使调用也会被系统拒绝
+6. 计划完成后，告知用户"已完成规划，请输入 /plan 退出规划模式，开始按计划执行"
 
 用户确认计划后，会将模式切换为 ask 或 craft，届时写操作将可用。`
       session.engine.setSystemPrompt([...fullPrompt, planModeAppendix])

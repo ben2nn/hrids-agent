@@ -59,7 +59,7 @@ const SECTION_TOOLS = `# 工具使用
  - 读文件用 file_read，不要用 ${SHELL_TOOL_NAME} cat/type
  - 编辑文件用 file_edit，不要用 ${SHELL_TOOL_NAME} sed/awk
  - 创建文件用 file_write，不要用 ${SHELL_TOOL_NAME} echo 重定向
- - 搜索文件用 glob，不要用 ${SHELL_TOOL_NAME} find/ls
+ - **查找文件必须用 glob**，不要用 ${SHELL_TOOL_NAME} find/ls/dir（glob 更快、更安全、跨平台）
  - 搜索内容用 grep，不要用 ${SHELL_TOOL_NAME} grep/rg
  - ${SHELL_TOOL_NAME} 只用于系统命令、运行脚本、安装依赖等真正需要 shell 的操作
 
@@ -67,14 +67,29 @@ const SECTION_TOOLS = `# 工具使用
 
 const SECTION_TODO = `# 任务计划
 
-**单步或简单任务**（一次工具调用即可完成、纯查询、纯问答）：直接执行，不建立任务计划。
+**判断标准**：根据任务复杂度自主决定是否创建任务计划，不要依赖关键词匹配。
 
-**多步骤任务**（需要 3 步以上、涉及多文件、意图明确）：
- - 直接调用 todo_write 建立完整计划，第一个任务自动 in_progress，立即开始执行
+**不需要创建计划的场景**（直接执行）：
+ - 单步操作：改一个变量名、修一个 bug、读取一个文件
+ - 纯查询/问答：解释代码含义、查看配置内容
+ - 简单修改：单文件内的小改动
+
+**需要创建计划的场景**（调用 todo_write）：
+ - 预估 3 步以上才能完成
+ - 涉及多个文件或模块
+ - 需要先探索再执行（高不确定性）
+ - 用户明确要求"分步完成"或"制定计划"
+
+**执行规则**：
+ - 调用 todo_write 建立计划，第一个任务自动 in_progress，立即开始执行
  - 每完成一步调用 todo_update(id, 'completed')，系统自动推进下一个任务
  - 所有任务完成后直接输出最终结果，不再调用任务工具
 
-**高不确定性任务**（架构决策、影响多模块、意图模糊）：先输出规划方案等用户确认，再调用 todo_write。`
+**Plan 模式**：
+ - 复杂任务先进入 plan 模式（/plan 命令），只读探索代码
+ - 探索完成后调用 todo_write 创建任务计划
+ - 调用 plan_create 将计划持久化到文件
+ - 告知用户退出 plan 模式后按计划执行`
 
 const SECTION_DECISION = `# 决策上报与智能提问
 
@@ -448,14 +463,14 @@ const CLASSIFY_RULES: ClassifyRule[] = [
       /^(哈+|嘿+|噢+|哦+|啊+|嗯+|呵+)\s*$/i,
     ],
   },
-  // task：多步骤任务，需要建立任务计划
+  // task：显式多步骤任务（由 LLM 根据 SECTION_TODO 自主判断是否创建计划）
   {
     type: 'task',
     keywords: [
-      /实现.*功能|添加.*功能|新增.*功能|开发.*模块|完整.*流程/i,
-      /重构|迁移|升级.*系统|系统.*升级/i,
-      /帮我(做|完成|实现|开发|搭建|构建)/i,
+      /完整.*流程|端到端|从零开始|全链路/i,
+      /重构.*系统|迁移.*架构|系统.*升级|架构.*改造/i,
       /分(几步|多步|阶段)(完成|实现|执行)/i,
+      /项目级|多文件改造|跨模块/i,
     ],
   },
   {
@@ -526,11 +541,8 @@ export function classifyTask(message: string): TaskType[] {
   }
   // chat 是排他类型：匹配到 chat 就直接返回，不注入任何扩展和工具
   if (matched.has('chat')) return ['chat']
-  // crawl 隐含 script；code/crawl/script 隐含 task（多步骤任务）
+  // crawl 隐含 script；task 由 LLM 根据 SECTION_TODO 自主判断，不再自动注入
   if (matched.has('crawl')) matched.add('script')
-  if (matched.has('crawl') || matched.has('script') || matched.has('code')) {
-    matched.add('task')
-  }
   return [...matched]
 }
 

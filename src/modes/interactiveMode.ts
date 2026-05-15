@@ -10,6 +10,7 @@ import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js
 import { saveConfig } from '../core/Config.js'
 import { App } from '../cli/ui/App.js'
 import { KeystrokeProvider } from '../cli/ui/KeystrokeContext.js'
+import { ScrollProvider } from '../cli/ui/ScrollProvider.js'
 import { getStdinReader } from '../cli/ui/StdinReader.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 import type { LLMProvider } from '../core/providers/index.js'
@@ -107,7 +108,8 @@ export async function runInteractiveMode(
   try {
     const { waitUntilExit } = render(
       React.createElement(KeystrokeProvider, null,
-        React.createElement(App, {
+        React.createElement(ScrollProvider, null,
+          React.createElement(App, {
           engine,
           commands: registry,
           sessionId,
@@ -131,6 +133,7 @@ export async function runInteractiveMode(
             earlyStderrBuffer.length = 0
           },
         }),
+        ),
       ),
     )
 

@@ -51,17 +51,31 @@ const IMAGE_PROTECT_COUNT = 4
  * - tool_result → 不直接生成展示消息
  */
 export function projectForDisplay(events: readonly ConversationEvent[]): DisplayMessage[] {
-  // 第一遍：建立 toolCallId → ToolResultEvent 映射
+  // 第一遍：建立 toolCallId → ToolResultEvent 映射 + requestId → cost 映射
   const toolResultMap = new Map<string, { content: string; isError: boolean }>()
+  const costByRequestId = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number }>()
+  // 记录每个 requestId 的最后一个非空 assistant_message 事件索引
+  const lastAssistantIdxByRequestId = new Map<string, number>()
   for (const ev of events) {
     if (ev.type === 'tool_result') {
       toolResultMap.set(ev.toolCallId, { content: ev.content, isError: ev.isError })
+    }
+    if (ev.type === 'request_complete' && ev.requestId && ev.inputTokens !== undefined && ev.outputTokens !== undefined && ev.costUsd !== undefined) {
+      costByRequestId.set(ev.requestId, { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, costUsd: ev.costUsd })
+    }
+  }
+  // 反向遍历找到每个 requestId 最后一个有文本的 assistant_message
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev.type === 'assistant_message' && ev.requestId && ev.text.trim() && !lastAssistantIdxByRequestId.has(ev.requestId)) {
+      lastAssistantIdxByRequestId.set(ev.requestId, i)
     }
   }
 
   const messages: DisplayMessage[] = []
 
-  for (const ev of events) {
+  for (let evIdx = 0; evIdx < events.length; evIdx++) {
+    const ev = events[evIdx]
     switch (ev.type) {
       case 'user_message': {
         const dm: DisplayMessage = {
@@ -87,6 +101,11 @@ export function projectForDisplay(events: readonly ConversationEvent[]): Display
           }
           if (ev.thinking) dm.thinking = ev.thinking
           if (ev.requestId) dm.requestId = ev.requestId
+          // 仅在该 requestId 的最后一个 assistant 消息上附加 cost，避免多轮重复计算
+          if (ev.requestId && lastAssistantIdxByRequestId.get(ev.requestId) === evIdx) {
+            const cost = costByRequestId.get(ev.requestId)
+            if (cost) dm.usage = cost
+          }
           messages.push(dm)
         }
         // 工具卡片

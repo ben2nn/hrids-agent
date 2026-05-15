@@ -15,6 +15,7 @@ import { SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRe
 import { TEAM_TOOLS } from './TeamTools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
 import { WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListTool } from './WorkdirTools.js'
+import { PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool } from './PlanTool.js'
 import type { ToolDef } from '../core/Tool.js'
 import { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
 
@@ -28,18 +29,19 @@ export {
   SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool,
   SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
   WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListTool,
+  PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool,
 }
 export { TEAM_TOOLS } from './TeamTools.js'
 export { MEMORY_TOOLS } from '../memory/index.js'
 export { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
 
 export const ALL_TOOLS: ToolDef[] = [
-  shellTool,
+  GlobTool,
+  GrepTool,
   FileReadTool,
   FileWriteTool,
   FileEditTool,
-  GlobTool,
-  GrepTool,
+  shellTool,
   WebFetchTool,
   WebSearchTool,
   AskUserTool,
@@ -62,6 +64,10 @@ export const ALL_TOOLS: ToolDef[] = [
   WorkdirDeliverTool,
   WorkdirCleanupTool,
   WorkdirListTool,
+  PlanCreateTool,
+  PlanUpdateTool,
+  PlanListTool,
+  PlanReadTool,
   // SkillHubListTool、SkillHubUninstallTool、SkillHubUpgradeTool 已从 ALL_TOOLS 移除，
   // 减少 LLM 工具列表膨胀。如需使用，可通过 bash 命令或直接 import 调用。
   ...TEAM_TOOLS,
@@ -138,6 +144,16 @@ export const registerTodoTools = createBatchRegistrar((registry: ToolRegistry) =
 })
 
 /**
+ * 注册计划管理工具到 ToolRegistry
+ */
+export const registerPlanTools = createBatchRegistrar((registry: ToolRegistry) => {
+  registry.register(PlanCreateTool)
+  registry.register(PlanUpdateTool)
+  registry.register(PlanListTool)
+  registry.register(PlanReadTool)
+})
+
+/**
  * 注册所有核心工具到 ToolRegistry
  *
  * 使用方式：
@@ -157,6 +173,8 @@ export const registerAllCoreTools = createBatchRegistrar((registry: ToolRegistry
   registerWebTools(registry)
   // 任务管理工具
   registerTodoTools(registry)
+  // 计划管理工具
+  registerPlanTools(registry)
   // 其他核心工具
   registry.register(AskUserTool)
   registry.register(DecisionTool)

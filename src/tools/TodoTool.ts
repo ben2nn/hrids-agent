@@ -272,6 +272,7 @@ export const TodoWriteTool: ToolDef<typeof todoWriteInputSchema> = {
 - 不要在输入中传入 id 字段，系统会忽略并自动分配`,
   inputSchema: todoWriteInputSchema,
   readonly: false,
+  planSafe: true,
   capabilities: { parallelSafe: false },
 
   describe(input) {
@@ -478,6 +479,7 @@ export const TodoUpdateTool: ToolDef<typeof todoUpdateInputSchema> = {
 - 完成后自动推进下一个满足依赖条件的 pending 任务为 in_progress`,
   inputSchema: todoUpdateInputSchema,
   readonly: false,
+  planSafe: true,
   capabilities: { parallelSafe: false },
 
   describe(input) {
@@ -764,6 +766,7 @@ export const TodoAppendTool: ToolDef<typeof todoAppendInputSchema> = {
   inputSchema: todoAppendInputSchema,
   capabilities: { parallelSafe: false },
   readonly: false,
+  planSafe: true,
 
   describe(input) {
     const count = Array.isArray(input.todos) ? input.todos.length : 0
@@ -939,6 +942,7 @@ export const TodoResetTool: ToolDef<typeof todoResetInputSchema> = {
 - 用户批准后，调用 todo_write 建立新计划`,
   inputSchema: todoResetInputSchema,
   readonly: false,
+  planSafe: true,
   capabilities: { isInteractive: true, parallelSafe: false },
 
   describe(input) {
@@ -1128,6 +1132,7 @@ export const TodoReadTool: ToolDef<typeof todoReadInputSchema> = {
 不适用场景：建立新计划 → 用 todo_write | 问候/闲聊 | 没有任务时自动调用`,
   inputSchema: todoReadInputSchema,
   readonly: true,
+  planSafe: true,
   capabilities: { parallelSafe: true },
 
   describe(_input) {

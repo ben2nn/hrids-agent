@@ -53,6 +53,13 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
    */
   stormExempt?: boolean
   /**
+   * 是否在 plan 模式下可用。
+   * plan 模式默认禁止所有写操作，但标记为 planSafe 的工具除外。
+   * 用于 todo_* 和 plan_* 等规划相关工具。
+   * 默认 false。
+   */
+  planSafe?: boolean
+  /**
    * 动态只读检查。
    * 用于根据具体参数判断本次调用是否为只读操作。
    * 例如：shell 工具可以检查命令内容，白名单命令视为只读。
