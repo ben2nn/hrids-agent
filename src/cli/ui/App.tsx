@@ -288,7 +288,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       engine.clearHistory()
       setSessionId(newId)
       sessionIdRef.current = newId
-      sessionReadyRef.current = false  // 重置，下次发送时重新初始化存储
+      onFirstMessage?.(newId)
+      sessionReadyRef.current = true
       const newWorkDir = getSessionWorkDirPath(newId)
       setGlobalCwd(newWorkDir)
       try { process.chdir(newWorkDir) } catch { /* 忽略 */ }
@@ -304,7 +305,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       engine.store.replaceEvents(events)
       setSessionId(id)
       sessionIdRef.current = id
-      sessionReadyRef.current = false  // 重置，下次发送时重新初始化存储
+      onFirstMessage?.(id)
+      sessionReadyRef.current = true
 
       // 清空当前消息，载入历史会话内容
       const displayMsgs = projectForDisplay(events)

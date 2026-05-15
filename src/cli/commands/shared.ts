@@ -143,12 +143,14 @@ export async function initCli(opts: BaseCliOpts & {
   const systemPrompt = await buildSystemContext(initialPrompt)
 
   const registry = new ToolRegistry().registerAll(tools)
-  // 不传 store，首次提问时才初始化会话存储
   const engine = new QueryEngine({
     provider, systemPrompt, registry, permissions,
     maxTokens: config.agent?.maxTokens, maxTurns: config.agent?.maxTurns,
     maxBudgetUsd: config.agent?.maxBudgetUsd, autoCompactThreshold: config.agent?.autoCompactThreshold,
   })
+
+  // 立即初始化会话存储（确保事件从第一条消息就开始持久化）
+  initSessionStorage(engine, sessionId)
 
   const initSession = (sid: string) => initSessionStorage(engine, sid)
 
