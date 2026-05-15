@@ -111,3 +111,33 @@ class ChildLogger {
 
 export type { ChildLogger }
 export const logger = new Logger()
+
+// ── 模型调用专用日志（独立文件，不受 logLevel 限制，始终写入） ──────────
+const MODEL_LOG_FILE = join(LOG_DIR, 'model-calls.log')
+const MODEL_MAX_BYTES = 20 * 1024 * 1024
+
+function rotateModelLog() {
+  try {
+    if (existsSync(MODEL_LOG_FILE) && statSync(MODEL_LOG_FILE).size > MODEL_MAX_BYTES) {
+      renameSync(MODEL_LOG_FILE, MODEL_LOG_FILE + '.' + Date.now() + '.bak')
+      const bakFiles = readdirSync(LOG_DIR)
+        .filter(f => f.startsWith('model-calls.log.') && f.endsWith('.bak'))
+        .sort()
+      while (bakFiles.length > 2) {
+        const oldest = bakFiles.shift()!
+        try { unlinkSync(join(LOG_DIR, oldest)) } catch { /* 忽略 */ }
+      }
+    }
+  } catch { /* 轮转失败不影响主流程 */ }
+}
+
+export const modelLog = {
+  write(msg: string, meta?: Record<string, unknown>) {
+    const entry = { ts: new Date().toISOString(), msg, ...meta }
+    try {
+      ensureLogDir()
+      rotateModelLog()
+      appendFileSync(MODEL_LOG_FILE, JSON.stringify(entry) + '\n', 'utf-8')
+    } catch { /* 忽略 */ }
+  },
+}

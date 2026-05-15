@@ -1,5 +1,6 @@
 // 斜杠命令注册系统
 import type { SkillRegistry } from '../skills/registry.js'
+import type { Command as UICommand, CommandContext as UICommandContext } from '../cli/commands/types.js'
 
 export interface SlashCommand {
   name: string
@@ -14,7 +15,7 @@ export interface CommandContext {
   generateCompactSummary(): Promise<string>  // 调用 LLM 生成摘要
   getHistoryLength(): number
   getEstimatedTokens(): number               // 估算当前 token 数
-  getCostSummary(): string
+  getCostSummary(): { inputTokens: number; outputTokens: number; costUsd: number }
   getBudgetInfo(): { spent: number; limit?: number } // 成本预算信息
   setModel(model: string): void
   getModel(): string
@@ -85,6 +86,23 @@ export class CommandRegistry {
       })
     }
   }
+
+  /**
+   * 将所有注册的 SlashCommand 转换为 UI 层的 Command 类型。
+   * 供 CommandSuggestions、HelpView 等 UI 组件使用。
+   */
+  toCommands(ctx: CommandContext): UICommand[] {
+    return this.getAll().map(cmd => ({
+      type: 'local' as const,
+      name: cmd.name,
+      description: cmd.description,
+      argumentHint: cmd.argumentHint,
+      async execute(args: string, _uiCtx: UICommandContext) {
+        const result = await cmd.execute(args, ctx)
+        return result as any
+      },
+    }))
+  }
 }
 
 // 创建内置命令集
@@ -119,7 +137,8 @@ export function createBuiltinCommands(_apiKey: string, _model: string): SlashCom
       async execute(_, ctx) {
         const { spent, limit } = ctx.getBudgetInfo()
         const tokens = ctx.getEstimatedTokens()
-        let text = ctx.getCostSummary()
+        const cost = ctx.getCostSummary()
+        let text = `输入 ${cost.inputTokens.toLocaleString()} tokens，输出 ${cost.outputTokens.toLocaleString()} tokens，费用 $${cost.costUsd.toFixed(4)}`
         text += `\n上下文估算: 约 ${tokens.toLocaleString()} tokens`
         if (limit !== undefined) {
           const pct = ((spent / limit) * 100).toFixed(1)
@@ -207,6 +226,13 @@ export function createBuiltinCommands(_apiKey: string, _model: string): SlashCom
           type: 'inject' as const,
           prompt: '请对当前 git diff 进行代码审查，指出潜在问题、改进建议和安全隐患。',
         }
+      },
+    },
+    {
+      name: 'config',
+      description: '查看配置、状态和使用量',
+      async execute() {
+        return { type: 'noop' as const } // UI 层以模态窗口处理
       },
     },
     {

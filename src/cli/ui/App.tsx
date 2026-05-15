@@ -2,8 +2,10 @@
 import { Box, Text, useApp, useInput, measureElement } from 'ink'
 import type { DOMElement } from 'ink'
 // SplashScreen 由 CardStream 内部根据 role='splash' 渲染
-import { CommandHint } from './CommandHint.js'
+import { CommandSuggestions } from './CommandSuggestions.js'
 import { FileHint } from './FileHint.js'
+import { HelpView } from '../commands/help/HelpView.js'
+import { ConfigView } from '../commands/config/ConfigView.js'
 import { PromptInput } from './PromptInput.js'
 // MessageCard 由 CardStream 内部使用
 import { Spinner } from './Spinner.js'
@@ -12,6 +14,8 @@ import { TONE, FG, STRIPE_BORDER } from './theme.js'
 import { CardStream } from './CardStream.js'
 import { useScrollStore, useScrollSnapshot } from './ScrollProvider.js'
 import { useTerminalSize } from './useTerminalSize.js'
+import { FullscreenLayout } from './FullscreenLayout.js'
+import { StatusNotices } from './StatusNotices.js'
 import type { QueryEngine } from '../../core/QueryEngine.js'
 import type { CommandRegistry } from '../../core/CommandRegistry.js'
 import type { CommandContext } from '../../core/CommandRegistry.js'
@@ -23,6 +27,7 @@ import { getSessionWorkDirPath } from '../../core/ContextBuilder.js'
 import { setGlobalCwd } from '../../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../../tools/AskUserTool.js'
 import { loadConfig } from '../../core/Config.js'
+import { modelLog } from '../../core/logger.js'
 
 interface Props {
   engine: QueryEngine
@@ -78,6 +83,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [fileFilter, setFileFilter] = useState('')
   const [stderrOutput, setStderrOutput] = useState('')
   const [statusBarContent, setStatusBarContent] = useState('')
+  const [activeModal, setActiveModal] = useState<'help' | 'config' | null>(null)
+  const [completedTools, setCompletedTools] = useState<Array<{ name: string; ok: boolean }>>([])
   const idCounterRef = useRef(0)
   const store = useScrollStore()
   const { rows: termRows, cols: termCols } = useTerminalSize()
@@ -89,6 +96,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   useEffect(() => {
     if (!streamRef.current) return
     const { height } = measureElement(streamRef.current)
+    if (height <= 0) modelLog.write('[App] streamHeight 异常', { height, streamHeight, termRows, termCols })
     if (height > 0 && height !== streamHeight) {
       setStreamHeight(height)
     }
@@ -96,9 +104,11 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
 
   const push = useCallback((msg: DisplayMsg) => {
     const id = msg.id ?? `msg-${++idCounterRef.current}`
+    modelLog.write('[App] push 调用', { role: msg.role, textLen: msg.text?.length ?? 0, id })
     setMsgs(prev => {
       const newMsgs = [...prev, { ...msg, id }]
       msgsLengthRef.current = newMsgs.length
+      modelLog.write('[App] setMsgs 更新', { total: newMsgs.length, lastRole: msg.role })
       return newMsgs
     })
     if (store.getState().pinned) {
@@ -116,11 +126,17 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     setLoading(true)
     loadingRef.current = true
     setStreamBuf('')
+    setCompletedTools([])
     let assistantText = ''
+    let thinkingText = ''
+    let eventCount = 0
     try {
       for await (const ev of engine.sendStreaming(prompt)) {
+        eventCount++
+        modelLog.write(`[App] 事件 #${eventCount}`, { type: ev.type, delta: 'delta' in ev ? String(ev.delta).slice(0, 50) : undefined })
         switch (ev.type) {
           case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
+          case 'thinking_delta': thinkingText += ev.delta; if (!assistantText) setStreamBuf(`💭 ${thinkingText.slice(-200)}`); break
           case 'tool_start':
             setToolProgress(`⚙ ${ev.name}`)
             // ask_user 工具：切换输入框为回答模式
@@ -138,6 +154,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             break
           case 'tool_log': break  // 隐藏工具日志
           case 'tool_end': {
+            setCompletedTools(prev => [...prev, { name: ev.name, ok: ev.result.type !== 'error' }])
             setToolProgress('')
             setAskUserPrompt(null)
             if (ev.name === 'ask_user') {
@@ -172,8 +189,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             push({ role: 'system', text: '▸ 助手计划继续执行更多操作，发送"继续"确认，或输入新指令调整方向。', color: 'yellow' })
             break
           case 'error': push({ role: 'error', text: ev.message }); break
-          case 'done':
-            if (assistantText) { setStreamBuf(''); push({ role: 'assistant', text: assistantText }); assistantText = '' }
+          case 'done': {
+            const finalText = assistantText || thinkingText
+            modelLog.write('[App] done 事件', { eventCount, textLen: assistantText.length, thinkLen: thinkingText.length, finalLen: finalText.length })
+            if (finalText) {
+              setStreamBuf('')
+              push({ role: 'assistant', text: finalText })
+              modelLog.write('[App] push assistant', { textLen: finalText.length, preview: finalText.slice(0, 50) })
+              assistantText = ''; thinkingText = ''
+            }
+            }
             // 刷新 provider/model 显示（fallback 切换后同步更新）
             if (getProviderName) {
               const latest = getProviderName()
@@ -185,6 +210,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       }
     } catch (err) {
       push({ role: 'error', text: String(err) })
+    }
+    modelLog.write('[App] for-await 结束', { eventCount, textLen: assistantText.length, thinkLen: thinkingText.length })
+    // 兜底：确保 assistant 消息一定被 push（sendStreaming 多轮时 done 事件可能不被消费）
+    const fallbackText = assistantText || thinkingText
+    if (fallbackText) {
+      push({ role: 'assistant', text: fallbackText })
+      assistantText = ''
+      thinkingText = ''
     }
     setStreamBuf('')
     setToolProgress('')
@@ -249,7 +282,10 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     },
     getHistoryLength: () => engine.store.getEventCount(),
     getEstimatedTokens: () => engine.getEstimatedTokens(),
-    getCostSummary: () => engine.costs.getSummary(),
+    getCostSummary: () => {
+      const usage = engine.costs.getUsage()
+      return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: engine.costs.getCostUsd() }
+    },
     getBudgetInfo: () => ({
       spent: engine.costs.getCostUsd(),
       limit: undefined,
@@ -385,10 +421,11 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     const parsed = commands.parse(text)
     if (parsed) {
       if (parsed.name === 'help') {
-        const helpText = commands.getAll()
-          .map(c => `  /${c.name}${c.argumentHint ? ' ' + c.argumentHint : ''}  —  ${c.description}`)
-          .join('\n')
-        push({ role: 'system', text: `可用命令:\n${helpText}` })
+        setActiveModal('help')
+        return
+      }
+      if (parsed.name === 'config') {
+        setActiveModal('config')
         return
       }
 
@@ -463,19 +500,40 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     }
   })
 
-  return (
-    <Box flexDirection="column" paddingX={1} paddingY={0}>
-      {/* 可滚动区域：消息历史（含 SplashScreen） */}
-      <Box ref={streamRef} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
-        <CardStream
-          key={sessionId}
-          msgs={msgs}
-          viewportHeight={streamHeight}
-          cols={termCols}
-        />
-      </Box>
+  // ─── 可滚动区域：消息历史 ────────────────────────────────────────────────
+  const scrollableContent = (
+    <Box ref={streamRef} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} paddingX={1}>
+      <CardStream
+        key={sessionId}
+        msgs={msgs}
+        viewportHeight={streamHeight}
+        cols={termCols}
+      />
+    </Box>
+  )
 
-      {/* 工具执行中的临时进度日志（tool_end 后自动清空，不留在历史里） */}
+  // ─── 底部固定区域：工具进度 + 命令提示 + 输入框 ──────────────────────────
+  const bottomContent = (
+    <Box flexDirection="column" paddingX={1}>
+      {/* 已完成的工具列表（流式模式下工具逐个完成，保留显示） */}
+      {loading && completedTools.length > 0 && (
+        <Box
+          borderStyle={STRIPE_BORDER}
+          borderColor={TONE.brand}
+          borderTop={false} borderRight={false} borderBottom={false}
+          paddingLeft={1} marginTop={1} width="100%"
+          flexDirection="column"
+        >
+          {completedTools.map((t, i) => (
+            <Box key={i}>
+              <Text color={t.ok ? TONE.ok : TONE.err}>{t.ok ? '✓' : '✗'} </Text>
+              <Text color={FG.sub}>{t.name}</Text>
+            </Box>
+          ))}
+        </Box>
+      )}
+
+      {/* 工具执行中的临时进度日志 */}
       {loading && toolProgress && (
         <Box
           borderStyle={STRIPE_BORDER}
@@ -518,8 +576,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       )}
 
       {/* 命令提示 */}
-      <CommandHint
-        commands={commands.getAll()}
+      <CommandSuggestions
+        commands={commands.toCommands(cmdCtx)}
         filter={commandFilter}
         visible={showCommandHint}
       />
@@ -539,7 +597,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           ? (
             <Box flexDirection="column">
               <Text color="yellow">{askUserPrompt}</Text>
-               <Box>
+              <Box>
                 <PromptInput
                   value={input}
                   onChange={setInput}
@@ -552,7 +610,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           : loading
           ? <Box><Spinner variant="circle" color={TONE.warn} /><Text color={TONE.warn}> 思考中...</Text></Box>
           : (
-           <Box>
+            <Box>
               <PromptInput
                 value={input}
                 onChange={handleInputChange}
@@ -564,53 +622,38 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           )
         }
       </Box>
+    </Box>
+  )
 
-      {/* 底部状态栏 */}
-      <Box marginTop={0}>
-        <Text color={FG.faint}>{'─'.repeat(90)}</Text>
-      </Box>
-      <Box marginTop={0}>
-        <Text color={FG.meta}>
-          <Text color={FG.faint}>会话: </Text>
-          <Text color={TONE.accent}>{sessionIdRef.current}</Text>
-           {msgs.length > 1 && (
-            <>
-              <Text color={FG.faint}> · </Text>
-              <Text>{msgs.length} 消息</Text>
-            </>
-          )}
-          <Text color={FG.faint}> | </Text>
-          {displayProvider}
-          <Text color={FG.faint}> · </Text>
-          <Text color={TONE.brand}>{modelRef.current}</Text>
-          {costInfo && (
-            <>
-              <Text color={FG.faint}> | </Text>
-              <Text color={TONE.accent}>▸ ${costInfo.costUsd.toFixed(4)}</Text>
-              <Text color={FG.faint}> · </Text>
-              <Text>{costInfo.inputTokens.toLocaleString()} in / {costInfo.outputTokens.toLocaleString()} out</Text>
-            </>
-          )}
-          <Text color={FG.faint}> | </Text>
-          <Text color={loading ? TONE.warn : FG.faint}>{loading ? '◐ Ctrl+C 中断' : 'Ctrl+C 退出'}</Text>
-        </Text>
-      </Box>
+  // ─── 状态栏 ──────────────────────────────────────────────────────────────
+  const statusBar = (
+    <StatusNotices
+      sessionId={sessionIdRef.current}
+      messageCount={msgs.length}
+      providerName={displayProvider}
+      model={modelRef.current}
+      costInfo={costInfo}
+      loading={loading}
+      stderrOutput={stderrOutput}
+      statusBarContent={statusBarContent}
+    />
+  )
 
-      {/* stderr 输出 */}
-      {stderrOutput && (
-        <Box marginTop={0}>
-          <Text color={FG.faint}>⚠ {stderrOutput}</Text>
-        </Box>
-      )}
+  // ─── 模态内容 ──────────────────────────────────────────────────────────────
+  const modalContent = activeModal === 'help'
+    ? <HelpView commands={commands.toCommands(cmdCtx)} onClose={() => setActiveModal(null)} />
+    : activeModal === 'config'
+    ? <ConfigView ctx={cmdCtx as any} onClose={() => setActiveModal(null)} />
+    : undefined
 
-      {/* 状态栏下方的交互信息（如 /sessions 列表） */}
-      {statusBarContent && (
-        <Box flexDirection="column" marginTop={0}>
-          {statusBarContent.split('\n').map((line, i) => (
-            <Text key={i} color={FG.sub}>{line}</Text>
-          ))}
-        </Box>
-      )}
+  return (
+    <Box paddingX={0} paddingY={0}>
+      <FullscreenLayout
+        scrollable={scrollableContent}
+        bottom={bottomContent}
+        statusBar={statusBar}
+        modal={modalContent}
+      />
     </Box>
   )
 }

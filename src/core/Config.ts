@@ -269,6 +269,10 @@ export interface ResolvedConfig extends AgentConfig {
   permissionMode: 'ask' | 'craft' | 'plan'
   maxTokens: number
   maxTurns: number
+  maxBudgetUsd?: number
+  agentCwd?: string
+  memoryCondense?: boolean
+  autoDistillSkill?: boolean
   autoCompactThreshold?: number
   // logging 分组展开
   logLevel: 'debug' | 'info' | 'warn' | 'error'

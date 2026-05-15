@@ -9,6 +9,8 @@ import { autoExtractMemories, autoDistillSkill } from '../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../skills/index.js'
 import { saveConfig } from '../core/Config.js'
 import { App } from '../cli/ui/App.js'
+import { AppStateProvider } from '../cli/ui/AppStateProvider.js'
+import { getDefaultAppState } from '../cli/ui/AppState.js'
 import { KeystrokeProvider } from '../cli/ui/KeystrokeContext.js'
 import { ScrollProvider } from '../cli/ui/ScrollProvider.js'
 import { getStdinReader } from '../cli/ui/StdinReader.js'
@@ -111,31 +113,33 @@ export async function runInteractiveMode(
     const { waitUntilExit } = render(
       React.createElement(KeystrokeProvider, null,
         React.createElement(ScrollProvider, null,
-          React.createElement(App, {
-          engine,
-          commands: registry,
-          sessionId,
-          currentModel: model,
-          providerName: opts.providerName,
-          getProviderName: () => ({ name: provider.name, model: provider.model }),
-          onFirstMessage: initSession,
-          onModelChange: (m: string) => {
-            model = m
-            saveConfig({ model: m })
-            // 同步更新 FallbackProvider 内部索引，使下次 stream() 直接从用户选择的模型开始
-            if (provider instanceof FallbackProvider) {
-              provider.selectModel(m)
-            }
-          },
-          onStderrReady: (cb: StderrListener) => {
-            stderrCallback = cb
-            // 将 App 挂载前缓冲的 stderr 输出发送给 App
-            for (const text of earlyStderrBuffer) {
-              cb(text)
-            }
-            earlyStderrBuffer.length = 0
-          },
-        }),
+          React.createElement(AppStateProvider, { initialState: getDefaultAppState(sessionId, model, opts.providerName), children:
+            React.createElement(App, {
+            engine,
+            commands: registry,
+            sessionId,
+            currentModel: model,
+            providerName: opts.providerName,
+            getProviderName: () => ({ name: provider.name, model: provider.model }),
+            onFirstMessage: initSession,
+            onModelChange: (m: string) => {
+              model = m
+              saveConfig({ model: m })
+              // 同步更新 FallbackProvider 内部索引，使下次 stream() 直接从用户选择的模型开始
+              if (provider instanceof FallbackProvider) {
+                provider.selectModel(m)
+              }
+            },
+            onStderrReady: (cb: StderrListener) => {
+              stderrCallback = cb
+              // 将 App 挂载前缓冲的 stderr 输出发送给 App
+              for (const text of earlyStderrBuffer) {
+                cb(text)
+              }
+              earlyStderrBuffer.length = 0
+            },
+          }),
+          }),
         ),
       ),
     )

@@ -1,20 +1,10 @@
 import React, { useRef, useEffect, useMemo } from 'react'
 import { Box, measureElement } from 'ink'
 import type { DOMElement } from 'ink'
-import { MessageCard } from './MessageCard.js'
-import type { MessageRole } from './MessageCard.js'
+import { MessageRow } from './MessageRow.js'
 import { SplashScreen } from './SplashScreen.js'
 import { useScrollStore } from './ScrollProvider.js'
-
-// ─── 类型 ──────────────────────────────────────────────────────────────────
-
-interface DisplayMsg {
-  id?: string
-  role: string
-  text: string
-  color?: string
-  splashProps?: { version: string; model: string; providerName: string; projectPath: string }
-}
+import type { DisplayMsg } from './AppState.js'
 
 interface CardStreamProps {
   msgs: DisplayMsg[]
@@ -24,7 +14,7 @@ interface CardStreamProps {
 
 // ─── MeasuredCard ──────────────────────────────────────────────────────────
 
-function MeasuredCard({ msg }: { msg: DisplayMsg }) {
+function MeasuredCard({ msg, cols }: { msg: DisplayMsg; cols: number }) {
   const ref = useRef<DOMElement>(null)
   const store = useScrollStore()
   const prevHeightRef = useRef(0)
@@ -42,11 +32,7 @@ function MeasuredCard({ msg }: { msg: DisplayMsg }) {
     <Box ref={ref} flexShrink={0} marginBottom={1}>
       {msg.role === 'splash' && msg.splashProps
         ? <SplashScreen {...msg.splashProps} />
-        : <MessageCard
-            role={msg.role as MessageRole}
-            text={msg.text}
-            color={msg.color}
-          />
+        : <MessageRow msg={msg} columns={cols} />
       }
     </Box>
   )
@@ -97,7 +83,7 @@ export function CardStream({ msgs, viewportHeight, cols }: CardStreamProps) {
         {viewport.topSpacer > 0 && <Box height={viewport.topSpacer} flexShrink={0} />}
         {/* 可见卡片 */}
         {visibleMsgs.map(msg => (
-          <MeasuredCard key={msg.id} msg={msg} />
+          <MeasuredCard key={msg.id} msg={msg} cols={cols} />
         ))}
         {/* 下方不可见区域占位 */}
         {viewport.bottomSpacer > 0 && <Box height={viewport.bottomSpacer} flexShrink={0} />}

@@ -4,7 +4,7 @@ import { isReadOnlyCall } from './Tool.js'
 import type { ToolRegistry } from './ToolRegistry.js'
 import type { PermissionManager } from './PermissionManager.js'
 import { CostTracker } from './CostTracker.js'
-import { logger } from './logger.js'
+import { logger, modelLog } from './logger.js'
 import { auditLog } from './audit.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
 import { clearFileCache } from '../tools/FileReadTool.js'
@@ -126,6 +126,7 @@ export type InterruptReason = 'turn_limit' | 'budget_exceeded' | 'aborted' | 'er
 
 export type StreamEvent =
   | { type: 'text_delta'; delta: string }
+  | { type: 'thinking_delta'; delta: string }
   | { type: 'tool_start'; id: string; name: string; input: unknown; description: string }
   | { type: 'tool_log'; id: string; name: string; line: string }
   | { type: 'tool_end'; id: string; name: string; result: ToolResult }
@@ -382,11 +383,17 @@ ${contentToSummarize}
 
         if (chunk.type === 'thinking_delta' && chunk.delta) {
           thinkingText += chunk.delta
+          modelLog.write('[stream] thinking_delta', { len: chunk.delta.length, total: thinkingText.length })
+          yield { type: 'thinking_delta', delta: chunk.delta }
         } else if (chunk.type === 'text_delta' && chunk.delta) {
           fullText += chunk.delta
+          modelLog.write('[stream] text_delta', { len: chunk.delta.length, total: fullText.length })
           yield { type: 'text_delta', delta: chunk.delta }
         } else if (chunk.type === 'tool_call' && chunk.toolCall) {
           toolCalls.push(chunk.toolCall)
+          modelLog.write('[stream] tool_call', { name: chunk.toolCall.name, id: chunk.toolCall.id })
+        } else if (chunk.type === 'done') {
+          modelLog.write('[stream] provider done', { fullTextLen: fullText.length, thinkingLen: thinkingText.length, toolCalls: toolCalls.length })
         } else if (chunk.type === 'usage' && chunk.usage) {
           this.costs.add({
             inputTokens: chunk.usage.inputTokens,
@@ -1128,6 +1135,7 @@ ${contentToSummarize}
       if (this.onAfterSend) {
         try { this.onAfterSend() } catch { /* 钩子失败不阻断 */ }
       }
+      modelLog.write('[sendStreaming] yield done', { exitStatus, totalToolCalls: this.totalToolCalls })
       yield { type: 'done' }
     }
   }
@@ -1403,6 +1411,7 @@ ${contentToSummarize}
 
             if (chunk.type === 'thinking_delta' && chunk.delta) {
               thinkingText += chunk.delta
+              yield { type: 'thinking_delta', delta: chunk.delta }
             } else if (chunk.type === 'text_delta' && chunk.delta) {
               fullText += chunk.delta
               yield { type: 'text_delta', delta: chunk.delta }
@@ -1482,12 +1491,16 @@ ${contentToSummarize}
           .replace(HEARTBEAT_CONTINUE, '')
           .trim()
         if (cleanText || thinkingText || toolCallEvents) {
+          modelLog.write('[sendStreaming-v2] 写入 assistant_message', { cleanTextLen: cleanText.length, thinkingLen: thinkingText.length, toolCalls: toolCallEvents?.length ?? 0, preview: cleanText.slice(0, 50) })
           this.store.appendEvents(createAssistantMessageEvent(
             cleanText,
             toolCallEvents,
             this.currentRequestId ?? undefined,
             thinkingText || undefined,
           ))
+          modelLog.write('[sendStreaming-v2] store 写入完成', { eventCount: this.store.getEventCount() })
+        } else {
+          modelLog.write('[sendStreaming-v2] 跳过写入（无内容）', { fullTextLen: fullText.length, cleanTextLen: cleanText.length, thinkingLen: thinkingText.length })
         }
 
         if (hasImageBlocks && turns === 1) {
@@ -1566,6 +1579,7 @@ ${contentToSummarize}
       if (this.onAfterSend) {
         try { this.onAfterSend() } catch { /* 钩子失败不阻断 */ }
       }
+      modelLog.write('[sendStreaming-v2] yield done', { exitStatus, totalToolCalls: this.totalToolCalls })
       yield { type: 'done' }
     }
   }

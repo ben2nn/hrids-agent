@@ -4,7 +4,7 @@
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, StreamChunk } from './types.js'
 import { LlmError } from '../LlmError.js'
-import { logger } from '../logger.js'
+import { logger, modelLog } from '../logger.js'
 
 export interface FallbackStatusEvent {
   type: 'retrying' | 'switching' | 'rate_limited'
@@ -55,7 +55,6 @@ export class FallbackProvider implements LLMProvider {
 
   private providers: LLMProvider[]
   private groups: ProviderGroup[]
-  private currentGroupIdx: number
   private currentModelIdx: number
   private onStatus?: (event: FallbackStatusEvent) => void
 
@@ -63,7 +62,6 @@ export class FallbackProvider implements LLMProvider {
     if (providers.length === 0) throw new Error('FallbackProvider 至少需要一个提供商')
     this.providers = providers
     this.groups = groups ?? []
-    this.currentGroupIdx = 0
     this.currentModelIdx = 0
     this.onStatus = onStatus
   }
@@ -75,22 +73,14 @@ export class FallbackProvider implements LLMProvider {
    * 支持 "model" 或 "provider:model" 格式。
    */
   selectModel(model: string): boolean {
-    // 支持 "provider:model" 格式，提取冒号后的部分
     const modelOnly = model.includes(':') ? model.split(':').slice(1).join(':') : model
 
-    if (this.groups.length > 0) {
-      for (let gi = 0; gi < this.groups.length; gi++) {
-        for (let mi = 0; mi < this.groups[gi].providers.length; mi++) {
-          if (this.groups[gi].providers[mi].model === modelOnly) {
-            this.currentGroupIdx = gi
-            this.currentModelIdx = mi
-            return true
-          }
-        }
-      }
-    }
-    for (let i = 0; i < this.providers.length; i++) {
-      if (this.providers[i].model === modelOnly) {
+    // 在展平的 allProviders 中查找，用全局索引
+    const all = this.groups.length > 0
+      ? this.groups.flatMap(g => g.providers)
+      : this.providers
+    for (let i = 0; i < all.length; i++) {
+      if (all[i].model === modelOnly) {
         this.currentModelIdx = i
         return true
       }
@@ -99,10 +89,10 @@ export class FallbackProvider implements LLMProvider {
   }
 
   private currentProvider(): LLMProvider {
-    if (this.groups.length > 0) {
-      return this.groups[this.currentGroupIdx].providers[this.currentModelIdx]
-    }
-    return this.providers[this.currentModelIdx]
+    const all = this.groups.length > 0
+      ? this.groups.flatMap(g => g.providers)
+      : this.providers
+    return all[this.currentModelIdx % all.length]
   }
 
   async *stream(
@@ -112,121 +102,80 @@ export class FallbackProvider implements LLMProvider {
     maxTokens: number,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {
-    const totalProviders = this.groups.length > 0
-      ? this.groups.reduce((sum, g) => sum + g.providers.length, 0)
-      : this.providers.length
+    // 展平所有 provider 为一维数组
+    const allProviders: LLMProvider[] = this.groups.length > 0
+      ? this.groups.flatMap(g => g.providers)
+      : [...this.providers]
+    const failed = new Set<number>()
 
-    // 并发安全：每次 stream() 使用独立的局部索引
-    let localGroupIdx = this.currentGroupIdx
-    let localModelIdx = this.currentModelIdx
+    // 从上次成功的位置开始
+    let cursor = this.currentModelIdx
+    let lastErr: unknown
 
-    const getProvider = () => {
-      if (this.groups.length > 0) return this.groups[localGroupIdx].providers[localModelIdx]
-      return this.providers[localModelIdx]
-    }
-
-    const advance = () => {
-      if (this.groups.length > 0) {
-        const group = this.groups[localGroupIdx]
-        if (localModelIdx < group.providers.length - 1) { localModelIdx++; return }
-        if (localGroupIdx < this.groups.length - 1) { localGroupIdx++; localModelIdx = 0; return }
-        localGroupIdx = 0; localModelIdx = 0; return
-      }
-      if (localModelIdx < this.providers.length - 1) { localModelIdx++; return }
-      localModelIdx = 0
-    }
-
-    let failedSwitches = 0
-
-    while (true) {
+    while (failed.size < allProviders.length) {
       if (signal?.aborted) return
 
-      const provider = getProvider()
-      const platformInfo = this.groups.length > 0
-        ? `平台[${localGroupIdx + 1}/${this.groups.length}]:${this.groups[localGroupIdx].platformName} `
-        : ''
+      // 跳过已失败的模型
+      let attempts = 0
+      while (failed.has(cursor) && attempts < allProviders.length) {
+        cursor = (cursor + 1) % allProviders.length
+        attempts++
+      }
+      if (failed.has(cursor)) break
 
-      let lastErr: unknown
-      let retryable = false
+      const provider = allProviders[cursor]
+      log.info(`尝试模型: ${provider.name}/${provider.model}（剩余 ${allProviders.length - failed.size}/${allProviders.length}）`)
 
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        log.info(
-          `${platformInfo}尝试模型: ${provider.name}/${provider.model}` +
-          (attempt > 1 ? `（第 ${attempt}/${MAX_RETRIES} 次重试）` : ''),
-        )
+        if (attempt > 1) log.info(`  重试 ${attempt}/${MAX_RETRIES}: ${provider.name}/${provider.model}`)
 
         let hasContent = false
         try {
-          let thinkingCount = 0
-          let textCount = 0
-          let toolCallCount = 0
-
           for await (const chunk of provider.stream(messages, tools, systemPrompt, maxTokens, signal)) {
-            if (chunk.type === 'thinking_delta') thinkingCount++
-            if (chunk.type === 'text_delta') textCount++
-            if (chunk.type === 'tool_call') toolCallCount++
-
+            modelLog.write(`[chunk] ${provider.model}`, { type: chunk.type, delta: chunk.delta?.slice(0, 30), hasContent })
             if (!hasContent && (chunk.type === 'text_delta' || chunk.type === 'tool_call' || chunk.type === 'thinking_delta')) {
               hasContent = true
-              // fallback 成功 → 记住当前位置，下次直接从该模型开始
-              this.currentGroupIdx = localGroupIdx
-              this.currentModelIdx = localModelIdx
+              this.currentModelIdx = cursor
             }
-            if (chunk.type === 'done') {
-              if (!hasContent) {
-                log.warn('模型返回空响应', { provider: provider.name, model: provider.model, thinkingCount, textCount, toolCallCount })
-                lastErr = new LlmError('unknown', '模型返回空响应', true)
-                break
-              }
-              yield chunk
-              return
+            if (chunk.type === 'done' && !hasContent) {
+              lastErr = new LlmError('unknown', '模型返回空响应', true)
+              break
             }
             yield chunk
+            if (chunk.type === 'done') return
           }
           if (hasContent) return
-          log.warn('模型返回空响应（流结束）', { provider: provider.name, model: provider.model, thinkingCount, textCount, toolCallCount })
-          if (!lastErr) lastErr = new LlmError('unknown', '模型返回空响应', true)
+          log.warn(`模型 ${provider.name}/${provider.model} 返回空响应`)
+          lastErr = new LlmError('unknown', '模型返回空响应', true)
         } catch (err) {
           lastErr = err
           const llmErr = LlmError.fromUnknown(err)
-          retryable = llmErr.retryable
-          // 已经 yield 过内容给调用方，不能重试（否则调用方会收到重复内容）
-          if (hasContent) {
-            log.warn('流式输出中途出错，已有内容不可重试', { provider: provider.name, error: llmErr.message })
-            throw err
-          }
-          if (!retryable) {
-            log.warn(`模型 ${provider.name}/${provider.model} 不可恢复错误，跳过重试`, { code: llmErr.code, error: llmErr.message })
+          if (hasContent) throw err
+          if (!llmErr.retryable) {
+            log.warn(`模型 ${provider.name}/${provider.model} 不可恢复错误: ${llmErr.message}`)
             break
           }
           if (attempt < MAX_RETRIES) {
             const delay = calcBackoff(attempt, llmErr.retryAfterMs)
-            log.warn(`模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，${Math.round(delay / 1000)}s 后重试`, { code: llmErr.code, error: llmErr.message })
-            // 发射状态事件：限流时提示用户等待时间
-            if (llmErr.code === 'rate_limited') {
-              this.onStatus?.({ type: 'rate_limited', provider: provider.name, model: provider.model, delayMs: delay, attempt, maxAttempts: MAX_RETRIES, reason: llmErr.message })
-            } else {
-              this.onStatus?.({ type: 'retrying', provider: provider.name, model: provider.model, attempt, maxAttempts: MAX_RETRIES, delayMs: delay, reason: llmErr.message })
-            }
+            log.warn(`模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，${Math.round(delay / 1000)}s 后重试`)
             try { await sleep(delay, signal) } catch { return }
           }
         }
       }
 
-      advance()
-      failedSwitches++
-
-      if (failedSwitches >= totalProviders) {
-        log.error('所有模型均失败', { error: String(lastErr) })
-        throw lastErr instanceof LlmError ? lastErr : new LlmError('unknown', `所有模型均失败。最后错误：${String(lastErr)}`, false, undefined, lastErr)
+      // 失败 → 标记为不可用，切换下一个
+      failed.add(cursor)
+      if (failed.size < allProviders.length) {
+        cursor = (cursor + 1) % allProviders.length
+        while (failed.has(cursor)) cursor = (cursor + 1) % allProviders.length
+        const next = allProviders[cursor]
+        log.warn(`模型 ${provider.name}/${provider.model} 已排除，切换到 ${next.model}`)
+        this.onStatus?.({ type: 'switching', provider: next.name, model: next.model, reason: `${provider.model} 失败` })
       }
-
-      const next = getProvider()
-      log.warn(
-        `模型 ${provider.name}/${provider.model} ${MAX_RETRIES} 次均失败，切换到 ${next.model}`,
-        { error: String(lastErr) },
-      )
-      this.onStatus?.({ type: 'switching', provider: next.name, model: next.model, reason: `${provider.model} 失败` })
     }
+
+    const errMsg = lastErr instanceof LlmError ? lastErr.message : String(lastErr)
+    log.error('所有模型均失败', { error: errMsg })
+    throw lastErr instanceof LlmError ? lastErr : new LlmError('unknown', `所有模型均失败: ${errMsg}`, false, undefined, lastErr)
   }
 }

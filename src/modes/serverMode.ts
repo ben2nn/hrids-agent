@@ -90,7 +90,10 @@ export async function runServerMode(
           generateCompactSummary: async () => engine.generateCompactSummary(),
           getHistoryLength: () => engine.store.getEventCount(),
           getEstimatedTokens: () => engine.getEstimatedTokens(),
-          getCostSummary: () => engine.costs.getSummary(),
+          getCostSummary: () => {
+            const usage = engine.costs.getUsage()
+            return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: engine.costs.getCostUsd() }
+          },
           getBudgetInfo: () => ({ spent: engine.costs.getCostUsd(), limit: undefined as number | undefined }),
           setModel: (_m: string) => { /* server 模式暂不支持切换模型 */ },
           getModel: () => model,
