@@ -174,16 +174,10 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
   const isWindows = platform === 'win32'
   const isMac = platform === 'darwin'
 
-  const shellEnv = process.env.SHELL ?? process.env.ComSpec ?? ''
-  const shellName = isWindows
-    ? (shellEnv.toLowerCase().includes('powershell') || process.env.PSModulePath ? 'PowerShell' : 'cmd.exe')
-    : (shellEnv.split('/').pop() ?? 'sh')
-
   const osName = isWindows ? 'Windows' : isMac ? 'macOS' : 'Linux'
 
   const envInfo = [
     `操作系统: ${osName} (${platform})`,
-    `Shell: ${shellName}`,
     `当前时间: ${new Date().toLocaleString('zh-CN')}`,
     `用户主目录: ${homedir()}`,
     `用户名: ${process.env.USERNAME ?? process.env.USER ?? process.env.LOGNAME ?? '未知'}`,
@@ -193,22 +187,21 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
 
   if (isWindows) {
     envInfo.push(
-      '注意: Windows 环境，Shell 为 PowerShell，路径分隔符为 \\' + '\n' +
-      '常用命令对照（必须用 PowerShell 语法，禁止直接使用 Linux 命令）：' + '\n' +
-      '  mkdir -p dir        → New-Item -ItemType Directory -Force -Path dir' + '\n' +
-      '  ls / ls -la         → Get-ChildItem（别名 ls / dir 也可用）' + '\n' +
-      '  cp src dst          → Copy-Item src dst' + '\n' +
-      '  mv src dst          → Move-Item src dst' + '\n' +
-      '  rm file             → Remove-Item file' + '\n' +
-      '  rm -rf dir          → Remove-Item -Recurse -Force dir' + '\n' +
-      '  cat file            → Get-Content file' + '\n' +
-      '  echo "text"         → Write-Output "text"（或 echo 也可用）' + '\n' +
-      '  grep pattern file   → Select-String -Path file -Pattern pattern' + '\n' +
-      '  find . -name "*.x"  → Get-ChildItem -Recurse -Filter "*.x"' + '\n' +
-      '  pwd                 → Get-Location（别名 pwd 也可用）' + '\n' +
-      '  export VAR=val      → $env:VAR = "val"' + '\n' +
-      '  cmd1 && cmd2        → cmd1; if ($?) { cmd2 }' + '\n' +
-      '  chmod +x script.sh  → （Windows 无需，直接运行 .ps1 / .bat）'
+      '## Windows 命令使用指南\n' +
+      '可直接使用的命令（PATH 中的可执行文件）：\n' +
+      '  git status / git diff / git log\n' +
+      '  node -v / npm install / npx vitest\n' +
+      '  python --version / pip install\n' +
+      '  tsc / eslint / prettier\n' +
+      'Windows 内置命令（自动通过 cmd.exe 执行）：\n' +
+      '  dir / type / echo / findstr / tasklist / ipconfig\n' +
+      '需要 shell 特性（管道、重定向、&&）时用 cmd.exe 包装：\n' +
+      '  cmd.exe /d /s /c "dir /b && echo done"\n' +
+      '  cmd.exe /d /s /c "findstr /s /i \"error\" *.log"\n' +
+      'PowerShell cmdlet 不是独立可执行文件，必须通过 powershell.exe 调用：\n' +
+      '  powershell.exe -Command "Get-ChildItem -Recurse *.ts"\n' +
+      '  powershell.exe -Command "Get-Process | Where-Object CPU -gt 100"\n' +
+      '路径分隔符：优先使用 /（Node.js 和大多数工具都支持），\\ 也可以'
     )
   } else if (isMac) {
     envInfo.push('注意: macOS 环境，使用 bash/zsh 命令')

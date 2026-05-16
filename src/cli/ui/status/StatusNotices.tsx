@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import { TONE, FG } from './theme.js'
-import type { CostInfo } from './AppState.js'
+import { TONE, FG } from '../terminal/theme.js'
+import type { CostInfo } from '../app/AppState.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -14,6 +14,7 @@ interface StatusNoticesProps {
   loading: boolean
   stderrOutput?: string
   statusBarContent?: string
+  cols?: number
 }
 
 // ─── 组件 ─────────────────────────────────────────────────────────────────
@@ -27,12 +28,14 @@ function StatusNoticesImpl({
   loading,
   stderrOutput,
   statusBarContent,
+  cols = 90,
 }: StatusNoticesProps) {
+  const separatorLen = Math.min(cols, 90)
   return (
     <Box flexDirection="column">
       {/* 分隔线 */}
       <Box marginTop={0}>
-        <Text color={FG.faint}>{'─'.repeat(90)}</Text>
+        <Text color={FG.faint}>{'─'.repeat(separatorLen)}</Text>
       </Box>
 
       {/* 状态栏 */}

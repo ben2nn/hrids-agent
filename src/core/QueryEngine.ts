@@ -14,7 +14,7 @@ import {
   ConversationStore,
   createUserEvent, createAssistantEvent, createCompactEvent,
   createReqStartEvent, createReqEndEvent,
-  createToolDispatchEvent, createToolPermissionEvent, createToolStartEvent, createToolEndEvent,
+  createToolIntentEvent, createToolConfirmEvent, createToolStartEvent, createToolEndEvent,
   createLlmStartEvent, createLlmEndEvent,
   createStormBlockedEvent, createBudgetWarnEvent, createBudgetExceededEvent,
   createSessionOpenEvent, createFileTouchedEvent, createErrorEvent,
@@ -117,6 +117,8 @@ export interface QueryEngineConfig {
   autoCompactThreshold?: number  // 自动压缩 token 阈值（默认 100000）
   sessionCwd?: string            // 会话工作目录，用于图片预处理
   uploadsDir?: string            // 会话上传目录，用于 @引用 搜索
+  sessionId?: string             // 会话 ID，用于快照和事件记录
+  resumed?: boolean              // 是否为恢复的会话
   /** FallbackProvider 状态回调（用于通知用户重试/切换状态） */
   onFallbackStatus?: (event: { type: 'retrying' | 'switching' | 'rate_limited'; provider: string; model: string; delayMs?: number; reason?: string }) => void
 }
@@ -191,7 +193,7 @@ export class QueryEngine {
     this.store = store ?? new ConversationStore()
     this.abortController = new AbortController()
     this.costs = new CostTracker(config.provider.model)
-    this.store.appendEvents(createSessionOpenEvent(config.provider.model, false))
+    this.store.appendEvents(createSessionOpenEvent(config.sessionId ?? 'unknown', config.resumed ?? false))
   }
 
   /**
@@ -411,6 +413,7 @@ ${contentToSummarize}
           }
           // 成本超限：立即停止（在流式输出中途也能响应）
           if (maxBudgetUsd !== undefined && costUsd >= maxBudgetUsd) {
+            this.store.appendEvents(createBudgetExceededEvent(costUsd, maxBudgetUsd))
             yield { type: 'budget_exceeded', costUsd, limitUsd: maxBudgetUsd }
             return
           }
@@ -470,6 +473,10 @@ ${contentToSummarize}
     }
 
     const description = tool.describe?.(tc.input) ?? tc.name
+
+    // 写入 tool_intent 事件（模型决定调用此工具）
+    this.store.appendEvents(createToolIntentEvent(this.currentRequestId ?? undefined, tc.id, tc.name, tc.input, description))
+
     events.push({ type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description })
     log.debug('工具开始执行', { toolName: tc.name, toolId: tc.id, description })
 
@@ -517,11 +524,17 @@ ${contentToSummarize}
         denyReason = '用户拒绝了此操作'
       }
       events.push({ type: 'permission_denied', id: tc.id, toolName: tc.name, description })
+      // 写入 tool_confirm(deny) 事件
+      this.store.appendEvents(createToolConfirmEvent(
+        this.currentRequestId ?? undefined, tc.id, tc.name, 'deny',
+        this.config.permissions.getMode(), permReq.isReadonly, permReq.isDestructive ?? false,
+        denyReason,
+      ))
       return { ok: false, execStatus: 'denied', errorSummary: `权限拒绝: ${description}`, resultContent: denyReason, events }
     }
 
-    // 权限已授予，写入旁路日志
-    this.store.appendEvents(createToolPermissionEvent(
+    // 权限已授予，写入 tool_confirm(allow) 事件
+    this.store.appendEvents(createToolConfirmEvent(
       this.currentRequestId ?? undefined, tc.id, tc.name, 'allow',
       this.config.permissions.getMode(), permReq.isReadonly, permReq.isDestructive ?? false,
     ))
@@ -677,11 +690,6 @@ ${contentToSummarize}
       batches: batches.map(b => ({ parallel: b.parallel, count: b.calls.length })),
     })
 
-    // 写入工具分发事件
-    for (const tc of toolCalls) {
-      this.store.appendEvents(createToolDispatchEvent(this.currentRequestId ?? undefined, tc.id, tc.name, tc.input))
-    }
-
     for (const batch of batches) {
       if (batch.parallel && batch.calls.length > 1) {
         for await (const ev of this.executeBatch(batch.calls)) {
@@ -744,6 +752,9 @@ ${contentToSummarize}
       }
 
       const { tool, effectiveInput } = prepared
+
+      // 写入工具开始执行事件
+      this.store.appendEvents(createToolStartEvent(this.currentRequestId ?? undefined, tc.id, tc.name, effectiveInput, tool.describe?.(tc.input) ?? tc.name))
 
       // 阶段 2：工具执行（超时 + abort 竞争 + 日志 flush）
       const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
@@ -1240,6 +1251,9 @@ ${contentToSummarize}
       }
 
       const { tool, effectiveInput } = prepared
+
+      // 写入工具开始执行事件
+      this.store.appendEvents(createToolStartEvent(this.currentRequestId ?? undefined, tc.id, tc.name, effectiveInput, tool.describe?.(tc.input) ?? tc.name))
 
       const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
       const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)

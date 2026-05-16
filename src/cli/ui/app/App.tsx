@@ -1,33 +1,34 @@
 ﻿import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { Box, Text, useApp, useInput } from 'ink'
 // SplashScreen 由 CardStream 内部根据 role='splash' 渲染
-import { CommandSuggestions } from './CommandSuggestions.js'
-import { FileHint } from './FileHint.js'
-import { HelpView } from '../commands/help/HelpView.js'
-import { ConfigView } from '../commands/config/ConfigView.js'
-import { PromptInput } from './PromptInput.js'
-import { SessionList } from './SessionList.js'
+import { CommandSuggestions } from '../input/CommandSuggestions.js'
+import { FileHint } from '../input/FileHint.js'
+import { HelpView } from '../../commands/help/HelpView.js'
+import { ConfigView } from '../../commands/config/ConfigView.js'
+import { PromptInput } from '../input/PromptInput.js'
+import { SessionList } from '../sessions/SessionList.js'
 // MessageCard 由 CardStream 内部使用
 import { Spinner } from './Spinner.js'
-import { useKeystroke } from './KeystrokeContext.js'
-import { TONE, FG, STRIPE_BORDER, getToolDisplayName } from './theme.js'
-import { CardStream } from './CardStream.js'
-import { useScrollStore, useScrollSnapshot } from './ScrollProvider.js'
-import { useTerminalSize } from './useTerminalSize.js'
+import { useKeystroke } from '../terminal/KeystrokeContext.js'
+import { TONE, FG, STRIPE_BORDER, getToolDisplayName } from '../terminal/theme.js'
+import { CardStream } from '../messages/CardStream.js'
+import { useScrollStore, useScrollSnapshot } from '../terminal/ScrollProvider.js'
+import { useTerminalSize } from '../terminal/useTerminalSize.js'
 import { FullscreenLayout } from './FullscreenLayout.js'
-import { StatusNotices } from './StatusNotices.js'
-import type { QueryEngine } from '../../core/QueryEngine.js'
-import type { CommandRegistry } from '../../core/CommandRegistry.js'
-import type { CommandContext } from '../../core/CommandRegistry.js'
-import { setCronTriggerCallback } from '../../tools/ScheduleCronTool.js'
-import type { CronJob } from '../../tools/ScheduleCronTool.js'
-import { listSessions, loadSessionMessages, generateSessionId, archiveSession, listArchives } from '../../core/SessionStore.js'
-import { projectForDisplay } from '../../core/projections.js'
-import { getSessionWorkDirPath } from '../../core/ContextBuilder.js'
-import { setGlobalCwd } from '../../tools/BashTool.js'
-import { resolveAskUser, getPendingAskUser } from '../../tools/AskUserTool.js'
-import { loadConfig } from '../../core/Config.js'
-import { modelLog } from '../../core/logger.js'
+import { StatusNotices } from '../status/StatusNotices.js'
+import type { QueryEngine } from '../../../core/QueryEngine.js'
+import type { CommandRegistry } from '../../../core/CommandRegistry.js'
+import type { CommandContext } from '../../../core/CommandRegistry.js'
+import { setCronTriggerCallback } from '../../../tools/ScheduleCronTool.js'
+import type { CronJob } from '../../../tools/ScheduleCronTool.js'
+import { listSessions, loadSessionMessages, generateSessionId, archiveSession, listArchives } from '../../../core/SessionStore.js'
+import { projectForDisplay } from '../../../core/projections.js'
+import { getSessionWorkDirPath } from '../../../core/ContextBuilder.js'
+import { setGlobalCwd } from '../../../tools/BashTool.js'
+import { resolveAskUser, getPendingAskUser } from '../../../tools/AskUserTool.js'
+import { loadConfig } from '../../../core/Config.js'
+import { modelLog } from '../../../core/logger.js'
+import { recordCommandUse } from '../input/command-stats.js'
 
 interface Props {
   engine: QueryEngine
@@ -65,10 +66,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState(initialSessionId)
   const sessionIdRef = useRef(initialSessionId)
-  const [msgs, setMsgs] = useState<DisplayMsg[]>([
-    { id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: currentModel, providerName, projectPath: process.cwd() } },
-    { role: 'system', text: '输入 /help 查看命令' },
-  ])
+  const config = useMemo(() => loadConfig(), [])
+  const showSplash = config.ui?.splash !== false
+  const [msgs, setMsgs] = useState<DisplayMsg[]>(() => {
+    const initial: DisplayMsg[] = []
+    if (showSplash) {
+      initial.push({ id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: currentModel, providerName, projectPath: process.cwd() } })
+    }
+    initial.push({ role: 'system', text: '输入 /help 查看命令' })
+    return initial
+  })
   const sessionReadyRef = useRef(false)
   const [loading, setLoading] = useState(false)
   const [streamBuf, setStreamBuf] = useState('')   // 当前流式文本缓冲
@@ -93,10 +100,11 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [statusBarContent, setStatusBarContent] = useState('')
   const [activeModal, setActiveModal] = useState<'help' | 'config' | null>(null)
   const [showSessionList, setShowSessionList] = useState(false)
-  const [completedTools, setCompletedTools] = useState<Array<{ name: string; ok: boolean }>>([])
+  const [completedTools, setCompletedTools] = useState<Array<{ name: string; description: string; ok: boolean }>>([])
+  const currentToolDescRef = useRef('')  // 当前执行中工具的描述
   const idCounterRef = useRef(0)
   const store = useScrollStore()
-  const { cols: termCols } = useTerminalSize()
+  const { cols: termCols, rows: termRows } = useTerminalSize()
 
   const push = useCallback((msg: DisplayMsg) => {
     const id = msg.id ?? `msg-${++idCounterRef.current}`
@@ -134,7 +142,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
           case 'thinking_delta': thinkingText += ev.delta; if (!assistantText) setStreamBuf(`💭 ${thinkingText.slice(-200)}`); break
           case 'tool_start':
-            setToolProgress(`⚙ ${getToolDisplayName(ev.name)}`)
+            currentToolDescRef.current = ev.description
+            setToolProgress(`${getToolDisplayName(ev.name)}: ${ev.description}`)
             // ask_user 工具：切换输入框为回答模式
             if (ev.name === 'ask_user') {
               const askInput = ev.input as { question?: string; options?: string[] }
@@ -150,7 +159,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             break
           case 'tool_log': break  // 隐藏工具日志
           case 'tool_end': {
-            setCompletedTools(prev => [...prev, { name: ev.name, ok: ev.result.type !== 'error' }])
+            setCompletedTools(prev => [...prev, { name: ev.name, description: currentToolDescRef.current, ok: ev.result.type !== 'error' }])
             setToolProgress('')
             setAskUserPrompt(null)
             if (ev.name === 'ask_user') {
@@ -160,7 +169,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             const result = ev.result
             // 只显示工具错误，隐藏成功详情
             if (result.type === 'error') {
-              push({ role: 'error', text: `✗ ${getToolDisplayName(ev.name)}: ${result.message}` })
+              push({ role: 'error', text: `✗ ${getToolDisplayName(ev.name)} (${currentToolDescRef.current}): ${result.message}` })
             }
             break
           }
@@ -324,10 +333,12 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       const newWorkDir = getSessionWorkDirPath(newId)
       setGlobalCwd(newWorkDir)
       try { process.chdir(newWorkDir) } catch { /* 忽略 */ }
-      setMsgs([
-        { id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: modelRef.current, providerName: displayProvider, projectPath: newWorkDir } },
-        { role: 'system', text: `已创建新会话 (${newId})\n工作目录: ${newWorkDir}` },
-      ])
+      const newMsgs: DisplayMsg[] = []
+      if (showSplash) {
+        newMsgs.push({ id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: modelRef.current, providerName: displayProvider, projectPath: newWorkDir } })
+      }
+      newMsgs.push({ role: 'system', text: `已创建新会话 (${newId})\n工作目录: ${newWorkDir}` })
+      setMsgs(newMsgs)
       store.scrollToBottom()
     },
     switchSession: (id: string) => {
@@ -346,11 +357,13 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         role: dm.role,
         text: dm.content,
       }))
-      setMsgs([
-        { id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: modelRef.current, providerName: displayProvider, projectPath: process.cwd() } },
-        { role: 'system', text: `已载入会话 ${id.slice(0, 12)}（${messages.length} 条消息）载入成功` },
-        ...converted,
-      ])
+      const switchMsgs: DisplayMsg[] = []
+      if (showSplash) {
+        switchMsgs.push({ id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: modelRef.current, providerName: displayProvider, projectPath: process.cwd() } })
+      }
+      switchMsgs.push({ role: 'system', text: `已载入会话 ${id.slice(0, 12)}（${messages.length} 条消息）载入成功` })
+      switchMsgs.push(...converted)
+      setMsgs(switchMsgs)
 
       // 重置滚动状态：锁定到底部，恢复输入框
       store.scrollToBottom()
@@ -464,6 +477,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         return
       }
 
+      recordCommandUse(parsed.name)
       const result = await cmd.execute(parsed.args, cmdCtx)
       if (result.type === 'exit') { exit(); return }
       if (result.type === 'message') { push({ role: 'system', text: result.text }); return }
@@ -515,6 +529,19 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         setPermissionRequest(prev => prev ? { ...prev, selectedIndex: Math.max(0, prev.selectedIndex - 1) } : null)
       } else if (key.downArrow) {
         setPermissionRequest(prev => prev ? { ...prev, selectedIndex: Math.min(2, prev.selectedIndex + 1) } : null)
+      } else if (input === 'a' || input === 'A') {
+        permissionRequest.resolve(true)
+        setPermissionRequest(null)
+        return
+      } else if (input === 'd' || input === 'D') {
+        permissionRequest.resolve(false)
+        setPermissionRequest(null)
+        return
+      } else if (input === 'l' || input === 'L') {
+        engine.approveSessionPermission(permissionRequest.toolName, permissionRequest.ruleContent)
+        permissionRequest.resolve(true)
+        setPermissionRequest(null)
+        return
       } else if (key.return) {
         const { selectedIndex, toolName, ruleContent, resolve } = permissionRequest
         if (selectedIndex === 0) {
@@ -570,8 +597,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   // ─── 底部固定区域：工具进度 + 命令提示 + 输入框 ──────────────────────────
   const bottomContent = (
     <Box flexDirection="column" paddingX={1}>
-      {/* 已完成的工具列表（流式模式下工具逐个完成，保留显示） */}
-      {loading && completedTools.length > 0 && (
+      {/* 工具进度 + 流式输出（统一容器） */}
+      {loading && (completedTools.length > 0 || toolProgress || streamBuf) && (
         <Box
           borderStyle={STRIPE_BORDER}
           borderColor={TONE.brand}
@@ -579,54 +606,47 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           paddingLeft={1} marginTop={1} width="100%"
           flexDirection="column"
         >
-          {completedTools.map((t, i) => (
-            <Box key={i}>
-              <Text color={t.ok ? TONE.ok : TONE.err}>{t.ok ? '✓' : '✗'} </Text>
-              <Text color={FG.sub}>{t.name}</Text>
+          {/* 已完成工具：超过 3 个折叠为摘要 */}
+          {completedTools.length > 0 && (
+            completedTools.length > 3
+              ? <Box>
+                  <Text color={TONE.ok}>✓ </Text>
+                  <Text color={FG.sub}>{completedTools.length} 个工具已完成</Text>
+                </Box>
+              : completedTools.map((t, i) => (
+                  <Box key={i}>
+                    <Text color={t.ok ? TONE.ok : TONE.err}>{t.ok ? '✓' : '✗'} </Text>
+                    <Text color={FG.sub}>{getToolDisplayName(t.name)}</Text>
+                    <Text color={FG.faint} dimColor>{' '}{t.description}</Text>
+                  </Box>
+                ))
+          )}
+
+          {/* 工具执行中 */}
+          {toolProgress && (
+            <Box>
+              <Text color={TONE.brand} bold>{'▣ '}</Text>
+              <Spinner color={TONE.brand} />
+              <Text color={FG.sub}> 执行中...</Text>
+              <Text color={FG.faint} dimColor>{' '}{toolProgress}</Text>
             </Box>
-          ))}
-        </Box>
-      )}
+          )}
 
-      {/* 工具执行中的临时进度日志 */}
-      {loading && toolProgress && (
-        <Box
-          borderStyle={STRIPE_BORDER}
-          borderColor={TONE.brand}
-          borderTop={false} borderRight={false} borderBottom={false}
-          paddingLeft={1} marginTop={1} width="100%"
-          flexDirection="column"
-        >
-          <Box>
-            <Text color={TONE.brand} bold>{'▣ '}</Text>
-            <Spinner color={TONE.brand} />
-            <Text color={FG.sub}> 执行中...</Text>
-          </Box>
-          <Box paddingLeft={2}>
-            <Text color="cyan" dimColor>{toolProgress.split('\n').slice(-5).join('\n')}</Text>
-          </Box>
-        </Box>
-      )}
-
-      {/* 流式输出中的实时文本 */}
-      {loading && streamBuf && (
-        <Box
-          borderStyle={STRIPE_BORDER}
-          borderColor={TONE.brand}
-          borderTop={false} borderRight={false} borderBottom={false}
-          paddingLeft={1} marginTop={1} width="100%"
-          flexDirection="column"
-        >
-          <Box>
-            <Text color={TONE.brand} bold>{'◈ '}</Text>
-            <Spinner variant="circle" color={TONE.brand} />
-            <Text color={FG.sub}> 写作中...</Text>
-          </Box>
-          <Box paddingLeft={2} flexDirection="column">
-            {streamBuf.split('\n').slice(-6).map((line, i) => (
-              <Text key={i} color={FG.body}>{line}</Text>
-            ))}
-          </Box>
+          {/* 流式写作 */}
+          {streamBuf && (
+            <Box flexDirection="column">
+              <Box>
+                <Text color={TONE.brand} bold>{'◈ '}</Text>
+                <Spinner variant="circle" color={TONE.brand} />
+                <Text color={FG.sub}> 写作中...</Text>
+              </Box>
+              <Box paddingLeft={2} flexDirection="column">
+                {streamBuf.split('\n').slice(-Math.max(3, Math.floor(termRows * 0.25))).map((line, i) => (
+                  <Text key={i} color={FG.body}>{line}</Text>
+                ))}
+              </Box>
+            </Box>
+          )}
         </Box>
       )}
 
@@ -691,6 +711,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       loading={loading}
       stderrOutput={stderrOutput}
       statusBarContent={statusBarContent}
+      cols={termCols}
     />
   )
 
@@ -733,7 +754,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         </Text>
       </Box>
       <Box marginTop={1} paddingLeft={1}>
-        <Text color={FG.faint} dimColor>↑↓ 导航 · Enter 选择 · Esc 取消</Text>
+        <Text color={FG.faint} dimColor>↑↓/A/D/L 快捷 · Enter 选择 · Esc 取消</Text>
       </Box>
     </Box>
   ) : undefined

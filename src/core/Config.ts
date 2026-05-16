@@ -242,6 +242,8 @@ export interface AgentConfig {
   agent?: AgentBehaviorConfig
   gateway?: GatewayConfig
   logging?: LoggingConfig
+  /** UI 显示配置 */
+  ui?: { splash?: boolean }
 
   // ── 集成 ──────────────────────────────────────────────────
   skillHub?: SkillHubConfig
@@ -420,6 +422,7 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     agent,
     gateway,
     logging,
+    ui: clean.ui,
     // 集成
     skillHub,
     webSearch,

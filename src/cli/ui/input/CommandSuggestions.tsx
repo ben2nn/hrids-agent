@@ -1,8 +1,9 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import { TONE, FG } from './theme.js'
-import type { Command } from '../commands/types.js'
-import { isCommandVisible, getCommandName } from '../commands/types.js'
+import { TONE, FG } from '../terminal/theme.js'
+import type { Command } from '../../commands/types.js'
+import { isCommandVisible, getCommandName } from '../../commands/types.js'
+import { getCommandCount } from './command-stats.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -30,14 +31,18 @@ function filterCommands(commands: Command[], filter: string): SuggestionItem[] {
   const visibleCommands = commands.filter(isCommandVisible)
   const lowerFilter = filter.toLowerCase()
 
-  // 空过滤：显示所有命令
+  // 空过滤：按使用频率排序
   if (!lowerFilter) {
-    return visibleCommands.map(cmd => ({
-      name: getCommandName(cmd),
-      description: cmd.description,
-      argumentHint: cmd.argumentHint,
-      category: cmd.category,
-    }))
+    return visibleCommands
+      .map(cmd => ({
+        cmd,
+        name: getCommandName(cmd),
+        description: cmd.description,
+        argumentHint: cmd.argumentHint,
+        category: cmd.category,
+      }))
+      .sort((a, b) => getCommandCount(b.name) - getCommandCount(a.name))
+      .map(({ name, description, argumentHint, category }) => ({ name, description, argumentHint, category }))
   }
 
   // 过滤匹配
@@ -70,7 +75,10 @@ function filterCommands(commands: Command[], filter: string): SuggestionItem[] {
       return null
     })
     .filter((item): item is { cmd: Command; score: number } => item !== null)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score
+      return getCommandCount(getCommandName(b.cmd)) - getCommandCount(getCommandName(a.cmd))
+    })
 
   return matched.map(({ cmd }) => ({
     name: getCommandName(cmd),

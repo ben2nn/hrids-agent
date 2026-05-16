@@ -1,7 +1,7 @@
 // MessageCard —— 卡片式消息组件（左侧竖条 + glyph + header）
 import React from 'react'
 import { Box, Text } from 'ink'
-import { ROLE_TONE, ROLE_GLYPH, FG, STRIPE_BORDER } from './theme.js'
+import { ROLE_TONE, ROLE_GLYPH, FG, STRIPE_BORDER } from '../terminal/theme.js'
 
 export type MessageRole = 'user' | 'assistant' | 'tool' | 'system' | 'error'
 

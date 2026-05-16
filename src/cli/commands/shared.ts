@@ -132,6 +132,8 @@ export async function initCli(opts: BaseCliOpts & {
     provider, systemPrompt, registry, permissions,
     maxTokens: config.agent?.maxTokens, maxTurns: config.agent?.maxTurns,
     maxBudgetUsd: config.agent?.maxBudgetUsd, autoCompactThreshold: config.agent?.autoCompactThreshold,
+    sessionId,
+    resumed: !!opts.resume,
   })
 
   // 立即初始化会话存储（确保事件从第一条消息就开始持久化）

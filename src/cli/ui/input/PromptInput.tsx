@@ -1,7 +1,8 @@
 // PromptInput —— 自定义多行文本编辑器
 import React, { useState, useCallback, useEffect } from 'react'
 import { Box, Text } from 'ink'
-import { useKeystroke } from './KeystrokeContext.js'
+import { useKeystroke } from '../terminal/KeystrokeContext.js'
+import { FG } from '../terminal/theme.js'
 
 interface PromptInputProps {
   onSubmit: (text: string) => void
@@ -43,12 +44,6 @@ export function PromptInput({ onSubmit, onChange, disabled, placeholder, value }
       }
       return
     }
-    if (key.name === 'enter' && key.shift) {
-      const newText = text.slice(0, cursorPos) + '\n' + text.slice(cursorPos)
-      updateText(newText)
-      setCursorPos(cursorPos + 1)
-      return
-    }
     if (key.name === 'backspace' && cursorPos > 0) {
       updateText(text.slice(0, cursorPos - 1) + text.slice(cursorPos))
       setCursorPos(cursorPos - 1)
@@ -88,12 +83,17 @@ export function PromptInput({ onSubmit, onChange, disabled, placeholder, value }
   const afterCursor = text.slice(cursorPos + 1)
 
   return (
-    <Box>
-      <Text color="cyan" bold>{'> '}</Text>
-      <Text>{beforeCursor}</Text>
-      <Text inverse>{atCursor}</Text>
-      <Text>{afterCursor}</Text>
-      {!text && placeholder && <Text dimColor>{placeholder}</Text>}
+    <Box flexDirection="column">
+      <Box>
+        <Text color="cyan" bold>{'> '}</Text>
+        <Text>{beforeCursor}</Text>
+        <Text inverse>{atCursor}</Text>
+        <Text>{afterCursor}</Text>
+        {!text && placeholder && <Text dimColor>{placeholder}</Text>}
+      </Box>
+      {!text && (
+        <Text color={FG.faint} dimColor>{'  '}↑ 历史</Text>
+      )}
     </Box>
   )
 }

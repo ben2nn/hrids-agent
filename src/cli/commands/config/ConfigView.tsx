@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { TONE, FG } from '../../ui/theme.js'
+import { TONE, FG } from '../../ui/terminal/theme.js'
 import type { CommandContext } from '../types.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
@@ -12,12 +12,12 @@ interface ConfigViewProps {
   onClose: () => void
 }
 
-type Tab = 'config' | 'status' | 'usage'
+type Tab = 'overview' | 'models'
 
 // ─── 组件 ─────────────────────────────────────────────────────────────────
 
 export function ConfigView({ ctx, onClose }: ConfigViewProps) {
-  const [activeTab, setActiveTab] = useState<Tab>('status')
+  const [activeTab, setActiveTab] = useState<Tab>('overview')
 
   // 键盘处理
   useInput((input, key) => {
@@ -28,7 +28,7 @@ export function ConfigView({ ctx, onClose }: ConfigViewProps) {
 
     // Tab 切换
     if (key.tab) {
-      const tabs: Tab[] = ['config', 'status', 'usage']
+      const tabs: Tab[] = ['overview', 'models']
       const currentIndex = tabs.indexOf(activeTab)
       const nextIndex = (currentIndex + 1) % tabs.length
       setActiveTab(tabs[nextIndex])
@@ -45,14 +45,14 @@ export function ConfigView({ ctx, onClose }: ConfigViewProps) {
 
       {/* 标签栏 */}
       <Box marginBottom={1}>
-        {(['config', 'status', 'usage'] as Tab[]).map(tab => (
+        {(['overview', 'models'] as Tab[]).map(tab => (
           <Box key={tab} marginRight={2}>
             <Text
               color={activeTab === tab ? TONE.brand : FG.faint}
               bold={activeTab === tab}
               underline={activeTab === tab}
             >
-              {tab === 'config' ? '配置' : tab === 'status' ? '状态' : '使用量'}
+              {tab === 'overview' ? '概览' : '模型'}
             </Text>
           </Box>
         ))}
@@ -60,67 +60,24 @@ export function ConfigView({ ctx, onClose }: ConfigViewProps) {
 
       {/* 内容 */}
       <Box flexDirection="column">
-        {activeTab === 'config' && (
-          <ConfigTab ctx={ctx} />
+        {activeTab === 'overview' && (
+          <OverviewTab ctx={ctx} />
         )}
 
-        {activeTab === 'status' && (
-          <StatusTab ctx={ctx} />
-        )}
-
-        {activeTab === 'usage' && (
-          <UsageTab ctx={ctx} />
+        {activeTab === 'models' && (
+          <ModelsTab ctx={ctx} />
         )}
       </Box>
     </Box>
   )
 }
 
-// ─── 配置标签 ──────────────────────────────────────────────────────────────
+// ─── 概览标签（状态 + 使用量合并）─────────────────────────────────────────
 
-function ConfigTab({ ctx }: { ctx: CommandContext }) {
-  const models = ctx.getAvailableModels()
+function OverviewTab({ ctx }: { ctx: CommandContext }) {
+  const summary = ctx.getCostSummary()
+  const budget = ctx.getBudgetInfo()
 
-  return (
-    <Box flexDirection="column">
-      <Box marginBottom={1}>
-        <Text color={TONE.brand} bold>模型配置</Text>
-      </Box>
-
-      <Box flexDirection="column" paddingLeft={2}>
-        <Text>
-          <Text color={FG.faint}>当前模型: </Text>
-          <Text color={TONE.accent}>{ctx.getModel()}</Text>
-        </Text>
-        <Text>
-          <Text color={FG.faint}>当前模式: </Text>
-          <Text color={TONE.accent}>{ctx.getMode()}</Text>
-        </Text>
-      </Box>
-
-      {models.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color={TONE.brand} bold>可用模型</Text>
-          <Box flexDirection="column" paddingLeft={2}>
-            {models.map((m, i) => (
-              <Text key={i}>
-                <Text color={m.isDefault ? TONE.accent : FG.body}>
-                  {m.model}
-                </Text>
-                <Text color={FG.faint}> ({m.provider})</Text>
-                {m.isDefault && <Text color={TONE.ok}> [默认]</Text>}
-              </Text>
-            ))}
-          </Box>
-        </Box>
-      )}
-    </Box>
-  )
-}
-
-// ─── 状态标签 ──────────────────────────────────────────────────────────────
-
-function StatusTab({ ctx }: { ctx: CommandContext }) {
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
@@ -140,53 +97,71 @@ function StatusTab({ ctx }: { ctx: CommandContext }) {
           <Text color={FG.faint}>预估 Tokens: </Text>
           <Text color={FG.body}>{ctx.getEstimatedTokens().toLocaleString()}</Text>
         </Text>
+        <Text>
+          <Text color={FG.faint}>当前模式: </Text>
+          <Text color={TONE.accent}>{ctx.getMode()}</Text>
+        </Text>
       </Box>
 
-      {/* 预算信息 */}
       <Box flexDirection="column" marginTop={1}>
-        <Text color={TONE.brand} bold>预算</Text>
+        <Text color={TONE.brand} bold>使用量</Text>
         <Box flexDirection="column" paddingLeft={2}>
           <Text>
-            <Text color={FG.faint}>已花费: </Text>
-            <Text color={TONE.accent}>${ctx.getBudgetInfo().spent.toFixed(4)}</Text>
+            <Text color={FG.faint}>输入 Tokens: </Text>
+            <Text color={FG.body}>{summary.inputTokens.toLocaleString()}</Text>
+            <Text color={FG.faint}> · 输出: </Text>
+            <Text color={FG.body}>{summary.outputTokens.toLocaleString()}</Text>
           </Text>
-          {ctx.getBudgetInfo().limit !== undefined && (
-            <Text>
-              <Text color={FG.faint}>限额: </Text>
-              <Text color={FG.body}>${ctx.getBudgetInfo().limit!.toFixed(2)}</Text>
-            </Text>
-          )}
+          <Text>
+            <Text color={FG.faint}>已花费: </Text>
+            <Text color={TONE.accent}>${summary.costUsd.toFixed(4)}</Text>
+            {budget.limit !== undefined && (
+              <>
+                <Text color={FG.faint}> / </Text>
+                <Text color={FG.body}>${budget.limit!.toFixed(2)}</Text>
+              </>
+            )}
+          </Text>
         </Box>
       </Box>
     </Box>
   )
 }
 
-// ─── 使用量标签 ────────────────────────────────────────────────────────────
+// ─── 模型标签 ──────────────────────────────────────────────────────────────
 
-function UsageTab({ ctx }: { ctx: CommandContext }) {
-  const summary = ctx.getCostSummary()
+function ModelsTab({ ctx }: { ctx: CommandContext }) {
+  const models = ctx.getAvailableModels()
 
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
-        <Text color={TONE.brand} bold>使用量统计</Text>
+        <Text color={TONE.brand} bold>模型配置</Text>
       </Box>
 
       <Box flexDirection="column" paddingLeft={2}>
         <Text>
-          <Text color={FG.faint}>输入 Tokens: </Text>
-          <Text color={FG.body}>{summary.inputTokens.toLocaleString()}</Text>
-        </Text>
-        <Text>
-          <Text color={FG.faint}>输出 Tokens: </Text>
-          <Text color={FG.body}>{summary.outputTokens.toLocaleString()}</Text>
-        </Text>
-        <Text>
-          <Text color={FG.faint}>总花费: </Text>
-          <Text color={TONE.accent}>${summary.costUsd.toFixed(4)}</Text>
+          <Text color={FG.faint}>当前模型: </Text>
+          <Text color={TONE.accent}>{ctx.getModel()}</Text>
         </Text>
       </Box>
+
+      {models.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={TONE.brand} bold>可用模型</Text>
+          <Box flexDirection="column" paddingLeft={2}>
+            {models.map((m, i) => (
+              <Text key={i}>
+                <Text color={m.isDefault ? TONE.accent : FG.body}>
+                  {m.model}
+                </Text>
+                <Text color={FG.faint}> ({m.provider})</Text>
+                {m.isDefault && <Text color={TONE.ok}> [默认]</Text>}
+              </Text>
+            ))}
+          </Box>
+        </Box>
+      )}
     </Box>
   )
 }

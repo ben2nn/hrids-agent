@@ -105,25 +105,25 @@ export interface CompactEvent extends BaseEvent {
 
 // ── 工具全生命周期 ────────────────────────────────────────────────
 
-export interface ToolDispatchEvent extends BaseEvent {
-  type: 'tool_dispatch'
+/** 模型决定调用什么工具（tool.intent） */
+export interface ToolIntentEvent extends BaseEvent {
+  type: 'tool_intent'
   toolCallId: string
   toolName: string
   input: unknown
-  batch?: number
-  parallel?: boolean
+  description?: string
 }
 
-export interface ToolPermissionEvent extends BaseEvent {
-  type: 'tool_permission'
+/** 权限决策结果（tool.confirm.*） */
+export interface ToolConfirmEvent extends BaseEvent {
+  type: 'tool_confirm'
   toolCallId: string
   toolName: string
-  result: 'allow' | 'deny' | 'always_allow' | 'always_deny' | 'session_allow'
-  reason?: string
-  rule?: string
+  decision: 'allow' | 'deny' | 'always_allow' | 'session_allow'
   mode: 'ask' | 'craft' | 'plan'
   isReadonly: boolean
   isDestructive: boolean
+  reason?: string
 }
 
 export interface ToolStartEvent extends BaseEvent {
@@ -288,7 +288,7 @@ export interface ErrorEvent extends BaseEvent {
 export type ConversationEvent =
   | ReqStartEvent | ReqEndEvent
   | UserEvent | AssistantEvent | CompactEvent
-  | ToolDispatchEvent | ToolPermissionEvent | ToolStartEvent | ToolLogEvent | ToolEndEvent
+  | ToolIntentEvent | ToolConfirmEvent | ToolStartEvent | ToolLogEvent | ToolEndEvent
   | FileTouchedEvent | MemoryWrittenEvent
   | BudgetWarnEvent | BudgetExceededEvent | StormBlockedEvent | TurnLimitEvent | PlanBlockedEvent | ModelEscalatedEvent
   | SessionOpenEvent
@@ -360,38 +360,34 @@ export function createCompactEvent(summary: string, requestId?: string): Compact
   return { type: 'compact', id: genId('comp'), ts: Date.now(), requestId, summary }
 }
 
-export function createToolDispatchEvent(
+export function createToolIntentEvent(
   requestId: string | undefined,
   toolCallId: string,
   toolName: string,
   input: unknown,
-  batch?: number,
-  parallel?: boolean,
-): ToolDispatchEvent {
+  description?: string,
+): ToolIntentEvent {
   return {
-    type: 'tool_dispatch', id: genId('td'), ts: Date.now(), requestId,
+    type: 'tool_intent', id: genId('ti'), ts: Date.now(), requestId,
     toolCallId, toolName, input,
-    ...(batch !== undefined ? { batch } : {}),
-    ...(parallel !== undefined ? { parallel } : {}),
+    ...(description ? { description } : {}),
   }
 }
 
-export function createToolPermissionEvent(
+export function createToolConfirmEvent(
   requestId: string | undefined,
   toolCallId: string,
   toolName: string,
-  result: ToolPermissionEvent['result'],
-  mode: ToolPermissionEvent['mode'],
+  decision: ToolConfirmEvent['decision'],
+  mode: ToolConfirmEvent['mode'],
   isReadonly: boolean,
   isDestructive: boolean,
   reason?: string,
-  rule?: string,
-): ToolPermissionEvent {
+): ToolConfirmEvent {
   return {
-    type: 'tool_permission', id: genId('tp'), ts: Date.now(), requestId,
-    toolCallId, toolName, result, mode, isReadonly, isDestructive,
+    type: 'tool_confirm', id: genId('tc'), ts: Date.now(), requestId,
+    toolCallId, toolName, decision, mode, isReadonly, isDestructive,
     ...(reason ? { reason } : {}),
-    ...(rule ? { rule } : {}),
   }
 }
 

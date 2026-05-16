@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { TONE, FG, STRIPE_BORDER } from './theme.js'
-import type { SessionMeta } from '../../core/SessionStore.js'
+import { TONE, FG, STRIPE_BORDER } from '../terminal/theme.js'
+import type { SessionMeta } from '../../../core/SessionStore.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +31,8 @@ export function SessionList({
 }: SessionListProps) {
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [pageOffset, setPageOffset] = useState(0)
+  const [searchMode, setSearchMode] = useState(false)
+  const [searchText, setSearchText] = useState('')
   const inputReadyRef = useRef(false)
 
   // 延迟接受输入，避免处理提交 "sessions" 时缓冲的 Enter 按键
@@ -39,20 +41,62 @@ export function SessionList({
     return () => clearTimeout(timer)
   }, [])
 
+  // 过滤会话
+  const filteredSessions = searchText
+    ? sessions.filter(s =>
+        (s.title || '').toLowerCase().includes(searchText.toLowerCase()) ||
+        s.id.includes(searchText)
+      )
+    : sessions
+
   // 计算总页数
-  const totalPages = Math.ceil(sessions.length / pageSize)
+  const totalPages = Math.ceil(filteredSessions.length / pageSize)
   const currentPage = Math.floor(pageOffset / pageSize)
 
   // 获取当前页的会话
-  const pageSessions = sessions.slice(pageOffset, pageOffset + pageSize)
+  const pageSessions = filteredSessions.slice(pageOffset, pageOffset + pageSize)
 
   // 键盘事件处理
   useInput((input, key) => {
     if (!inputReadyRef.current) return
+
+    // 搜索模式：字母输入到搜索框
+    if (searchMode) {
+      if (key.escape) {
+        setSearchMode(false)
+        setSearchText('')
+        setPageOffset(0)
+        setSelectedIndex(0)
+        return
+      }
+      if (key.return) {
+        setSearchMode(false)
+        return
+      }
+      if (key.backspace || key.delete) {
+        setSearchText(prev => prev.slice(0, -1))
+        setPageOffset(0)
+        setSelectedIndex(0)
+        return
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setSearchText(prev => prev + input)
+        setPageOffset(0)
+        setSelectedIndex(0)
+        return
+      }
+      return
+    }
+
+    // `/` 激活搜索
+    if (input === '/') {
+      setSearchMode(true)
+      return
+    }
+
     if (key.upArrow) {
       setSelectedIndex(prev => {
         if (prev === 0) {
-          // 如果已经在第一项，尝试翻到上一页
           if (pageOffset > 0) {
             setPageOffset(pageOffset - pageSize)
             return pageSize - 1
@@ -64,8 +108,7 @@ export function SessionList({
     } else if (key.downArrow) {
       setSelectedIndex(prev => {
         if (prev === pageSessions.length - 1) {
-          // 如果已经在最后一项，尝试翻到下一页
-          if (pageOffset + pageSize < sessions.length) {
+          if (pageOffset + pageSize < filteredSessions.length) {
             setPageOffset(pageOffset + pageSize)
             return 0
           }
@@ -74,18 +117,15 @@ export function SessionList({
         return prev + 1
       })
     } else if (key.pageUp) {
-      // 上一页
       setPageOffset(prev => Math.max(0, prev - pageSize))
       setSelectedIndex(0)
     } else if (key.pageDown) {
-      // 下一页
       setPageOffset(prev => {
         const nextOffset = prev + pageSize
-        return nextOffset < sessions.length ? nextOffset : prev
+        return nextOffset < filteredSessions.length ? nextOffset : prev
       })
       setSelectedIndex(0)
     } else if (key.return) {
-      // 选择当前会话
       const session = pageSessions[selectedIndex]
       if (session) {
         onSelect(session.id)
@@ -123,9 +163,23 @@ export function SessionList({
       <Box justifyContent="space-between">
         <Text color={TONE.accent} bold>📋 会话列表</Text>
         <Text color={FG.faint}>
-          {sessions.length} 个会话 · {currentPage + 1}/{totalPages} 页
+          {searchText ? `${filteredSessions.length}/${sessions.length} 匹配` : `${sessions.length} 个会话`} · {currentPage + 1}/{totalPages || 1} 页
         </Text>
       </Box>
+
+      {/* 搜索栏 */}
+      {searchMode ? (
+        <Box>
+          <Text color={TONE.brand}>🔍 </Text>
+          <Text color={FG.body}>{searchText}</Text>
+          <Text inverse> </Text>
+        </Box>
+      ) : searchText ? (
+        <Box>
+          <Text color={FG.faint}>🔍 {searchText} </Text>
+          <Text color={FG.faint} dimColor>(/ 编辑 · Esc 清除)</Text>
+        </Box>
+      ) : null}
 
       {/* 分隔线 */}
       <Text color={FG.faint}>{'─'.repeat(50)}</Text>
@@ -160,7 +214,7 @@ export function SessionList({
 
       {/* 操作提示 */}
       <Text color={FG.faint} dimColor>
-        ↑↓ 导航 · PgUp/PgDn 翻页 · Enter 选择 · Esc 取消
+        {searchMode ? '输入搜索 · Enter 确认 · Esc 取消' : '/ 搜索 · ↑↓ 导航 · PgUp/PgDn 翻页 · Enter 选择 · Esc 取消'}
       </Text>
     </Box>
   )

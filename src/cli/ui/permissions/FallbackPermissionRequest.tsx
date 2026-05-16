@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import { TONE, FG } from '../theme.js'
-import type { PermissionDecision } from '../PermissionRequest.js'
+import { TONE, FG } from '../terminal/theme.js'
+import type { PermissionDecision } from './PermissionRequest.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 

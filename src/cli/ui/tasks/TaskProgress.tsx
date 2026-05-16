@@ -1,6 +1,6 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import { TONE, FG } from '../theme.js'
+import { TONE, FG } from '../terminal/theme.js'
 import { TaskStatusIcon, type TaskStatus } from './TaskStatusIcon.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────

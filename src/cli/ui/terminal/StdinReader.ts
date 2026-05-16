@@ -82,6 +82,48 @@ export class StdinReader {
   private parseCSI(data: string, base: Omit<KeyEvent, 'name' | 'sequence'>): KeyEvent | null {
     const seq = data.slice(2)
 
+    // CSI u 模式 (Kitty keyboard protocol): \x1b[<key>;<modifier>u
+    // modifier: 1=none, 2=shift, 3=alt, 4=shift+alt, 5=ctrl, 6=shift+ctrl, 7=alt+ctrl, 8=shift+alt+ctrl
+    const csiUMatch = seq.match(/^(\d+);(\d+)u$/)
+    if (csiUMatch) {
+      const keyCode = parseInt(csiUMatch[1], 10)
+      const mod = parseInt(csiUMatch[2], 10)
+      const modFlags = {
+        shift: mod === 2 || mod === 4 || mod === 6 || mod === 8,
+        alt: mod === 3 || mod === 4 || mod === 7 || mod === 8,
+        ctrl: mod === 5 || mod === 6 || mod === 7 || mod === 8,
+      }
+      // 13=Enter, 9=Tab, 27=Escape
+      if (keyCode === 13) return { ...base, ...modFlags, name: 'enter', sequence: data }
+      if (keyCode === 9) return { ...base, ...modFlags, name: 'tab', sequence: data }
+      if (keyCode === 27) return { ...base, ...modFlags, name: 'escape', sequence: data }
+      // 基本可打印字符 (ASCII)
+      if (keyCode >= 32 && keyCode <= 126) {
+        return { ...base, ...modFlags, name: String.fromCharCode(keyCode), sequence: data }
+      }
+      return null
+    }
+
+    // 参数化 CSI 序列: \x1b[<params>~  (如 \x1b[1;2~ 表示 Shift+Home 等)
+    const paramMatch = seq.match(/^(\d+(?:;\d+)*)~$/)
+    if (paramMatch) {
+      const parts = paramMatch[1].split(';').map(Number)
+      const keyCode = parts[0]
+      const mod = parts[1] || 1
+      const modFlags = {
+        shift: mod === 2 || mod === 4 || mod === 6 || mod === 8,
+        alt: mod === 3 || mod === 4 || mod === 7 || mod === 8,
+        ctrl: mod === 5 || mod === 6 || mod === 7 || mod === 8,
+      }
+      if (keyCode === 1) return { ...base, ...modFlags, name: 'home', sequence: data }
+      if (keyCode === 2) return { ...base, ...modFlags, name: 'insert', sequence: data }
+      if (keyCode === 3) return { ...base, ...modFlags, name: 'delete', sequence: data }
+      if (keyCode === 4) return { ...base, ...modFlags, name: 'end', sequence: data }
+      if (keyCode === 5) return { ...base, ...modFlags, name: 'pageup', sequence: data }
+      if (keyCode === 6) return { ...base, ...modFlags, name: 'pagedown', sequence: data }
+      return null
+    }
+
     // 不完整 CSI 序列（没有终结字符 a-z/A-Z/~），缓冲等待后续数据
     if (!/[a-zA-Z~]$/.test(seq)) {
       this.csiBuffer = data

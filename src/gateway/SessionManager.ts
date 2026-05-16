@@ -221,6 +221,8 @@ export class SessionManager {
       autoCompactThreshold: agentConfig.agent?.autoCompactThreshold,
       sessionCwd,
       uploadsDir: join(getConfigDir(), 'sessions', sessionId, 'uploads'),
+      sessionId,
+      resumed: !!req.resume,
     }, store)
     session.permissions = permissions
 

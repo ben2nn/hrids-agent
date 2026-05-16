@@ -1,6 +1,6 @@
 import React from 'react'
 import { Box, Text, useInput } from 'ink'
-import { TONE, FG, STRIPE_BORDER } from './theme.js'
+import { TONE, FG, STRIPE_BORDER } from '../terminal/theme.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 

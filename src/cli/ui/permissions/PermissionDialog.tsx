@@ -3,8 +3,8 @@ import { BashPermissionRequest } from './BashPermissionRequest.js'
 import { FileEditPermissionRequest } from './FileEditPermissionRequest.js'
 import { FilesystemPermissionRequest } from './FilesystemPermissionRequest.js'
 import { FallbackPermissionRequest } from './FallbackPermissionRequest.js'
-import type { PermissionDecision } from '../PermissionRequest.js'
-import { getToolDisplayName } from '../theme.js'
+import type { PermissionDecision } from './PermissionRequest.js'
+import { getToolDisplayName } from '../terminal/theme.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 

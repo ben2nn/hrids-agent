@@ -6,6 +6,7 @@ interface Props {
   model: string
   providerName: string
   projectPath: string
+  cols?: number
 }
 
 const LOGO = [
@@ -84,12 +85,13 @@ const C_GRAY = '\x1b[90m'
 const C_BOLD = '\x1b[1m'
 const C_RESET = '\x1b[0m'
 
-// 左右两列等宽，固定尺寸
-const COL_W = 40
+// 左右两列等宽，根据终端宽度自适应
+const DEFAULT_COL_W = 40
 
-export function SplashScreen({ version, model, providerName, projectPath }: Props) {
+export function SplashScreen({ version, model, providerName, projectPath, cols }: Props) {
   const title = ` HRIDS Agent v${version} `
-  const totalWidth = COL_W * 2 + 6
+  const totalWidth = cols ? Math.min(cols - 2, DEFAULT_COL_W * 2 + 6) : DEFAULT_COL_W * 2 + 6
+  const COL_W = Math.max(20, Math.floor((totalWidth - 6) / 2))
 
   // 顶部边框
   const topFill = totalWidth - 5 - strWidth(title)

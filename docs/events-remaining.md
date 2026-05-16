@@ -254,3 +254,41 @@ this.provider.onFallbackStatus = (event) => {
 1. `npx tsc --noEmit` 编译通过
 2. 触发对应场景，检查 events.jsonl 中是否正确写入
 3. Gateway 推送是否正常（events 通过 NDJSON stdout 推送给前端）
+
+
+
+**已实现（21 种）：**
+
+| 事件                  | 写入位置                                              |
+| --------------------- | ----------------------------------------------------- |
+| `session_open`        | QueryEngine 构造函数（支持 resumed=true）              |
+| `req_start`           | send() + sendStreaming()                              |
+| `req_end`             | send() + sendStreaming()                              |
+| `user`                | send() + sendStreaming() + recovery 消息               |
+| `assistant`           | send() + sendStreaming()                              |
+| `compact`             | compactHistory()                                      |
+| `llm_start`           | streamOneTurn() + sendStreaming()                     |
+| `llm_end`             | streamOneTurn() + sendStreaming()                     |
+| `tool_intent`         | validateAndPrepareTool()（替代 tool_dispatch）         |
+| `tool_confirm`        | validateAndPrepareTool()（allow + deny 都写入）        |
+| `tool_start`          | executeOneTool() + executeOneToolCore()               |
+| `tool_end`            | executeOneTool() + executeOneToolCore()               |
+| `file_touched`        | postExecution()                                       |
+| `memory_written`      | postRunHooks.ts autoExtractMemories()                 |
+| `storm_blocked`       | validateAndPrepareTool()                              |
+| `budget_warn`         | send() + sendStreaming()                              |
+| `budget_exceeded`     | send() + sendStreaming() + streamOneTurn usage 回调    |
+| `turn_limit`          | send() + sendStreaming()                              |
+| `plan_blocked`        | validateAndPrepareTool()                              |
+| `max_output_recovery` | resolveHeartbeat()                                    |
+| `error`               | send() + sendStreaming() + LLM catch 块               |
+
+**未实现（5 种）：**
+
+| 事件                             | 原因                                                      |
+| -------------------------------- | --------------------------------------------------------- |
+| `tool_log`                       | 工具执行流式日志，需要在 executeOneTool 中添加 onLog 回调 |
+| `model_escalated`                | 需要在 FallbackProvider 中添加，当前无 store 访问         |
+| `cap_registered` / `cap_removed` | 需要在 ToolRegistry 注册/注销时触发，当前无 store 访问    |
+| `hook_fired`                     | 需要在各 hook 回调处添加，涉及多处改动                    |
+| `error_recovery`                 | 需要在 FallbackProvider 重试时触发                        |

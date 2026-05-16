@@ -1,10 +1,11 @@
 import React, { useRef, useEffect, useMemo } from 'react'
-import { Box, measureElement } from 'ink'
+import { Box, Text, measureElement } from 'ink'
 import type { DOMElement } from 'ink'
 import { MessageRow } from './MessageRow.js'
 import { SplashScreen } from './SplashScreen.js'
-import { useScrollStore } from './ScrollProvider.js'
-import type { DisplayMsg } from './AppState.js'
+import { useScrollStore } from '../terminal/ScrollProvider.js'
+import { FG } from '../terminal/theme.js'
+import type { DisplayMsg } from '../app/AppState.js'
 
 interface CardStreamProps {
   msgs: DisplayMsg[]
@@ -18,6 +19,7 @@ function MeasuredCard({ msg, cols }: { msg: DisplayMsg; cols: number }) {
   const store = useScrollStore()
   const prevHeightRef = useRef(0)
 
+  // 仅在消息内容或列宽变化时重新测量
   useEffect(() => {
     if (!ref.current) return
     const { height } = measureElement(ref.current)
@@ -25,12 +27,12 @@ function MeasuredCard({ msg, cols }: { msg: DisplayMsg; cols: number }) {
       prevHeightRef.current = height
       store.registerHeight(msg.id!, height)
     }
-  })
+  }, [msg.text, msg.role, cols, store, msg.id])
 
   return (
     <Box ref={ref} flexShrink={0}>
       {msg.role === 'splash' && msg.splashProps
-        ? <SplashScreen {...msg.splashProps} />
+        ? <SplashScreen {...msg.splashProps} cols={cols} />
         : <MessageRow msg={msg} columns={cols} />
       }
     </Box>
@@ -44,17 +46,6 @@ export function CardStream({ msgs, cols }: CardStreamProps) {
   const outerRef = useRef<DOMElement>(null)
   const prevOuterHeight = useRef(0)
 
-  // 测量外层容器实际高度
-  const [outerHeight, setOuterHeight] = React.useState(0)
-  useEffect(() => {
-    if (!outerRef.current) return
-    const { height } = measureElement(outerRef.current)
-    if (height > 0 && height !== prevOuterHeight.current) {
-      prevOuterHeight.current = height
-      setOuterHeight(height)
-    }
-  })
-
   // 为没有 id 的消息分配稳定 id
   const indexedMsgs = useMemo(() => {
     let counter = 0
@@ -63,6 +54,17 @@ export function CardStream({ msgs, cols }: CardStreamProps) {
       id: m.id ?? `auto-${++counter}`,
     }))
   }, [msgs])
+
+  // 测量外层容器实际高度（仅首次和消息数/列宽变化时）
+  const [outerHeight, setOuterHeight] = React.useState(0)
+  useEffect(() => {
+    if (!outerRef.current) return
+    const { height } = measureElement(outerRef.current)
+    if (height > 0 && height !== prevOuterHeight.current) {
+      prevOuterHeight.current = height
+      setOuterHeight(height)
+    }
+  }, [indexedMsgs.length, cols])
 
   // 订阅滚动状态（仅用于触发重渲染）
   const scrollVersion = React.useSyncExternalStore(
@@ -99,9 +101,21 @@ export function CardStream({ msgs, cols }: CardStreamProps) {
 
   if (indexedMsgs.length === 0) return null
 
+  // 滚动位置百分比
+  const pinned = store.getState().pinned
+  const scrollPct = viewport.maxScroll > 0
+    ? Math.round((viewport.scrollOffset / viewport.maxScroll) * 100)
+    : 100
+
   // 参照 DeepSeek-Reasonix：外层 overflow=hidden 裁剪，内层 marginTop=-scrollOffset 定位
   return (
     <Box ref={outerRef} flexDirection="column" flexGrow={1} overflow="hidden" flexShrink={0}>
+      {/* 滚动位置指示器：仅在非自动滚动时显示 */}
+      {!pinned && viewport.maxScroll > 0 && (
+        <Box justifyContent="flex-end" flexShrink={0}>
+          <Text color={FG.faint} dimColor>{scrollPct === 100 ? '▼' : scrollPct === 0 ? '▲' : '▌'} {scrollPct}%</Text>
+        </Box>
+      )}
       <Box flexDirection="column" marginTop={-viewport.scrollOffset} flexShrink={0}>
         {viewport.items.map((item, i) => {
           if (item.type === 'spacer') {

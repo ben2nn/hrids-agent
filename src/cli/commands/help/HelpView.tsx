@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { TONE, FG } from '../../ui/theme.js'
+import { TONE, FG } from '../../ui/terminal/theme.js'
 import type { Command } from '../types.js'
 import { isCommandVisible, getCommandName } from '../types.js'
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { TONE, FG } from './theme.js'
+import { TONE, FG } from '../terminal/theme.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
