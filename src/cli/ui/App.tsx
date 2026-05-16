@@ -21,7 +21,7 @@ import type { CommandRegistry } from '../../core/CommandRegistry.js'
 import type { CommandContext } from '../../core/CommandRegistry.js'
 import { setCronTriggerCallback } from '../../tools/ScheduleCronTool.js'
 import type { CronJob } from '../../tools/ScheduleCronTool.js'
-import { listSessions, loadSessionEvents, generateSessionId, archiveSession, listArchives } from '../../core/SessionStore.js'
+import { listSessions, loadSessionMessages, generateSessionId, archiveSession, listArchives } from '../../core/SessionStore.js'
 import { projectForDisplay } from '../../core/projections.js'
 import { getSessionWorkDirPath } from '../../core/ContextBuilder.js'
 import { setGlobalCwd } from '../../tools/BashTool.js'
@@ -297,7 +297,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     generateCompactSummary: async () => {
       return engine.generateCompactSummary()
     },
-    getHistoryLength: () => engine.store.getEventCount(),
+    getHistoryLength: () => engine.store.getMessageCount(),
     getEstimatedTokens: () => engine.getEstimatedTokens(),
     getCostSummary: () => {
       const usage = engine.costs.getUsage()
@@ -331,16 +331,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       store.scrollToBottom()
     },
     switchSession: (id: string) => {
-      const events = loadSessionEvents(id)
-      if (!events) return false
-      engine.store.replaceEvents(events)
+      const messages = loadSessionMessages(id)
+      if (!messages) return false
+      engine.store.replaceMessages(messages)
       setSessionId(id)
       sessionIdRef.current = id
       onFirstMessage?.(id)
       sessionReadyRef.current = true
 
       // 清空当前消息，载入历史会话内容
-      const displayMsgs = projectForDisplay(events)
+      const displayMsgs = projectForDisplay(messages)
       const converted: DisplayMsg[] = displayMsgs.map((dm, i) => ({
         id: `hist-${i}`,
         role: dm.role,
@@ -348,7 +348,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       }))
       setMsgs([
         { id: 'splash', role: 'splash', text: '', splashProps: { version: '1.0.0', model: modelRef.current, providerName: displayProvider, projectPath: process.cwd() } },
-        { role: 'system', text: `已载入会话 ${id.slice(0, 12)}（${events.length} 条事件）载入成功` },
+        { role: 'system', text: `已载入会话 ${id.slice(0, 12)}（${messages.length} 条消息）载入成功` },
         ...converted,
       ])
 

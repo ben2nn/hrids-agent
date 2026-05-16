@@ -38,10 +38,10 @@ export async function runRunCommand(message: string, opts: RunCommandOpts): Prom
   }
 
   process.stdout.write('\n')
-  const { title, lastUserMessage } = extractSessionTitle(ctx.engine.store.getEventLog())
+  const { title, lastUserMessage } = extractSessionTitle(ctx.engine.store.getMessages())
   saveSessionMeta(ctx.sessionId, {
     model: ctx.model, workDir: ctx.initialCwd,
-    eventCount: ctx.engine.store.getEventCount(), title, lastUserMessage,
+    messageCount: ctx.engine.store.getMessageCount(), title, lastUserMessage,
   })
   await Promise.allSettled([
     autoExtractMemories(ctx.engine, ctx.sessionId, ctx.provider, ctx.config.agent?.memoryCondense ?? false),

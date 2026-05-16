@@ -1,268 +1,572 @@
-// 事件溯源对话存储 — 单一数据源 + 双投影
+// 双存储对话架构 — ChatMessage[] 主存储 + 全生命周期事件日志
 //
 // 架构：
-//   eventLog (append-only) ──┬──► projectForDisplay() ──► DisplayMessage[]
-//                            └──► projectForLLM()     ──► ChatMessage[]
+//   messages.jsonl (ChatMessage[]) ──┬──► projectForDisplay() ──► DisplayMessage[]
+//                                    └──► projectForLLM()     ──► ChatMessage[]（直接透传）
 //
-// 事件是不可变的，所有优化（prune/budget/compact）在投影层处理，
-// 不修改原始事件。
+//   events.jsonl (ConversationEvent[]) ──► 审计 / Gateway 推送 / 可观测性
 
-// ── 事件类型定义 ────────────────────────────────────────────────
+import { randomUUID } from 'crypto'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs'
+import { join } from 'path'
 
-/** 用户消息事件 */
-export interface UserMessageEvent {
-  type: 'user_message'
-  id: string
-  timestamp: number
-  requestId?: string
-  trigger?: 'user' | 'cron'
-  cronDescription?: string
-  content: string          // 原始文本（含 @filename，不含 base64）
-  images?: string[]        // 关联的图片路径列表
-}
+// ══════════════════════════════════════════════════════════════════
+// 主存储类型：ChatMessage（与 LLM API 格式一致）
+// ══════════════════════════════════════════════════════════════════
 
-/** 助手消息事件（可能包含文本和/或工具调用） */
-export interface AssistantMessageEvent {
-  type: 'assistant_message'
-  id: string
-  timestamp: number
-  requestId?: string
-  text: string             // 助手文本回复
-  thinking?: string        // 扩展思考内容（extended thinking）
-  toolCalls?: ToolCallEvent[]
-}
-
-export interface ToolCallEvent {
+export interface ToolCall {
   id: string
   name: string
   input: unknown
 }
 
-/** 工具结果事件 */
-export interface ToolResultEvent {
-  type: 'tool_result'
-  id: string
-  timestamp: number
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'tool' | 'system'
+  content: string | ContentBlock[] | null
+  thinking?: string
+  tool_calls?: ToolCall[]
+  tool_call_id?: string
+  is_error?: boolean
+  name?: string
+  timestamp?: number
   requestId?: string
-  toolCallId: string       // 对应的 tool_use id
-  toolName: string
-  content: string          // 工具输出内容
-  isError: boolean
-}
-
-/** 上下文压缩事件（summary 存储在事件中，原始事件保留不删除） */
-export interface CompactEvent {
-  type: 'compact'
-  id: string
-  timestamp: number
-  requestId?: string
-  summary: string
-}
-
-/** 请求完成事件 —— 标记一轮用户请求的 LLM 执行全部结束 */
-export interface RequestCompleteEvent {
-  type: 'request_complete'
-  id: string
-  timestamp: number
-  requestId?: string
-  status: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied'
-  totalTurns: number        // LLM 调用轮次
-  totalToolCalls: number    // 工具调用总次数
-  durationMs: number        // 从请求开始到结束的总耗时
-  inputTokens?: number      // 本次请求消耗的输入 token
-  outputTokens?: number     // 本次请求消耗的输出 token
-  costUsd?: number          // 本次请求的费用
-  error?: string            // status=error 时的错误信息
-}
-
-/** 系统事件 —— 系统注入的消息（不混用 user_message / assistant_message） */
-export interface SystemEvent {
-  type: 'system_event'
-  id: string
-  timestamp: number
-  requestId?: string
-  kind: 'error_recovery' | 'cron_trigger' | 'vision_inject' | 'turn_limit' | 'user_abort'
-  content: string
-  /** cron 触发时的任务描述 */
+  images?: string[]
+  trigger?: 'user' | 'cron'
   cronDescription?: string
 }
 
-/** 工具执行记录事件 —— 记录工具执行的元数据（不含完整日志） */
-export interface ToolExecutionEvent {
-  type: 'tool_execution'
-  id: string
-  timestamp: number
-  requestId?: string
-  toolCallId: string
-  toolName: string
-  /** 执行耗时（毫秒） */
-  durationMs: number
-  /** 执行状态 */
-  status: 'success' | 'error' | 'denied' | 'aborted'
-  /** 输出摘要（截断后的前 500 字符） */
-  outputPreview?: string
-  /** 错误摘要 */
-  errorSummary?: string
+export type ContentBlock =
+  | { type: 'thinking'; thinking: string }
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: 'image'; source: ImageSource }
+
+export interface ImageSource {
+  type: 'base64' | 'url'
+  mediaType?: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | 'application/pdf'
+  data?: string
+  url?: string
 }
 
-/** 所有事件类型的联合 */
+// ══════════════════════════════════════════════════════════════════
+// 旁路日志类型：全生命周期事件（完整字段名）
+// ══════════════════════════════════════════════════════════════════
+
+interface BaseEvent {
+  type: string
+  id: string
+  ts: number
+  requestId?: string
+}
+
+// ── 请求生命周期 ──────────────────────────────────────────────────
+
+export interface ReqStartEvent extends BaseEvent {
+  type: 'req_start'
+  mode: 'ask' | 'craft' | 'plan'
+  model: string
+}
+
+export interface ReqEndEvent extends BaseEvent {
+  type: 'req_end'
+  status: 'ok' | 'err' | 'abort' | 'turn' | 'budget'
+  totalTurns: number
+  totalToolCalls: number
+  durationMs: number
+  inputTokens?: number
+  outputTokens?: number
+  costUsd?: number
+}
+
+// ── 消息事件 ──────────────────────────────────────────────────────
+
+export interface UserEvent extends BaseEvent {
+  type: 'user'
+  content: string
+  images?: string[]
+  trigger?: 'user' | 'cron'
+  cronDescription?: string
+}
+
+export interface AssistantEvent extends BaseEvent {
+  type: 'assistant'
+  text: string
+  thinking?: string
+  toolCount?: number
+}
+
+export interface CompactEvent extends BaseEvent {
+  type: 'compact'
+  summary: string
+  tokensBefore?: number
+  tokensAfter?: number
+}
+
+// ── 工具全生命周期 ────────────────────────────────────────────────
+
+export interface ToolDispatchEvent extends BaseEvent {
+  type: 'tool_dispatch'
+  toolCallId: string
+  toolName: string
+  input: unknown
+  batch?: number
+  parallel?: boolean
+}
+
+export interface ToolPermissionEvent extends BaseEvent {
+  type: 'tool_permission'
+  toolCallId: string
+  toolName: string
+  result: 'allow' | 'deny' | 'always_allow' | 'always_deny' | 'session_allow'
+  reason?: string
+  rule?: string
+  mode: 'ask' | 'craft' | 'plan'
+  isReadonly: boolean
+  isDestructive: boolean
+}
+
+export interface ToolStartEvent extends BaseEvent {
+  type: 'tool_start'
+  toolCallId: string
+  toolName: string
+  input: unknown
+  description?: string
+}
+
+export interface ToolLogEvent extends BaseEvent {
+  type: 'tool_log'
+  toolCallId: string
+  line: string
+}
+
+export interface ToolEndEvent extends BaseEvent {
+  type: 'tool_end'
+  toolCallId: string
+  toolName: string
+  durationMs: number
+  status: 'ok' | 'err' | 'denied' | 'timeout' | 'abort'
+  outputPreview?: string
+  errorSummary?: string
+  truncated?: boolean
+  originalLength?: number
+}
+
+// ── 副作用事件 ────────────────────────────────────────────────────
+
+export interface FileTouchedEvent extends BaseEvent {
+  type: 'file_touched'
+  path: string
+  mode: 'create' | 'edit' | 'delete'
+  bytes: number
+}
+
+export interface MemoryWrittenEvent extends BaseEvent {
+  type: 'memory_written'
+  scope: 'user' | 'project' | 'global'
+  key: string
+}
+
+// ── 策略事件 ──────────────────────────────────────────────────────
+
+export interface BudgetWarnEvent extends BaseEvent {
+  type: 'budget_warn'
+  spentUsd: number
+  capUsd: number
+  percentage: number
+}
+
+export interface BudgetExceededEvent extends BaseEvent {
+  type: 'budget_exceeded'
+  spentUsd: number
+  capUsd: number
+}
+
+export interface StormBlockedEvent extends BaseEvent {
+  type: 'storm_blocked'
+  toolCallId: string
+  toolName: string
+  input: unknown
+  recentCount: number
+  windowSize: number
+}
+
+export interface TurnLimitEvent extends BaseEvent {
+  type: 'turn_limit'
+  totalTurns: number
+  limit: number
+}
+
+export interface PlanBlockedEvent extends BaseEvent {
+  type: 'plan_blocked'
+  toolCallId: string
+  toolName: string
+  reason: string
+}
+
+export interface ModelEscalatedEvent extends BaseEvent {
+  type: 'model_escalated'
+  fromModel: string
+  toModel: string
+  reason: 'self_report' | 'failure_threshold' | 'user_request'
+  rationale?: string
+}
+
+// ── 会话事件 ──────────────────────────────────────────────────────
+
+export interface SessionOpenEvent extends BaseEvent {
+  type: 'session_open'
+  sessionName: string
+  resumed: boolean
+  resumedFromTurn?: number
+}
+
+// ── 能力事件 ──────────────────────────────────────────────────────
+
+export interface CapRegisteredEvent extends BaseEvent {
+  type: 'cap_registered'
+  toolName: string
+  permission: 'ask' | 'allow' | 'deny'
+}
+
+export interface CapRemovedEvent extends BaseEvent {
+  type: 'cap_removed'
+  toolName: string
+}
+
+// ── 系统事件 ──────────────────────────────────────────────────────
+
+export interface ErrorRecoveryEvent extends BaseEvent {
+  type: 'error_recovery'
+  errorType: string
+  attempt: number
+  maxAttempts: number
+}
+
+export interface MaxOutputRecoveryEvent extends BaseEvent {
+  type: 'max_output_recovery'
+  attempt: number
+  maxAttempts: number
+}
+
+export interface CronTriggerEvent extends BaseEvent {
+  type: 'cron_trigger'
+  content: string
+  cronDescription?: string
+}
+
+export interface LlmStartEvent extends BaseEvent {
+  type: 'llm_start'
+  model: string
+  provider: string
+}
+
+export interface LlmEndEvent extends BaseEvent {
+  type: 'llm_end'
+  durationMs: number
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+}
+
+export interface HookFiredEvent extends BaseEvent {
+  type: 'hook_fired'
+  hookName: string
+  phase: 'pre_tool' | 'post_tool' | 'pre_send' | 'post_send' | 'compact'
+  outcome: 'ok' | 'blocked' | 'modified' | 'err'
+}
+
+export interface ErrorEvent extends BaseEvent {
+  type: 'error'
+  message: string
+  recoverable: boolean
+}
+
+// ── 联合类型 ──────────────────────────────────────────────────────
+
 export type ConversationEvent =
-  | UserMessageEvent
-  | AssistantMessageEvent
-  | ToolResultEvent
-  | CompactEvent
-  | RequestCompleteEvent
-  | SystemEvent
-  | ToolExecutionEvent
+  | ReqStartEvent | ReqEndEvent
+  | UserEvent | AssistantEvent | CompactEvent
+  | ToolDispatchEvent | ToolPermissionEvent | ToolStartEvent | ToolLogEvent | ToolEndEvent
+  | FileTouchedEvent | MemoryWrittenEvent
+  | BudgetWarnEvent | BudgetExceededEvent | StormBlockedEvent | TurnLimitEvent | PlanBlockedEvent | ModelEscalatedEvent
+  | SessionOpenEvent
+  | CapRegisteredEvent | CapRemovedEvent
+  | ErrorRecoveryEvent | MaxOutputRecoveryEvent | CronTriggerEvent
+  | LlmStartEvent | LlmEndEvent
+  | HookFiredEvent | ErrorEvent
 
-// ── 事件工厂函数 ────────────────────────────────────────────────
-
-import { randomUUID } from 'crypto'
+// ══════════════════════════════════════════════════════════════════
+// 事件工厂函数
+// ══════════════════════════════════════════════════════════════════
 
 function genId(prefix: string): string {
   return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`
 }
 
-export function createUserMessageEvent(
-  content: string,
-  requestId?: string,
-  trigger?: 'user' | 'cron',
-  cronDescription?: string,
-  images?: string[],
-): UserMessageEvent {
-  return {
-    type: 'user_message',
-    id: genId('user'),
-    timestamp: Date.now(),
-    requestId,
-    trigger,
-    cronDescription,
-    content,
-    ...(images && images.length > 0 ? { images } : {}),
-  }
+export function createReqStartEvent(requestId: string, mode: ReqStartEvent['mode'], model: string): ReqStartEvent {
+  return { type: 'req_start', id: genId('rs'), ts: Date.now(), requestId, mode, model }
 }
 
-export function createAssistantMessageEvent(
-  text: string,
-  toolCalls?: ToolCallEvent[],
-  requestId?: string,
-  thinking?: string,
-): AssistantMessageEvent {
-  return {
-    type: 'assistant_message',
-    id: genId('asst'),
-    timestamp: Date.now(),
-    requestId,
-    text,
-    ...(thinking ? { thinking } : {}),
-    ...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
-  }
-}
-
-export function createToolResultEvent(
-  toolCallId: string,
-  toolName: string,
-  content: string,
-  isError: boolean,
-  requestId?: string,
-): ToolResultEvent {
-  return {
-    type: 'tool_result',
-    id: genId('tres'),
-    timestamp: Date.now(),
-    requestId,
-    toolCallId,
-    toolName,
-    content,
-    isError,
-  }
-}
-
-export function createCompactEvent(summary: string, requestId?: string): CompactEvent {
-  return {
-    type: 'compact',
-    id: genId('comp'),
-    timestamp: Date.now(),
-    requestId,
-    summary,
-  }
-}
-
-export function createRequestCompleteEvent(
+export function createReqEndEvent(
   requestId: string | undefined,
-  status: RequestCompleteEvent['status'],
+  status: ReqEndEvent['status'],
   totalTurns: number,
   totalToolCalls: number,
   durationMs: number,
   inputTokens?: number,
   outputTokens?: number,
   costUsd?: number,
-  error?: string,
-): RequestCompleteEvent {
+): ReqEndEvent {
   return {
-    type: 'request_complete',
-    id: genId('rc'),
-    timestamp: Date.now(),
-    requestId,
-    status,
-    totalTurns,
-    totalToolCalls,
-    durationMs,
+    type: 'req_end', id: genId('re'), ts: Date.now(), requestId,
+    status, totalTurns, totalToolCalls, durationMs,
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(costUsd !== undefined ? { costUsd } : {}),
-    ...(error ? { error } : {}),
   }
 }
 
-export function createSystemEvent(
-  kind: SystemEvent['kind'],
+export function createUserEvent(
   content: string,
   requestId?: string,
+  trigger?: 'user' | 'cron',
   cronDescription?: string,
-): SystemEvent {
+  images?: string[],
+): UserEvent {
   return {
-    type: 'system_event',
-    id: genId('sys'),
-    timestamp: Date.now(),
-    requestId,
-    kind,
-    content,
+    type: 'user', id: genId('usr'), ts: Date.now(), requestId, content,
+    ...(trigger ? { trigger } : {}),
+    ...(cronDescription ? { cronDescription } : {}),
+    ...(images && images.length > 0 ? { images } : {}),
+  }
+}
+
+export function createAssistantEvent(
+  text: string,
+  requestId?: string,
+  thinking?: string,
+  toolCount?: number,
+): AssistantEvent {
+  return {
+    type: 'assistant', id: genId('asst'), ts: Date.now(), requestId, text,
+    ...(thinking ? { thinking } : {}),
+    ...(toolCount !== undefined ? { toolCount } : {}),
+  }
+}
+
+export function createCompactEvent(summary: string, requestId?: string): CompactEvent {
+  return { type: 'compact', id: genId('comp'), ts: Date.now(), requestId, summary }
+}
+
+export function createToolDispatchEvent(
+  requestId: string | undefined,
+  toolCallId: string,
+  toolName: string,
+  input: unknown,
+  batch?: number,
+  parallel?: boolean,
+): ToolDispatchEvent {
+  return {
+    type: 'tool_dispatch', id: genId('td'), ts: Date.now(), requestId,
+    toolCallId, toolName, input,
+    ...(batch !== undefined ? { batch } : {}),
+    ...(parallel !== undefined ? { parallel } : {}),
+  }
+}
+
+export function createToolPermissionEvent(
+  requestId: string | undefined,
+  toolCallId: string,
+  toolName: string,
+  result: ToolPermissionEvent['result'],
+  mode: ToolPermissionEvent['mode'],
+  isReadonly: boolean,
+  isDestructive: boolean,
+  reason?: string,
+  rule?: string,
+): ToolPermissionEvent {
+  return {
+    type: 'tool_permission', id: genId('tp'), ts: Date.now(), requestId,
+    toolCallId, toolName, result, mode, isReadonly, isDestructive,
+    ...(reason ? { reason } : {}),
+    ...(rule ? { rule } : {}),
+  }
+}
+
+export function createToolStartEvent(
+  requestId: string | undefined,
+  toolCallId: string,
+  toolName: string,
+  input: unknown,
+  description?: string,
+): ToolStartEvent {
+  return {
+    type: 'tool_start', id: genId('ts'), ts: Date.now(), requestId,
+    toolCallId, toolName, input,
+    ...(description ? { description } : {}),
+  }
+}
+
+export function createToolLogEvent(requestId: string | undefined, toolCallId: string, line: string): ToolLogEvent {
+  return { type: 'tool_log', id: genId('tl'), ts: Date.now(), requestId, toolCallId, line }
+}
+
+export function createToolEndEvent(
+  requestId: string | undefined,
+  toolCallId: string,
+  toolName: string,
+  durationMs: number,
+  status: ToolEndEvent['status'],
+  outputPreview?: string,
+  errorSummary?: string,
+  truncated?: boolean,
+  originalLength?: number,
+): ToolEndEvent {
+  return {
+    type: 'tool_end', id: genId('te'), ts: Date.now(), requestId,
+    toolCallId, toolName, durationMs, status,
+    ...(outputPreview ? { outputPreview } : {}),
+    ...(errorSummary ? { errorSummary } : {}),
+    ...(truncated !== undefined ? { truncated } : {}),
+    ...(originalLength !== undefined ? { originalLength } : {}),
+  }
+}
+
+export function createFileTouchedEvent(
+  requestId: string | undefined,
+  path: string,
+  mode: FileTouchedEvent['mode'],
+  bytes: number,
+): FileTouchedEvent {
+  return { type: 'file_touched', id: genId('ft'), ts: Date.now(), requestId, path, mode, bytes }
+}
+
+export function createMemoryWrittenEvent(
+  requestId: string | undefined,
+  scope: MemoryWrittenEvent['scope'],
+  key: string,
+): MemoryWrittenEvent {
+  return { type: 'memory_written', id: genId('mw'), ts: Date.now(), requestId, scope, key }
+}
+
+export function createBudgetWarnEvent(spentUsd: number, capUsd: number, percentage: number): BudgetWarnEvent {
+  return { type: 'budget_warn', id: genId('bw'), ts: Date.now(), spentUsd, capUsd, percentage }
+}
+
+export function createBudgetExceededEvent(spentUsd: number, capUsd: number): BudgetExceededEvent {
+  return { type: 'budget_exceeded', id: genId('be'), ts: Date.now(), spentUsd, capUsd }
+}
+
+export function createStormBlockedEvent(
+  requestId: string | undefined,
+  toolCallId: string,
+  toolName: string,
+  input: unknown,
+  recentCount: number,
+  windowSize: number,
+): StormBlockedEvent {
+  return {
+    type: 'storm_blocked', id: genId('sb'), ts: Date.now(), requestId,
+    toolCallId, toolName, input, recentCount, windowSize,
+  }
+}
+
+export function createTurnLimitEvent(totalTurns: number, limit: number): TurnLimitEvent {
+  return { type: 'turn_limit', id: genId('tlmt'), ts: Date.now(), totalTurns, limit }
+}
+
+export function createPlanBlockedEvent(
+  requestId: string | undefined,
+  toolCallId: string,
+  toolName: string,
+  reason: string,
+): PlanBlockedEvent {
+  return { type: 'plan_blocked', id: genId('pb'), ts: Date.now(), requestId, toolCallId, toolName, reason }
+}
+
+export function createModelEscalatedEvent(
+  requestId: string | undefined,
+  fromModel: string,
+  toModel: string,
+  reason: ModelEscalatedEvent['reason'],
+  rationale?: string,
+): ModelEscalatedEvent {
+  return {
+    type: 'model_escalated', id: genId('me'), ts: Date.now(), requestId,
+    fromModel, toModel, reason,
+    ...(rationale ? { rationale } : {}),
+  }
+}
+
+export function createSessionOpenEvent(sessionName: string, resumed: boolean, resumedFromTurn?: number): SessionOpenEvent {
+  return {
+    type: 'session_open', id: genId('so'), ts: Date.now(),
+    sessionName, resumed,
+    ...(resumedFromTurn !== undefined ? { resumedFromTurn } : {}),
+  }
+}
+
+export function createCapRegisteredEvent(toolName: string, permission: CapRegisteredEvent['permission']): CapRegisteredEvent {
+  return { type: 'cap_registered', id: genId('cr'), ts: Date.now(), toolName, permission }
+}
+
+export function createCapRemovedEvent(toolName: string): CapRemovedEvent {
+  return { type: 'cap_removed', id: genId('crt'), ts: Date.now(), toolName }
+}
+
+export function createErrorRecoveryEvent(errorType: string, attempt: number, maxAttempts: number): ErrorRecoveryEvent {
+  return { type: 'error_recovery', id: genId('er'), ts: Date.now(), errorType, attempt, maxAttempts }
+}
+
+export function createMaxOutputRecoveryEvent(attempt: number, maxAttempts: number): MaxOutputRecoveryEvent {
+  return { type: 'max_output_recovery', id: genId('mor'), ts: Date.now(), attempt, maxAttempts }
+}
+
+export function createCronTriggerEvent(content: string, cronDescription?: string): CronTriggerEvent {
+  return {
+    type: 'cron_trigger', id: genId('ct'), ts: Date.now(), content,
     ...(cronDescription ? { cronDescription } : {}),
   }
 }
 
-export function createToolExecutionEvent(
-  toolCallId: string,
-  toolName: string,
+export function createLlmStartEvent(requestId: string | undefined, model: string, provider: string): LlmStartEvent {
+  return { type: 'llm_start', id: genId('ls'), ts: Date.now(), requestId, model, provider }
+}
+
+export function createLlmEndEvent(
+  requestId: string | undefined,
   durationMs: number,
-  status: ToolExecutionEvent['status'],
-  requestId?: string,
-  outputPreview?: string,
-  errorSummary?: string,
-): ToolExecutionEvent {
+  inputTokens?: number,
+  outputTokens?: number,
+  cacheReadTokens?: number,
+  cacheWriteTokens?: number,
+): LlmEndEvent {
   return {
-    type: 'tool_execution',
-    id: genId('texc'),
-    timestamp: Date.now(),
-    requestId,
-    toolCallId,
-    toolName,
-    durationMs,
-    status,
-    ...(outputPreview ? { outputPreview } : {}),
-    ...(errorSummary ? { errorSummary } : {}),
+    type: 'llm_end', id: genId('le'), ts: Date.now(), requestId, durationMs,
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
   }
 }
 
-// ── 持久化接口 ──────────────────────────────────────────────────
-
-export interface EventStorage {
-  saveEvents(events: ConversationEvent[]): void
-  loadEvents(): ConversationEvent[]
+export function createHookFiredEvent(
+  hookName: string,
+  phase: HookFiredEvent['phase'],
+  outcome: HookFiredEvent['outcome'],
+): HookFiredEvent {
+  return { type: 'hook_fired', id: genId('hf'), ts: Date.now(), hookName, phase, outcome }
 }
 
-// ── 投影类型 ────────────────────────────────────────────────────
+export function createErrorEvent(message: string, recoverable: boolean, requestId?: string): ErrorEvent {
+  return { type: 'error', id: genId('err'), ts: Date.now(), requestId, message, recoverable }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 投影类型
+// ══════════════════════════════════════════════════════════════════
 
 export interface DisplayToolCard {
   id: string
@@ -275,9 +579,9 @@ export interface DisplayToolCard {
 }
 
 export interface DisplayMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string
-  thinking?: string       // 扩展思考内容
+  thinking?: string
   images?: string[]
   isCron?: boolean
   cronDescription?: string
@@ -291,92 +595,265 @@ export interface DisplayMessage {
   }
 }
 
-// ── 对话存储 ────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// 存储实现
+// ══════════════════════════════════════════════════════════════════
+
+const MSG_SCHEMA = 'hrids-messages/v1'
+const EVT_SCHEMA = 'hrids-events/v2'
+const MSG_MARKER = JSON.stringify({ $schema: MSG_SCHEMA }) + '\n'
+const EVT_MARKER = JSON.stringify({ $schema: EVT_SCHEMA }) + '\n'
+
+/** messages.jsonl 存储 */
+class JsonlMessageStorage {
+  private path: string
+  private dir: string
+
+  constructor(sessionDir: string) {
+    this.dir = sessionDir
+    this.path = join(sessionDir, 'messages.jsonl')
+  }
+
+  private ensureDir(): void {
+    if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true })
+  }
+
+  append(messages: ChatMessage[]): void {
+    this.ensureDir()
+    const lines = messages.map(m => JSON.stringify(m)).join('\n') + '\n'
+    if (!existsSync(this.path)) {
+      appendFileSync(this.path, MSG_MARKER + lines, 'utf-8')
+      return
+    }
+    appendFileSync(this.path, lines, 'utf-8')
+  }
+
+  load(): ChatMessage[] {
+    if (!existsSync(this.path)) return []
+    const content = readFileSync(this.path, 'utf-8')
+    if (!content.trim()) return []
+    const lines = content.split('\n')
+    const messages: ChatMessage[] = []
+    let startIdx = 0
+    const firstLine = lines[0]?.trim()
+    if (firstLine) {
+      try {
+        const marker = JSON.parse(firstLine)
+        if (marker.$schema) startIdx = 1
+      } catch { /* not a marker */ }
+    }
+    for (let i = startIdx; i < lines.length; i++) {
+      const line = lines[i].trim()
+      if (!line) continue
+      try {
+        messages.push(JSON.parse(line) as ChatMessage)
+      } catch {
+        process.stderr.write(`[messages.jsonl] 第 ${i + 1} 行解析失败，已跳过\n`)
+      }
+    }
+    return messages
+  }
+
+  rewrite(messages: ChatMessage[]): void {
+    this.ensureDir()
+    const tmp = this.path + '.tmp'
+    const body = messages.map(m => JSON.stringify(m)).join('\n') + '\n'
+    writeFileSync(tmp, MSG_MARKER + body, 'utf-8')
+    renameSync(tmp, this.path)
+  }
+}
+
+/** events.jsonl 存储 */
+class JsonlEventStorage {
+  private path: string
+  private dir: string
+
+  constructor(sessionDir: string) {
+    this.dir = sessionDir
+    this.path = join(sessionDir, 'events.jsonl')
+  }
+
+  private ensureDir(): void {
+    if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true })
+  }
+
+  append(events: ConversationEvent[]): void {
+    this.ensureDir()
+    const lines = events.map(e => JSON.stringify(e)).join('\n') + '\n'
+    if (!existsSync(this.path)) {
+      appendFileSync(this.path, EVT_MARKER + lines, 'utf-8')
+      return
+    }
+    appendFileSync(this.path, lines, 'utf-8')
+  }
+
+  load(): ConversationEvent[] {
+    if (!existsSync(this.path)) return []
+    const content = readFileSync(this.path, 'utf-8')
+    if (!content.trim()) return []
+    const lines = content.split('\n')
+    const events: ConversationEvent[] = []
+    let startIdx = 0
+    const firstLine = lines[0]?.trim()
+    if (firstLine) {
+      try {
+        const marker = JSON.parse(firstLine)
+        if (marker.$schema) startIdx = 1
+      } catch { /* not a marker */ }
+    }
+    for (let i = startIdx; i < lines.length; i++) {
+      const line = lines[i].trim()
+      if (!line) continue
+      try {
+        events.push(JSON.parse(line) as ConversationEvent)
+      } catch {
+        process.stderr.write(`[events.jsonl] 第 ${i + 1} 行解析失败，已跳过\n`)
+      }
+    }
+    return events
+  }
+
+  rewrite(events: ConversationEvent[]): void {
+    this.ensureDir()
+    const tmp = this.path + '.tmp'
+    const body = events.map(e => JSON.stringify(e)).join('\n') + '\n'
+    writeFileSync(tmp, EVT_MARKER + body, 'utf-8')
+    renameSync(tmp, this.path)
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 对话存储（双存储核心）
+// ══════════════════════════════════════════════════════════════════
 
 export class ConversationStore {
-  private eventLog: ConversationEvent[] = []
-  private storage: EventStorage | null = null
-  private savedEventCount = 0
+  // 主存储：ChatMessage[]（直接用于 LLM API）
+  private messages: ChatMessage[] = []
+  private msgStorage: JsonlMessageStorage | null = null
+  private savedMsgCount = 0
 
-  // LLM 投影的预处理状态
-  /** 最新用户消息的预处理结果（含 image block），投影时替换原始文本 */
-  private latestPreprocessed: import('./QueryEngine.js').ContentBlock[] | null = null
-  /** 因 prune 被清除的 toolCallId 集合，LLM 投影时跳过对应的 tool_use */
+  // 旁路日志：ConversationEvent[]（审计 + Gateway）
+  private events: ConversationEvent[] = []
+  private evtStorage: JsonlEventStorage | null = null
+  private savedEvtCount = 0
+
+  // LLM 投影预处理状态
+  private latestPreprocessed: ContentBlock[] | null = null
   private prunedToolCallIds = new Set<string>()
 
-  constructor(storage?: EventStorage) {
-    this.storage = storage ?? null
-  }
-
-  // ── 事件追加 ──────────────────────────────────────────────────
-
-  /** 追加事件到日志并持久化 */
-  appendEvents(...events: ConversationEvent[]): void {
-    if (events.length === 0) return
-    this.eventLog.push(...events)
-    this.saveToDisk()
-  }
-
-  /** 追加事件但不持久化（用于批量导入后手动调用 saveToDisk） */
-  appendEventsNoSave(...events: ConversationEvent[]): void {
-    if (events.length === 0) return
-    // 分批 push，避免展开运算符在事件量大时超出调用栈限制
-    const BATCH = 5000
-    for (let i = 0; i < events.length; i += BATCH) {
-      this.eventLog.push(...events.slice(i, i + BATCH))
+  constructor(sessionDir?: string) {
+    if (sessionDir) {
+      this.msgStorage = new JsonlMessageStorage(sessionDir)
+      this.evtStorage = new JsonlEventStorage(sessionDir)
     }
   }
 
-  /** 替换整个事件日志（用于会话切换），并全量重写磁盘 */
+  // ── 消息追加（主存储）──────────────────────────────────────────
+
+  /** 追加 ChatMessage 到主存储 */
+  appendMessage(...msgs: ChatMessage[]): void {
+    if (msgs.length === 0) return
+    this.messages.push(...msgs)
+    this.saveMessages()
+  }
+
+  /** 追加消息但不持久化 */
+  appendMessageNoSave(...msgs: ChatMessage[]): void {
+    if (msgs.length === 0) return
+    const BATCH = 5000
+    for (let i = 0; i < msgs.length; i += BATCH) {
+      this.messages.push(...msgs.slice(i, i + BATCH))
+    }
+  }
+
+  // ── 事件追加（旁路日志）────────────────────────────────────────
+
+  /** 追加事件到旁路日志 */
+  appendEvents(...events: ConversationEvent[]): void {
+    if (events.length === 0) return
+    this.events.push(...events)
+    this.saveEvents()
+  }
+
+  /** 追加事件但不持久化 */
+  appendEventsNoSave(...events: ConversationEvent[]): void {
+    if (events.length === 0) return
+    const BATCH = 5000
+    for (let i = 0; i < events.length; i += BATCH) {
+      this.events.push(...events.slice(i, i + BATCH))
+    }
+  }
+
+  // ── 替换（会话切换）────────────────────────────────────────────
+
+  /** 替换整个消息日志（会话切换） */
+  replaceMessages(messages: ChatMessage[]): void {
+    if (!Array.isArray(messages)) {
+      process.stderr.write('[ConversationStore] replaceMessages 收到非数组参数，已忽略\n')
+      return
+    }
+    this.messages = [...messages]
+    this.latestPreprocessed = null
+    this.prunedToolCallIds.clear()
+    this.savedMsgCount = 0
+    this.forceRewriteMessages()
+  }
+
+  /** 替换整个事件日志 */
   replaceEvents(events: ConversationEvent[]): void {
     if (!Array.isArray(events)) {
       process.stderr.write('[ConversationStore] replaceEvents 收到非数组参数，已忽略\n')
       return
     }
-    this.eventLog = [...events]
-    this.latestPreprocessed = null
-    this.prunedToolCallIds.clear()
-    this.savedEventCount = 0
-    this.forceRewriteDisk()
+    this.events = [...events]
+    this.savedEvtCount = 0
+    this.forceRewriteEvents()
   }
 
-  // ── 访问器 ────────────────────────────────────────────────────
+  // ── 访问器 ─────────────────────────────────────────────────────
+
+  /** 获取完整消息日志（只读） */
+  getMessages(): readonly ChatMessage[] {
+    return this.messages
+  }
 
   /** 获取完整事件日志（只读） */
   getEventLog(): readonly ConversationEvent[] {
-    return this.eventLog
+    return this.events
+  }
+
+  /** 消息总数 */
+  getMessageCount(): number {
+    return this.messages.length
   }
 
   /** 事件总数 */
   getEventCount(): number {
-    return this.eventLog.length
+    return this.events.length
   }
 
-  /** 清空所有事件（内存 + 磁盘） */
+  /** 清空所有数据 */
   clear(): void {
-    this.eventLog = []
+    this.messages = []
+    this.events = []
     this.latestPreprocessed = null
     this.prunedToolCallIds.clear()
-    this.savedEventCount = 0
-    this.forceRewriteDisk()
+    this.savedMsgCount = 0
+    this.savedEvtCount = 0
+    this.forceRewriteMessages()
+    this.forceRewriteEvents()
   }
 
   // ── LLM 投影预处理状态 ────────────────────────────────────────
 
-  /**
-   * 设置最新用户消息的预处理结果。
-   * QueryEngine 在调用 LLM 前，将含 image block 的 ContentBlock[] 传入，
-   * 投影时会替换原始文本版本。
-   */
-  setLatestPreprocessed(blocks: import('./QueryEngine.js').ContentBlock[] | null): void {
+  setLatestPreprocessed(blocks: ContentBlock[] | null): void {
     this.latestPreprocessed = blocks
   }
 
-  getLatestPreprocessed(): import('./QueryEngine.js').ContentBlock[] | null {
+  getLatestPreprocessed(): ContentBlock[] | null {
     return this.latestPreprocessed
   }
 
-  /** 标记 toolCallId 对应的 tool_result 已被 prune，LLM 投影时跳过该 tool_use */
   markToolCallPruned(toolCallId: string): void {
     this.prunedToolCallIds.add(toolCallId)
   }
@@ -391,119 +868,241 @@ export class ConversationStore {
 
   // ── 持久化 ────────────────────────────────────────────────────
 
-  /** 加载事件：从 events.jsonl */
+  /** 从磁盘加载（messages.jsonl + events.jsonl） */
   loadFromDisk(sessionDir: string): void {
-    if (!this.storage) {
-      this.storage = new JsonlEventStorage(sessionDir)
-    }
-    this.eventLog = this.storage.loadEvents()
-    this.savedEventCount = this.eventLog.length
+    if (!this.msgStorage) this.msgStorage = new JsonlMessageStorage(sessionDir)
+    if (!this.evtStorage) this.evtStorage = new JsonlEventStorage(sessionDir)
+    this.messages = this.msgStorage.load()
+    this.events = this.evtStorage.load()
+    this.savedMsgCount = this.messages.length
+    this.savedEvtCount = this.events.length
   }
 
-  /** 替换存储后端并重新加载事件（用于延迟初始化和会话切换） */
+  /** 切换存储后端 */
   switchStorage(sessionDir: string): void {
-    this.storage = new JsonlEventStorage(sessionDir)
-    this.eventLog = this.storage.loadEvents()
-    this.savedEventCount = this.eventLog.length
+    this.msgStorage = new JsonlMessageStorage(sessionDir)
+    this.evtStorage = new JsonlEventStorage(sessionDir)
+    this.messages = this.msgStorage.load()
+    this.events = this.evtStorage.load()
+    this.savedMsgCount = this.messages.length
+    this.savedEvtCount = this.events.length
   }
 
-  /** 增量保存新事件到磁盘 */
-  saveToDisk(): void {
-    if (!this.storage) return
-
-    const newEvents = this.eventLog.slice(this.savedEventCount)
-    if (newEvents.length > 0) {
-      this.storage.saveEvents(newEvents)
-      this.savedEventCount = this.eventLog.length
+  /** 增量保存消息到磁盘 */
+  private saveMessages(): void {
+    if (!this.msgStorage) return
+    const newMsgs = this.messages.slice(this.savedMsgCount)
+    if (newMsgs.length > 0) {
+      this.msgStorage.append(newMsgs)
+      this.savedMsgCount = this.messages.length
     }
+  }
+
+  /** 增量保存事件到磁盘 */
+  private saveEvents(): void {
+    if (!this.evtStorage) return
+    const newEvts = this.events.slice(this.savedEvtCount)
+    if (newEvts.length > 0) {
+      this.evtStorage.append(newEvts)
+      this.savedEvtCount = this.events.length
+    }
+  }
+
+  /** 强制全量重写 messages.jsonl */
+  private forceRewriteMessages(): void {
+    if (!this.msgStorage) return
+    this.msgStorage.rewrite(this.messages)
+    this.savedMsgCount = this.messages.length
+  }
+
+  /** 强制全量重写 events.jsonl */
+  private forceRewriteEvents(): void {
+    if (!this.evtStorage) return
+    this.evtStorage.rewrite(this.events)
+    this.savedEvtCount = this.events.length
   }
 
   /**
-   * 强制全量重写磁盘（用于 clearHistory 或 compact 后事件数减少的情况）。
-   * 注意：事件日志是 append-only，正常情况下不会减少。
+   * 强制全量重写磁盘（兼容旧接口，clear/compact 后调用）
    */
   forceRewriteDisk(): void {
-    if (!this.storage) return
-    // 重新初始化存储会清空文件并重写
-    if (this.storage instanceof JsonlEventStorage) {
-      this.storage.rewrite(this.eventLog)
-    }
-    this.savedEventCount = this.eventLog.length
+    this.forceRewriteMessages()
+    this.forceRewriteEvents()
+  }
+
+  /** 保存到磁盘（兼容旧接口） */
+  saveToDisk(): void {
+    this.saveMessages()
+    this.saveEvents()
   }
 }
 
-// ── JSONL 事件存储实现 ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// 旧事件类型兼容（加载旧 events.jsonl 时使用）
+// ══════════════════════════════════════════════════════════════════
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs'
-import { join } from 'path'
+/** 旧格式的事件类型（用于加载旧 events.jsonl 并迁移到新格式） */
+export interface LegacyUserMessageEvent {
+  type: 'user_message'
+  id: string
+  timestamp: number
+  requestId?: string
+  trigger?: 'user' | 'cron'
+  cronDescription?: string
+  content: string
+  images?: string[]
+}
 
-const CURRENT_SCHEMA = 'hrids-events/v1'
-const SCHEMA_MARKER = JSON.stringify({ $schema: CURRENT_SCHEMA }) + '\n'
+export interface LegacyAssistantMessageEvent {
+  type: 'assistant_message'
+  id: string
+  timestamp: number
+  requestId?: string
+  text: string
+  thinking?: string
+  toolCalls?: Array<{ id: string; name: string; input: unknown }>
+}
 
-export class JsonlEventStorage implements EventStorage {
-  private eventsPath: string
+export interface LegacyToolResultEvent {
+  type: 'tool_result'
+  id: string
+  timestamp: number
+  requestId?: string
+  toolCallId: string
+  toolName: string
+  content: string
+  isError: boolean
+}
 
-  constructor(sessionDir: string) {
-    this.eventsPath = join(sessionDir, 'events.jsonl')
-    if (!existsSync(sessionDir)) {
-      mkdirSync(sessionDir, { recursive: true })
+export interface LegacyCompactEvent {
+  type: 'compact'
+  id: string
+  timestamp: number
+  requestId?: string
+  summary: string
+}
+
+export interface LegacyRequestCompleteEvent {
+  type: 'request_complete'
+  id: string
+  timestamp: number
+  requestId?: string
+  status: string
+  totalTurns: number
+  totalToolCalls: number
+  durationMs: number
+  inputTokens?: number
+  outputTokens?: number
+  costUsd?: number
+  error?: string
+}
+
+export interface LegacySystemEvent {
+  type: 'system_event'
+  id: string
+  timestamp: number
+  requestId?: string
+  kind: string
+  content: string
+  cronDescription?: string
+}
+
+export interface LegacyToolExecutionEvent {
+  type: 'tool_execution'
+  id: string
+  timestamp: number
+  requestId?: string
+  toolCallId: string
+  toolName: string
+  durationMs: number
+  status: string
+  outputPreview?: string
+  errorSummary?: string
+}
+
+export type LegacyConversationEvent =
+  | LegacyUserMessageEvent
+  | LegacyAssistantMessageEvent
+  | LegacyToolResultEvent
+  | LegacyCompactEvent
+  | LegacyRequestCompleteEvent
+  | LegacySystemEvent
+  | LegacyToolExecutionEvent
+
+/**
+ * 将旧格式事件日志转换为 ChatMessage[]（主存储格式）。
+ * 用于迁移旧会话数据。
+ */
+export function migrateEventsToMessages(events: LegacyConversationEvent[]): ChatMessage[] {
+  const messages: ChatMessage[] = []
+
+  for (const ev of events) {
+    switch (ev.type) {
+      case 'user_message':
+        messages.push({
+          role: 'user',
+          content: ev.content,
+          timestamp: ev.timestamp,
+          requestId: ev.requestId,
+          ...(ev.images ? { images: ev.images } : {}),
+          ...(ev.trigger ? { trigger: ev.trigger } : {}),
+          ...(ev.cronDescription ? { cronDescription: ev.cronDescription } : {}),
+        })
+        break
+
+      case 'assistant_message':
+        messages.push({
+          role: 'assistant',
+          content: ev.text || null,
+          timestamp: ev.timestamp,
+          requestId: ev.requestId,
+          ...(ev.thinking ? { thinking: ev.thinking } : {}),
+          ...(ev.toolCalls && ev.toolCalls.length > 0 ? { tool_calls: ev.toolCalls } : {}),
+        })
+        break
+
+      case 'tool_result':
+        messages.push({
+          role: 'tool',
+          content: ev.content,
+          tool_call_id: ev.toolCallId,
+          name: ev.toolName,
+          is_error: ev.isError,
+          timestamp: ev.timestamp,
+          requestId: ev.requestId,
+        })
+        break
+
+      case 'compact':
+        messages.push({
+          role: 'user',
+          content: `[上下文压缩] ${ev.summary}`,
+          timestamp: ev.timestamp,
+          requestId: ev.requestId,
+        })
+        messages.push({
+          role: 'assistant',
+          content: '已了解之前的对话内容，将基于摘要继续工作。',
+          timestamp: ev.timestamp + 1,
+          requestId: ev.requestId,
+        })
+        break
+
+      case 'system_event':
+        messages.push({
+          role: 'user',
+          content: ev.content,
+          timestamp: ev.timestamp,
+          requestId: ev.requestId,
+        })
+        break
+
+      // request_complete, tool_execution 不转换为消息
+      case 'request_complete':
+      case 'tool_execution':
+        break
     }
   }
 
-  saveEvents(events: ConversationEvent[]): void {
-    const lines = events.map(e => JSON.stringify(e)).join('\n') + '\n'
-
-    // 首次写入：文件不存在时先写 schema marker
-    // 使用 appendFileSync 避免并发竞态（两个进程同时检测到文件不存在）
-    if (!existsSync(this.eventsPath)) {
-      appendFileSync(this.eventsPath, SCHEMA_MARKER + lines, 'utf-8')
-      return
-    }
-
-    // append-only 写入（大块和小块统一处理）
-    appendFileSync(this.eventsPath, lines, 'utf-8')
-  }
-
-  loadEvents(): ConversationEvent[] {
-    if (!existsSync(this.eventsPath)) return []
-    const content = readFileSync(this.eventsPath, 'utf-8')
-    if (!content.trim()) return []
-
-    const lines = content.split('\n')
-    const events: ConversationEvent[] = []
-
-    // 检测并跳过 schema marker 行
-    let startIdx = 0
-    const firstLine = lines[0]?.trim()
-    if (firstLine) {
-      try {
-        const marker = JSON.parse(firstLine)
-        if (marker.$schema) {
-          startIdx = 1
-          // 未来可按 marker.$schema 做版本分支
-        }
-      } catch { /* 不是 marker，按 v0 处理 */ }
-    }
-
-    for (let i = startIdx; i < lines.length; i++) {
-      const line = lines[i].trim()
-      if (!line) continue
-      try {
-        events.push(JSON.parse(line) as ConversationEvent)
-      } catch {
-        // 跳过损坏行，记录到 stderr
-        process.stderr.write(`[events.jsonl] 第 ${i + 1} 行 JSON 解析失败，已跳过: ${line.slice(0, 80)}...\n`)
-      }
-    }
-
-    return events
-  }
-
-  /** 全量重写事件文件（原子写入 + schema marker） */
-  rewrite(events: ConversationEvent[]): void {
-    const tmp = this.eventsPath + '.tmp'
-    const body = events.map(e => JSON.stringify(e)).join('\n') + '\n'
-    writeFileSync(tmp, SCHEMA_MARKER + body, 'utf-8')
-    renameSync(tmp, this.eventsPath)
-  }
+  return messages
 }

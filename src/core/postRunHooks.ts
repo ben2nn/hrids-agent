@@ -8,6 +8,7 @@ import { logger } from './logger.js'
 import { getConfigDir } from './Config.js'
 import type { QueryEngine } from './QueryEngine.js'
 import { projectForDisplay } from './projections.js'
+import { createMemoryWrittenEvent } from './ConversationStore.js'
 import type { LLMProvider } from './providers/types.js'
 
 const log = logger.child({ component: 'post-run-hooks' })
@@ -36,7 +37,7 @@ export async function autoExtractMemories(
   }
   memoryRunningSessions.add(sessionId)
   try {
-    const displayMsgs = projectForDisplay(engine.store.getEventLog())
+    const displayMsgs = projectForDisplay(engine.store.getMessages())
     const messages = displayMsgs.map(dm => ({ role: dm.role, content: dm.content }))
     if (condense) log.info('记忆总结：开始 LLM 提炼', { sessionId, caller: 'memory-pipeline' })
     // Gateway 模式下 runWithSession 上下文已存在，pipeline 内部通过 getCurrentSessionId 获取会话级 store
@@ -45,6 +46,7 @@ export async function autoExtractMemories(
       provider: condense ? provider : undefined,
       sessionId,
     })
+    engine.store.appendEvents(createMemoryWrittenEvent(undefined, 'project', `session:${sessionId}`))
     if (condense) log.info('记忆总结：LLM 提炼完成', { sessionId, caller: 'memory-pipeline' })
   } catch {
     // 静默失败，不影响主流程
@@ -67,19 +69,19 @@ export async function autoDistillSkill(
 ): Promise<void> {
   if (!enabled) return
   try {
-    const eventLog = engine.store.getEventLog()
+    const messages = engine.store.getMessages()
 
-    // 从事件日志直接统计工具调用次数
+    // 从消息直接统计工具调用次数
     let toolCallCount = 0
-    for (const ev of eventLog) {
-      if (ev.type === 'assistant_message' && ev.toolCalls) toolCallCount += ev.toolCalls.length
+    for (const msg of messages) {
+      if (msg.role === 'assistant' && msg.tool_calls) toolCallCount += msg.tool_calls.length
     }
 
     // 门槛：工具调用 < 5 次，不值得沉淀
     if (toolCallCount < 5) return
 
-    // 序列化对话历史（从事件投影，只保留文本和工具调用摘要，控制 token）
-    const displayMsgs = projectForDisplay(eventLog)
+    // 序列化对话历史（从消息投影，只保留文本和工具调用摘要，控制 token）
+    const displayMsgs = projectForDisplay(messages)
     const lines: string[] = []
     for (const dm of displayMsgs) {
       const prefix = dm.role === 'user' ? '用户' : '助手'

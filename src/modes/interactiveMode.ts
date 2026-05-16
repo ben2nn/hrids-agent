@@ -87,8 +87,8 @@ export async function runInteractiveMode(
 
   // 每次 send 后：保存会话 + 后台钩子
   engine.onAfterSend = () => {
-    const { title, lastUserMessage } = extractSessionTitle(engine.store.getEventLog())
-    saveSessionMeta(sessionId, { model, workDir: initialCwd, eventCount: engine.store.getEventCount(), title, lastUserMessage })
+    const { title, lastUserMessage } = extractSessionTitle(engine.store.getMessages())
+    saveSessionMeta(sessionId, { model, workDir: initialCwd, messageCount: engine.store.getMessageCount(), title, lastUserMessage })
     void autoExtractMemories(engine, sessionId, provider, memoryCondense)
     void autoDistillSkill(engine, provider, skillDistill)
   }

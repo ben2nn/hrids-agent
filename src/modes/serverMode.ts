@@ -1,5 +1,5 @@
 // Server 模式 —— 持续从 stdin 读取 NDJSON 消息，保持会话历史
-import { saveSessionMeta, extractSessionTitle, generateSessionId, loadSessionEvents, listSessions, listArchives, archiveSession } from '../core/SessionStore.js'
+import { saveSessionMeta, extractSessionTitle, generateSessionId, loadSessionMessages, listSessions, listArchives, archiveSession } from '../core/SessionStore.js'
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd, getGlobalCwd } from '../core/cwd.js'
 import { CommandRegistry, createBuiltinCommands } from '../core/CommandRegistry.js'
@@ -88,7 +88,7 @@ export async function runServerMode(
           clearHistory: () => engine.clearHistory(),
           compactHistory: async (s: string) => { engine.compactHistory(s) },
           generateCompactSummary: async () => engine.generateCompactSummary(),
-          getHistoryLength: () => engine.store.getEventCount(),
+          getHistoryLength: () => engine.store.getMessageCount(),
           getEstimatedTokens: () => engine.getEstimatedTokens(),
           getCostSummary: () => {
             const usage = engine.costs.getUsage()
@@ -110,9 +110,9 @@ export async function runServerMode(
             // 不调用 process.chdir，避免影响全局进程工作目录
           },
           switchSession: (id: string) => {
-            const events = loadSessionEvents(id)
-            if (!events) return false
-            engine.store.replaceEvents(events)
+            const messages = loadSessionMessages(id)
+            if (!messages) return false
+            engine.store.replaceMessages(messages)
             return true
           },
           getAvailableModels: () => {
@@ -160,8 +160,8 @@ export async function runServerMode(
             for await (const ev of engine.send(result.prompt)) {
               emit(ev)
             }
-            const { title, lastUserMessage } = extractSessionTitle(engine.store.getEventLog())
-            saveSessionMeta(sessionId, { model, workDir: initialCwd, eventCount: engine.store.getEventCount(), title, lastUserMessage })
+            const { title, lastUserMessage } = extractSessionTitle(engine.store.getMessages())
+            saveSessionMeta(sessionId, { model, workDir: initialCwd, messageCount: engine.store.getMessageCount(), title, lastUserMessage })
             void autoExtractMemories(engine, sessionId, provider, memoryCondense)
             void autoDistillSkill(engine, provider, skillDistill)
           } catch (err) {
@@ -179,7 +179,7 @@ export async function runServerMode(
         for await (const ev of engine.send(msgWithCtx)) {
           emit(ev)
         }
-        saveSessionMeta(sessionId, { model, workDir: initialCwd, eventCount: engine.store.getEventCount() })
+        saveSessionMeta(sessionId, { model, workDir: initialCwd, messageCount: engine.store.getMessageCount() })
         void autoExtractMemories(engine, sessionId, provider, memoryCondense)
         void autoDistillSkill(engine, provider, skillDistill)
       } catch (err) {

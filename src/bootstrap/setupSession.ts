@@ -4,7 +4,7 @@ import { generateSessionId } from '../core/SessionStore.js'
 import { getConfigDir } from '../core/Config.js'
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { setGlobalCwd } from '../core/cwd.js'
-import { ConversationStore, JsonlEventStorage } from '../core/ConversationStore.js'
+import { ConversationStore } from '../core/ConversationStore.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 
 export interface SessionSetupResult {
@@ -47,10 +47,9 @@ export async function setupSession(opts: SessionSetupOpts): Promise<SessionSetup
     process.stdin.once('data', handler)
   })
 
-  // 加载或创建事件存储
+  // 加载或创建会话存储
   const sessionDir = join(getConfigDir(), 'sessions', sessionId)
-  const eventStorage = new JsonlEventStorage(sessionDir)
-  const store = new ConversationStore(eventStorage)
+  const store = new ConversationStore(sessionDir)
 
   // 确定工作目录
   let initialCwd: string

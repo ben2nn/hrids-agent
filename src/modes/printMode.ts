@@ -44,8 +44,8 @@ export async function runPrintMode(
   }
 
   process.stdout.write('\n')
-  const { title, lastUserMessage } = extractSessionTitle(engine.store.getEventLog())
-  saveSessionMeta(opts.sessionId, { model: opts.model, workDir: opts.initialCwd, eventCount: engine.store.getEventCount(), title, lastUserMessage })
+  const { title, lastUserMessage } = extractSessionTitle(engine.store.getMessages())
+  saveSessionMeta(opts.sessionId, { model: opts.model, workDir: opts.initialCwd, messageCount: engine.store.getMessageCount(), title, lastUserMessage })
   void autoExtractMemories(engine, opts.sessionId, provider, opts.memoryCondense)
   void autoDistillSkill(engine, provider, opts.skillDistill)
   await disconnectAllMcp()

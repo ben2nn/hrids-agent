@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createProvider, createProviderFromConfig, createVisionProviderFromConfig } from '../core/providers/index.js'
 import { QueryEngine } from '../core/QueryEngine.js'
-import type { Message, ContentBlock, ImageSource } from '../core/QueryEngine.js'
+import type { Message } from '../core/QueryEngine.js'
+import type { ContentBlock, ImageSource } from '../core/ConversationStore.js'
 import { PermissionManager } from '../core/PermissionManager.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { ToolRegistry } from '../core/ToolRegistry.js'
@@ -13,8 +14,8 @@ import { loadMcpTools, disconnectAllMcp } from '../tools/McpTool.js'
 import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { buildSystemContext, getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt, classifyTask } from '../core/coordinator/coordinatorPrompt.js'
-import { loadSessionEvents, loadSessionMeta, saveSessionMeta, generateSessionId, archiveSession } from '../core/SessionStore.js'
-import { ConversationStore, JsonlEventStorage, createUserMessageEvent, createAssistantMessageEvent, createSystemEvent } from '../core/ConversationStore.js'
+import { loadSessionMeta, saveSessionMeta, generateSessionId, archiveSession } from '../core/SessionStore.js'
+import { ConversationStore, createUserEvent, createAssistantEvent } from '../core/ConversationStore.js'
 import { loadConfig, getConfigDir } from '../core/Config.js'
 import { runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
@@ -198,16 +199,12 @@ export class SessionManager {
 
     TeamManager.initForSession(sessionId, provider, tools)
 
-    // 恢复已有会话或新建：加载事件日志
+    // 恢复已有会话或新建：加载双存储（messages.jsonl + events.jsonl）
     let store: ConversationStore | undefined
     if (req.resume) {
       const sessionDir = join(getConfigDir(), 'sessions', req.resume)
-      const eventStorage = new JsonlEventStorage(sessionDir)
-      store = new ConversationStore(eventStorage)
-      const events = loadSessionEvents(req.resume)
-      if (events && events.length > 0) {
-        store.appendEventsNoSave(...events)
-      }
+      store = new ConversationStore()
+      store.switchStorage(sessionDir)
     }
 
     const systemPrompt = await buildSystemContext(getCoordinatorSystemPrompt(undefined, tools), sessionCwd, sessionId)
@@ -345,7 +342,7 @@ export class SessionManager {
     for (const [id, session] of this.sessions) {
       try {
         session.engine.store.saveToDisk()
-        saveSessionMeta(id, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
+        saveSessionMeta(id, { model: session.info.model, workDir: session.info.cwd, messageCount: session.engine.store.getMessageCount() })
       } catch { /* 忽略 */ }
     }
 
@@ -452,16 +449,16 @@ export class SessionManager {
         requestId,
       })
 
-      // 将提醒消息写入事件日志（作为系统事件），并持久化
+      // 将提醒消息写入主存储和事件日志
+      const cronContent = `[定时任务触发: ${cronJob.description}]\n${cronJob.task}`
+      session.engine.store.appendMessage({
+        role: 'user', content: cronContent,
+        timestamp: Date.now(), requestId, trigger: 'cron', cronDescription: cronJob.description,
+      })
       session.engine.store.appendEvents(
-        createSystemEvent(
-          'cron_trigger',
-          `[定时任务触发: ${cronJob.description}]\n${cronJob.task}`,
-          requestId,
-          cronJob.description,
-        ),
+        createUserEvent(cronContent, requestId, 'cron', cronJob.description),
       )
-      saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
+      saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, messageCount: session.engine.store.getMessageCount() })
 
       // 推送到 IM 平台（如果有绑定的 IM 会话）
       if (this.cronIMCallback) {
@@ -606,7 +603,7 @@ export class SessionManager {
       const hasVisionIntent = isVisionIntent(content)
       if (hasVisionIntent) {
         const uploadsDir = join(getConfigDir(), 'sessions', sessionId, 'uploads')
-        const recentImages = await extractRecentImagesFromHistory(session.engine.store.getEventLog(), session.info.cwd, uploadsDir)
+        const recentImages = await extractRecentImagesFromHistory(session.engine.store.getMessages(), session.info.cwd, uploadsDir)
         inlineAttachments.push(...recentImages)
         if (recentImages.length > 0) {
           log.info('检测到视觉意图，从历史中提取最近图片', { sessionId, count: recentImages.length, files: recentImages.map(a => a.name) })
@@ -719,14 +716,14 @@ export class SessionManager {
         clearTimeout(visionTimer)
       }
 
-      // 将视觉模型的回答写入事件日志，供后续对话引用
+      // 将视觉模型的回答写入主存储，供后续对话引用
       if (visionText.trim()) {
         const userText = inlineAttachments.length > 0 ? processedContent : content
-        session.engine.store.appendEvents(
-          createUserMessageEvent(typeof userText === 'string' ? userText : String(userText), requestId),
-          createAssistantMessageEvent(visionText, undefined, requestId),
+        session.engine.store.appendMessage(
+          { role: 'user', content: typeof userText === 'string' ? userText : String(userText), timestamp: Date.now(), requestId },
+          { role: 'assistant', content: visionText, timestamp: Date.now(), requestId },
         )
-        saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
+        saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, messageCount: session.engine.store.getMessageCount() })
       }
 
       this.broadcast(session, toClientMessage({ type: 'done' }, requestId, visionProvider.model) ?? { type: 'done', requestId })
@@ -811,7 +808,7 @@ ${writeTools.join('、')}
 
         // 每次工具调用结束后增量保存元数据（事件已由 appendEvents 自动持久化）
         if (ev.type === 'done') {
-          saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: session.engine.store.getEventCount() })
+          saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, messageCount: session.engine.store.getMessageCount() })
         }
       }
     } catch (err) {
@@ -966,7 +963,7 @@ ${writeTools.join('、')}
             session.engine.abort()
           }
           session.engine.clearHistory()
-          saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, eventCount: 0 })
+          saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, messageCount: 0 })
           this.broadcast(session, { type: 'history_cleared' })
           log.info('会话历史已清除', { sessionId })
         } catch (err) {
@@ -1096,32 +1093,32 @@ function isVisionIntent(message: string): boolean {
   return VISION_PATTERNS.some(p => p.test(message))
 }
 
-// ── 从事件日志中提取最近上传的图片文件 ──────────────────────────────────────
-// 扫描事件日志中最近的用户消息：
-//   1. 优先从 UserMessageEvent.images 字段取已保存的图片路径（IM 图片走这条路）
+// ── 从消息历史中提取最近上传的图片文件 ──────────────────────────────────────
+// 扫描最近的用户消息：
+//   1. 优先从 ChatMessage.images 字段取已保存的图片路径（IM 图片走这条路）
 //   2. 其次扫描文本中的 @filename 引用（Web 上传走这条路）
 async function extractRecentImagesFromHistory(
-  eventLog: readonly import('../core/ConversationStore.js').ConversationEvent[],
+  messages: readonly import('../core/ConversationStore.js').ChatMessage[],
   cwd: string,
   uploadsDir?: string,
 ): Promise<Array<{ name: string; data: string; mediaType: string }>> {
   const imagePattern = /@([^\s@]+\.(?:jpg|jpeg|png|gif|webp|bmp|tiff?|avif|pdf))/gi
 
-  // 从最新事件往前扫描，找到第一批图片（最近一次上传的那批）
+  // 从最新消息往前扫描，找到第一批图片（最近一次上传的那批）
   const result: Array<{ name: string; data: string; mediaType: string }> = []
   const seen = new Set<string>()
 
-  // 只扫描最近的用户消息事件
-  const userEvents = eventLog
-    .filter((e): e is import('../core/ConversationStore.js').UserMessageEvent => e.type === 'user_message')
+  // 只扫描最近的用户消息
+  const userMessages = messages
+    .filter(m => m.role === 'user')
     .slice(-20)
 
-  for (let i = userEvents.length - 1; i >= 0; i--) {
-    const ev = userEvents[i]
+  for (let i = userMessages.length - 1; i >= 0; i--) {
+    const msg = userMessages[i]
 
-    // 路径 1：UserMessageEvent.images 字段（IM 图片已保存为文件路径）
-    if (ev.images && ev.images.length > 0) {
-      for (const imgPath of ev.images) {
+    // 路径 1：ChatMessage.images 字段（IM 图片已保存为文件路径）
+    if (msg.images && msg.images.length > 0) {
+      for (const imgPath of msg.images) {
         const key = imgPath
         if (seen.has(key)) continue
         seen.add(key)
@@ -1132,7 +1129,7 @@ async function extractRecentImagesFromHistory(
     }
 
     // 路径 2：文本中的 @filename 引用（Web 上传）
-    const text = ev.content
+    const text = typeof msg.content === 'string' ? msg.content : ''
 
     let match: RegExpExecArray | null
     imagePattern.lastIndex = 0

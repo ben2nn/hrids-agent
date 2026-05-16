@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from 'fs'
 import { randomBytes } from 'crypto'
 import { join } from 'path'
-import type { ConversationEvent } from './ConversationStore.js'
+import type { ConversationEvent, ChatMessage } from './ConversationStore.js'
 import { getConfigDir } from './Config.js'
 
 /** 压缩归档段元数据 */
@@ -38,15 +38,15 @@ function ensureDir(dir: string) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
 
-/** 从事件日志中提取会话标题（首条用户消息前 60 字）和最近用户消息（末条前 80 字） */
-export function extractSessionTitle(events: readonly ConversationEvent[]): { title?: string; lastUserMessage?: string } {
+/** 从 ChatMessage[] 提取会话标题（首条用户消息前 60 字）和最近用户消息（末条前 80 字） */
+export function extractSessionTitle(messages: readonly ChatMessage[]): { title?: string; lastUserMessage?: string } {
   let title: string | undefined
   let lastUserMessage: string | undefined
-  for (const ev of events) {
-    if (ev.type === 'user_message' && ev.content && !ev.content.startsWith('[系统') && !ev.content.startsWith('[上下文压缩]')) {
-      if (!title) title = ev.content.slice(0, 60)
-      lastUserMessage = ev.content.slice(0, 80)
-    }
+  for (const msg of messages) {
+    if (msg.role !== 'user' || typeof msg.content !== 'string') continue
+    if (msg.content.startsWith('[系统') || msg.content.startsWith('[上下文压缩')) continue
+    if (!title) title = msg.content.slice(0, 60)
+    lastUserMessage = msg.content.slice(0, 80)
   }
   return { title, lastUserMessage }
 }
@@ -78,12 +78,36 @@ export function loadSessionEvents(sessionId: string): ConversationEvent[] | null
 }
 
 /**
+ * 加载会话的主存储消息。
+ * 从 messages.jsonl 加载，返回 null 表示文件不存在。
+ */
+export function loadSessionMessages(sessionId: string): ChatMessage[] | null {
+  const sessionDir = join(SESSIONS_DIR, sessionId)
+  const messagesPath = join(sessionDir, 'messages.jsonl')
+
+  if (existsSync(messagesPath)) {
+    try {
+      const content = readFileSync(messagesPath, 'utf-8')
+      if (!content.trim()) return []
+      return content
+        .split('\n')
+        .filter(line => line.trim() && !line.startsWith('//'))
+        .map(line => JSON.parse(line) as ChatMessage)
+    } catch {
+      return []
+    }
+  }
+
+  return null
+}
+
+/**
  * 仅保存会话元数据。
  * 用于事件溯源模式下更新 meta.json（title、updatedAt、messageCount 等）。
  */
 export function saveSessionMeta(
   sessionId: string,
-  opts: { model?: string; workDir?: string; agent?: string; eventCount?: number; title?: string; lastUserMessage?: string },
+  opts: { model?: string; workDir?: string; agent?: string; messageCount?: number; title?: string; lastUserMessage?: string },
 ): void {
   const sessionDir = join(SESSIONS_DIR, sessionId)
   ensureDir(sessionDir)
@@ -95,8 +119,8 @@ export function saveSessionMeta(
     id: sessionId,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
-    messageCount: opts.eventCount ?? existing?.messageCount ?? 0,
-    savedMessageCount: opts.eventCount ?? existing?.savedMessageCount ?? 0,
+    messageCount: opts.messageCount ?? existing?.messageCount ?? 0,
+    savedMessageCount: opts.messageCount ?? existing?.savedMessageCount ?? 0,
     model: opts.model ?? existing?.model ?? '',
     title: opts.title ?? existing?.title ?? '新对话',
     lastUserMessage: opts.lastUserMessage ?? existing?.lastUserMessage,

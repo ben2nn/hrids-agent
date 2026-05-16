@@ -6,7 +6,8 @@ import { execFileSync } from 'child_process'
 import { randomBytes, timingSafeEqual, scryptSync } from 'crypto'
 import jwt from 'jsonwebtoken'
 import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSessionEvents, loadSessionMeta, listArchives as listSessionArchives, deleteSessionFromDisk } from '../core/SessionStore.js'
+import { listSessions as listDiskSessions, loadSessionMessages, loadArchive, loadSessionMeta, listArchives as listSessionArchives, deleteSessionFromDisk } from '../core/SessionStore.js'
+import { migrateEventsToMessages } from '../core/ConversationStore.js'
 import { logger } from '../core/logger.js'
 import { load as parseYaml } from 'js-yaml'
 import type { CreateSessionRequest } from './types.js'
@@ -608,13 +609,13 @@ export function createGateway(config: GatewayConfig = {}) {
       return
     }
 
-    // 降级：从磁盘加载事件并投影
-    const events = loadSessionEvents(req.params.id)
-    if (!events) {
+    // 降级：从磁盘加载消息并投影
+    const messages = loadSessionMessages(req.params.id)
+    if (!messages) {
       res.json([])
       return
     }
-    res.json(convertToServerDisplayMessages(projectForDisplay(events)))
+    res.json(convertToServerDisplayMessages(projectForDisplay(messages)))
   })
 
   // GET /sessions/:id/history-segments — 读取会话的压缩归档段列表
@@ -629,9 +630,14 @@ export function createGateway(config: GatewayConfig = {}) {
   })
 
   app.get('/sessions/:id/history-segments/:filename/messages', (req, res) => {
-    // 归档消息读取：事件格式归档文件由 projectForDisplay 投影
-    const events = loadSessionEvents(req.params.id)
-    res.json(events ? convertToServerDisplayMessages(projectForDisplay(events)) : [])
+    // 归档消息读取：从归档文件加载事件并转换为 ChatMessage 后投影
+    const archive = loadArchive(req.params.id, req.params.filename)
+    if (!archive) {
+      res.json([])
+      return
+    }
+    const messages = migrateEventsToMessages(archive as unknown as import('../core/ConversationStore.js').LegacyConversationEvent[])
+    res.json(convertToServerDisplayMessages(projectForDisplay(messages)))
   })
 
   // GET /sessions/:id/todos — 读取会话任务列表（活跃或历史会话均可）
