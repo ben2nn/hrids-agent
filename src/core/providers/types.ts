@@ -46,6 +46,7 @@ export interface StreamChunk {
   toolCall?: ToolCall
   stopReason?: string  // 'end_turn' | 'max_tokens' | 'tool_use' | 'stop_sequence'
   usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+  thinkingSignature?: string  // extended thinking 签名，必须回传给 API
 }
 
 /** 原生网络搜索配置方式 */

@@ -21,11 +21,11 @@ import { logger } from './core/logger.js'
 
 import { setupProvider } from './bootstrap/setupProvider.js'
 import { prepareSession, initSessionStorage } from './bootstrap/setupSession.js'
-import { runGatewayMode } from './modes/gatewayMode.js'
-import { runPrintMode } from './modes/printMode.js'
-import { runServerMode } from './modes/serverMode.js'
-import { runInteractiveMode } from './modes/interactiveMode.js'
-import { runInitCommand } from './commands/init.js'
+import { runGatewayMode } from './cli/commands/gateway.js'
+import { runServerMode } from './cli/commands/server.js'
+import { runInteractiveMode } from './cli/commands/chat.js'
+import { runPrintMode } from './cli/commands/run.js'
+import { runInitCommand } from './cli/commands/init.js'
 
 // 启动配置校验：在实际调用 API 前提前检测缺失的必要配置
 function validateStartupConfig(config: import('./core/Config.js').AgentConfig, cliApiKey?: string) {

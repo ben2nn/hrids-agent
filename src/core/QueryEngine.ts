@@ -288,9 +288,10 @@ ${contentToSummarize}
     turns: number,
     maxBudgetUsd: number | undefined,
     events: EventBridge,
-  ): AsyncGenerator<RuntimeEvent | { type: '__llm_result__'; fullText: string; thinkingText: string; toolCalls: Array<{ id: string; name: string; input: unknown }>; hitMaxOutputTokens: boolean }> {
+  ): AsyncGenerator<RuntimeEvent | { type: '__llm_result__'; fullText: string; thinkingText: string; thinkingSignature?: string; toolCalls: Array<{ id: string; name: string; input: unknown }>; hitMaxOutputTokens: boolean }> {
     let fullText = ''
     let thinkingText = ''
+    let thinkingSignature: string | undefined
     const toolCalls: Array<{ id: string; name: string; input: unknown }> = []
     let hitMaxOutputTokens = false
 
@@ -340,6 +341,7 @@ ${contentToSummarize}
           toolCalls.push(chunk.toolCall)
           modelLog.write('[stream] tool_call', { name: chunk.toolCall.name, id: chunk.toolCall.id })
         } else if (chunk.type === 'done') {
+          if (chunk.thinkingSignature) thinkingSignature = chunk.thinkingSignature
           modelLog.write('[stream] provider done', { fullTextLen: fullText.length, thinkingLen: thinkingText.length, toolCalls: toolCalls.length })
         } else if (chunk.type === 'usage' && chunk.usage) {
           this.costs.add({
@@ -377,7 +379,7 @@ ${contentToSummarize}
       return
     }
 
-    yield { type: '__llm_result__', fullText, thinkingText, toolCalls, hitMaxOutputTokens }
+    yield { type: '__llm_result__', fullText, thinkingText, thinkingSignature, toolCalls, hitMaxOutputTokens }
   }
 
   // ── 心跳协议 ─────────────────────────────────────────────────────
@@ -634,6 +636,7 @@ ${contentToSummarize}
         // ── 流式调用 LLM，同时立即执行工具 ────────────────────
         let fullText = ''
         let thinkingText = ''
+        let thinkingSignature: string | undefined
         const toolCalls: Array<{ id: string; name: string; input: unknown }> = []
         let hitMaxOutputTokens = false
         let llmError = false
@@ -645,6 +648,7 @@ ${contentToSummarize}
             if ('type' in ev && ev.type === '__llm_result__') {
               fullText = ev.fullText
               thinkingText = ev.thinkingText
+              thinkingSignature = ev.thinkingSignature
               toolCalls.push(...ev.toolCalls)
               hitMaxOutputTokens = ev.hitMaxOutputTokens
             } else if (ev.type === 'error') {
@@ -736,6 +740,7 @@ ${contentToSummarize}
             role: 'assistant',
             content: cleanText || null,
             thinking: thinkingText || undefined,
+            thinkingSignature: thinkingSignature || undefined,
             tool_calls: toolCalls.length > 0
               ? toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input }))
               : undefined,

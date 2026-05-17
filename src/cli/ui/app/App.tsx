@@ -29,6 +29,7 @@ import { resolveAskUser, getPendingAskUser } from '../../../tools/AskUserTool.js
 import { loadConfig } from '../../../core/Config.js'
 import { modelLog } from '../../../core/logger.js'
 import { recordCommandUse } from '../input/command-stats.js'
+import { runWithSession } from '../../../core/sessionContext.js'
 
 interface Props {
   engine: QueryEngine
@@ -78,8 +79,12 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   })
   const sessionReadyRef = useRef(false)
   const [loading, setLoading] = useState(false)
-  const [streamBuf, setStreamBuf] = useState('')   // 当前流式文本缓冲
-  const [toolProgress, setToolProgress] = useState('')  // 工具执行中的临时日志，不写入 msgs
+  // 统一活动节点流：工具和文字按时间顺序交错显示
+  type ActivityNode =
+    | { type: 'tool-done'; name: string; description: string; ok: boolean }
+    | { type: 'tool-running'; name: string; description: string }
+    | { type: 'text'; content: string; isThinking: boolean }
+  const [activityNodes, setActivityNodes] = useState<ActivityNode[]>([])
   const [askUserPrompt, setAskUserPrompt] = useState<string | null>(null)  // ask_user 等待时的提示文字
   const [permissionRequest, setPermissionRequest] = useState<{
     key: string
@@ -100,9 +105,6 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [statusBarContent, setStatusBarContent] = useState('')
   const [activeModal, setActiveModal] = useState<'help' | 'config' | null>(null)
   const [showSessionList, setShowSessionList] = useState(false)
-  const [completedTools, setCompletedTools] = useState<Array<{ name: string; description: string; ok: boolean }>>([])
-  const [justCompleted, setJustCompleted] = useState<{ name: string; description: string; ok: boolean } | null>(null)
-  const justCompletedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const currentToolDescRef = useRef('')  // 当前执行中工具的描述
   const idCounterRef = useRef(0)
   const store = useScrollStore()
@@ -131,103 +133,122 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     if (displayAs !== undefined) push({ role: 'system', text: displayAs, color: displayAs.startsWith('⏰') ? 'yellow' : undefined })
     setLoading(true)
     loadingRef.current = true
-    setStreamBuf('')
-    setCompletedTools([])
-    setJustCompleted(null)
-    if (justCompletedTimerRef.current) { clearTimeout(justCompletedTimerRef.current); justCompletedTimerRef.current = null }
+    setActivityNodes([])
     let assistantText = ''
     let thinkingText = ''
     let eventCount = 0
     try {
-      for await (const ev of engine.run(prompt)) {
-        eventCount++
-        modelLog.write(`[App] 事件 #${eventCount}`, { type: ev.type, delta: 'delta' in ev ? String(ev.delta).slice(0, 50) : undefined })
-        switch (ev.type) {
-          case 'text_delta': assistantText += ev.delta; setStreamBuf(assistantText); break
-          case 'thinking_delta': thinkingText += ev.delta; if (!assistantText) setStreamBuf(`💭 ${thinkingText.slice(-200)}`); break
-          case 'tool_start':
-            currentToolDescRef.current = ev.description
-            setToolProgress(`${getToolDisplayName(ev.name)}: ${ev.description}`)
-            // ask_user 工具：切换输入框为回答模式
-            if (ev.name === 'ask_user') {
-              const askInput = ev.input as { question?: string; options?: string[] }
-              const question = askInput?.question ?? ''
-              const options = askInput?.options ?? []
-              const hint = options.length > 0
-                ? `❓ ${question}\n选项: ${options.map((o, i) => `${i + 1}. ${o}`).join('  ')}`
-                : `❓ ${question}`
-              setAskUserPrompt(hint)
-              setLoading(false)
-              loadingRef.current = false
+      await runWithSession(sessionIdRef.current, async () => {
+        for await (const ev of engine.run(prompt)) {
+          eventCount++
+          modelLog.write(`[App] 事件 #${eventCount}`, { type: ev.type, delta: 'delta' in ev ? String(ev.delta).slice(0, 50) : undefined })
+          switch (ev.type) {
+            case 'text_delta':
+              assistantText += ev.delta
+              setActivityNodes(prev => {
+                const last = prev[prev.length - 1]
+                if (last?.type === 'text' && !last.isThinking) {
+                  return [...prev.slice(0, -1), { ...last, content: assistantText }]
+                }
+                return [...prev, { type: 'text', content: assistantText, isThinking: false }]
+              })
+              break
+            case 'thinking_delta':
+              thinkingText += ev.delta
+              setActivityNodes(prev => {
+                const last = prev[prev.length - 1]
+                if (last?.type === 'text' && last.isThinking && !assistantText) {
+                  return [...prev.slice(0, -1), { ...last, content: thinkingText.slice(-200) }]
+                }
+                if (!assistantText) return [...prev, { type: 'text', content: thinkingText.slice(-200), isThinking: true }]
+                return prev
+              })
+              break
+            case 'tool_start':
+              currentToolDescRef.current = ev.description
+              setActivityNodes(prev => [...prev, { type: 'tool-running', name: ev.name, description: ev.description }])
+              // ask_user 工具：切换输入框为回答模式
+              if (ev.name === 'ask_user') {
+                const askInput = ev.input as { question?: string; options?: string[] }
+                const question = askInput?.question ?? ''
+                const options = askInput?.options ?? []
+                const hint = options.length > 0
+                  ? `❓ ${question}\n选项: ${options.map((o, i) => `${i + 1}. ${o}`).join('  ')}`
+                  : `❓ ${question}`
+                setAskUserPrompt(hint)
+                setLoading(false)
+                loadingRef.current = false
+              }
+              break
+            case 'tool_log': break  // 隐藏工具日志
+            case 'tool_end': {
+              const ok = ev.result.type !== 'error'
+              setActivityNodes(prev => {
+                let idx = -1
+                for (let i = prev.length - 1; i >= 0; i--) { if (prev[i].type === 'tool-running') { idx = i; break } }
+                if (idx >= 0) {
+                  const updated = [...prev]
+                  updated[idx] = { type: 'tool-done', name: ev.name, description: currentToolDescRef.current, ok }
+                  return updated
+                }
+                return [...prev, { type: 'tool-done', name: ev.name, description: currentToolDescRef.current, ok }]
+              })
+              setAskUserPrompt(null)
+              if (ev.name === 'ask_user') {
+                setLoading(true)
+                loadingRef.current = true
+              }
+              const result = ev.result
+              // 只显示工具错误，隐藏成功详情
+              if (result.type === 'error') {
+                push({ role: 'error', text: `✗ ${getToolDisplayName(ev.name)} (${currentToolDescRef.current}): ${result.message}` })
+              }
+              break
             }
-            break
-          case 'tool_log': break  // 隐藏工具日志
-          case 'tool_end': {
-            const completed = { name: ev.name, description: currentToolDescRef.current, ok: ev.result.type !== 'error' }
-            // 先显示"刚完成"的过渡状态
-            setJustCompleted(completed)
-            setToolProgress('')
-            // 延迟后移入已完成列表
-            if (justCompletedTimerRef.current) clearTimeout(justCompletedTimerRef.current)
-            justCompletedTimerRef.current = setTimeout(() => {
-              setCompletedTools(prev => [...prev, completed])
-              setJustCompleted(null)
-            }, 600)
-            setAskUserPrompt(null)
-            if (ev.name === 'ask_user') {
-              setLoading(true)
-              loadingRef.current = true
-            }
-            const result = ev.result
-            // 只显示工具错误，隐藏成功详情
-            if (result.type === 'error') {
-              push({ role: 'error', text: `✗ ${getToolDisplayName(ev.name)} (${currentToolDescRef.current}): ${result.message}` })
-            }
-            break
-          }
-          case 'permission_denied': push({ role: 'system', text: `⚠ 已拒绝: ${ev.description}`, color: 'yellow' }); break
-          case 'permission_request':
-            // 权限请求通过 onPermissionRequest 回调处理，这里不需要额外处理
-            break
-          case 'usage': setCostInfo(prev => ({
+            case 'permission_denied': push({ role: 'system', text: `⚠ 已拒绝: ${ev.description}`, color: 'yellow' }); break
+            case 'permission_request':
+              // 权限请求通过 onPermissionRequest 回调处理，这里不需要额外处理
+              break
+            case 'usage': setCostInfo(prev => ({
   inputTokens: (prev?.inputTokens ?? 0) + ev.inputTokens,
   outputTokens: (prev?.outputTokens ?? 0) + ev.outputTokens,
   costUsd: ev.costUsd,
 })); break
-          case 'compact_start': push({ role: 'system', text: '⟳ 上下文过长，正在自动压缩历史...' }); break
-          case 'compact_done': {
-            const archives = listArchives(sessionIdRef.current)
-            const archiveCount = archives.length
-            const lastArchive = archives[archiveCount - 1]
-            const msgCount = lastArchive?.messageCount ?? 0
-            push({ role: 'system', text: `✓ 历史已压缩（归档了 ${msgCount} 条消息，当前约 ${engine.getEstimatedTokens().toLocaleString()} tokens）\n  输入 /history 查看归档历史` })
-            break
+            case 'compact_start': push({ role: 'system', text: '⟳ 上下文过长，正在自动压缩历史...' }); break
+            case 'compact_done': {
+              const archives = listArchives(sessionIdRef.current)
+              const archiveCount = archives.length
+              const lastArchive = archives[archiveCount - 1]
+              const msgCount = lastArchive?.messageCount ?? 0
+              push({ role: 'system', text: `✓ 历史已压缩（归档了 ${msgCount} 条消息，当前约 ${engine.getEstimatedTokens().toLocaleString()} tokens）\n  输入 /history 查看归档历史` })
+              break
+            }
+            case 'budget_exceeded': push({ role: 'error', text: `⚠ 已超出成本预算 ${ev.limitUsd.toFixed(2)}（当前 ${ev.costUsd.toFixed(4)}），任务已停止` }); break
+            case 'continuation_needed':
+              // 非自动模式：LLM 表达了继续意图，提示用户确认
+              push({ role: 'system', text: '▸ 助手计划继续执行更多操作，发送"继续"确认，或输入新指令调整方向。', color: 'yellow' })
+              break
+            case 'error': push({ role: 'error', text: ev.message }); break
+            case 'done': {
+              const finalText = assistantText || thinkingText
+              modelLog.write('[App] done 事件', { eventCount, textLen: assistantText.length, thinkLen: thinkingText.length, finalLen: finalText.length })
+              if (finalText) {
+                setActivityNodes([])
+                push({ role: 'assistant', text: finalText })
+                modelLog.write('[App] push assistant', { textLen: finalText.length, preview: finalText.slice(0, 50) })
+                assistantText = ''; thinkingText = ''
+              }
+              }
+              // 刷新 provider/model 显示（fallback 切换后同步更新）
+              if (getProviderName) {
+                const latest = getProviderName()
+                setDisplayProvider(latest.name)
+                modelRef.current = latest.model
+              }
+              break
           }
-          case 'budget_exceeded': push({ role: 'error', text: `⚠ 已超出成本预算 ${ev.limitUsd.toFixed(2)}（当前 ${ev.costUsd.toFixed(4)}），任务已停止` }); break
-          case 'continuation_needed':
-            // 非自动模式：LLM 表达了继续意图，提示用户确认
-            push({ role: 'system', text: '▸ 助手计划继续执行更多操作，发送"继续"确认，或输入新指令调整方向。', color: 'yellow' })
-            break
-          case 'error': push({ role: 'error', text: ev.message }); break
-          case 'done': {
-            const finalText = assistantText || thinkingText
-            modelLog.write('[App] done 事件', { eventCount, textLen: assistantText.length, thinkLen: thinkingText.length, finalLen: finalText.length })
-            if (finalText) {
-              setStreamBuf('')
-              push({ role: 'assistant', text: finalText })
-              modelLog.write('[App] push assistant', { textLen: finalText.length, preview: finalText.slice(0, 50) })
-              assistantText = ''; thinkingText = ''
-            }
-            }
-            // 刷新 provider/model 显示（fallback 切换后同步更新）
-            if (getProviderName) {
-              const latest = getProviderName()
-              setDisplayProvider(latest.name)
-              modelRef.current = latest.model
-            }
-            break
         }
-      }
+      })
     } catch (err) {
       push({ role: 'error', text: String(err) })
     }
@@ -239,10 +260,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       assistantText = ''
       thinkingText = ''
     }
-    setStreamBuf('')
-    setToolProgress('')
-    setJustCompleted(null)
-    if (justCompletedTimerRef.current) { clearTimeout(justCompletedTimerRef.current); justCompletedTimerRef.current = null }
+    setActivityNodes([])
     setLoading(false)
     loadingRef.current = false
 
@@ -526,10 +544,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         engine.abort()
         setLoading(false)
         loadingRef.current = false
-        setStreamBuf('')
-        setToolProgress('')
-        setJustCompleted(null)
-        if (justCompletedTimerRef.current) { clearTimeout(justCompletedTimerRef.current); justCompletedTimerRef.current = null }
+        setActivityNodes([])
         push({ role: 'system', text: '⚠ 任务已中断（Ctrl+C）' })
       } else {
         exit()
@@ -613,8 +628,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   // ─── 底部固定区域：工具进度 + 命令提示 + 输入框 ──────────────────────────
   const bottomContent = (
     <Box flexDirection="column" paddingX={1}>
-      {/* 工具进度 + 流式输出（统一容器） */}
-      {loading && (completedTools.length > 0 || justCompleted || toolProgress || streamBuf) && (
+      {/* 流式执行节点 */}
+      {loading && activityNodes.length > 0 && (
         <Box
           borderStyle={STRIPE_BORDER}
           borderColor={TONE.brand}
@@ -622,50 +637,44 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           paddingLeft={1} marginTop={1} width="100%"
           flexDirection="column"
         >
-          {/* 已完成工具：逐条显示 */}
-          {completedTools.map((t, i) => (
-            <Box key={i}>
-              <Text color={t.ok ? TONE.ok : TONE.err}>{t.ok ? '✓' : '✗'} </Text>
-              <Text color={FG.sub}>{getToolDisplayName(t.name)}</Text>
-              <Text color={FG.faint} dimColor>{' '}{t.description}</Text>
-            </Box>
-          ))}
-
-          {/* 刚完成的工具（过渡状态） */}
-          {justCompleted && (
-            <Box>
-              <Text color={TONE.ok} bold>{'✓ '}</Text>
-              <Text color={TONE.ok}>{getToolDisplayName(justCompleted.name)}</Text>
-              <Text color={FG.faint} dimColor>{' '}{justCompleted.description}</Text>
-              <Text color={FG.faint} dimColor>{' — 完成'}</Text>
-            </Box>
-          )}
-
-          {/* 工具执行中 */}
-          {toolProgress && (
-            <Box>
-              <Text color={TONE.brand} bold>{'▣ '}</Text>
-              <Spinner color={TONE.brand} />
-              <Text color={FG.sub}> 执行中...</Text>
-              <Text color={FG.faint} dimColor>{' '}{toolProgress}</Text>
-            </Box>
-          )}
-
-          {/* 流式写作 */}
-          {streamBuf && (
-            <Box flexDirection="column">
-              <Box>
-                <Text color={TONE.brand} bold>{'◈ '}</Text>
-                <Spinner variant="circle" color={TONE.brand} />
-                <Text color={FG.sub}> 执行中...</Text>
+          {activityNodes.map((node, i) => {
+            if (node.type === 'tool-done') {
+              return (
+                <Box key={i}>
+                  <Text color={node.ok ? TONE.ok : TONE.err}>{'● '}</Text>
+                  <Text color={FG.sub}>{getToolDisplayName(node.name)}</Text>
+                  <Text color={FG.faint} dimColor>{' '}{node.description}</Text>
+                </Box>
+              )
+            }
+            if (node.type === 'tool-running') {
+              return (
+                <Box key={i}>
+                  <Text color={TONE.brand}>{'● '}</Text>
+                  <Spinner color={TONE.brand} />
+                  <Text color={FG.sub}> {getToolDisplayName(node.name)}: {node.description}</Text>
+                </Box>
+              )
+            }
+            // text node
+            const lines = node.content.split('\n')
+            const visible = lines.slice(-Math.max(3, Math.floor(termRows * 0.25)))
+            return (
+              <Box key={i} flexDirection="column">
+                <Box>
+                  <Text color={FG.sub}>{'● '}</Text>
+                  {node.isThinking && <Spinner variant="circle" color={FG.sub} />}
+                  <Text color={FG.sub}>{node.isThinking ? ' 思考中...' : ' 输出中...'}</Text>
+                </Box>
+                <Box paddingLeft={2} flexDirection="column">
+                  {visible.map((line: string, j: number) => (
+                    <Text key={j} color={FG.body}>{line}</Text>
+                  ))}
+                  <Text color={FG.faint} dimColor>...</Text>
+                </Box>
               </Box>
-              <Box paddingLeft={2} flexDirection="column">
-                {streamBuf.split('\n').slice(-Math.max(3, Math.floor(termRows * 0.25))).map((line, i) => (
-                  <Text key={i} color={FG.body}>{line}</Text>
-                ))}
-              </Box>
-            </Box>
-          )}
+            )
+          })}
         </Box>
       )}
 

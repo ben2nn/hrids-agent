@@ -51,7 +51,12 @@ function toOAIMessages(messages: ChatMessage[], systemPrompt: string[]): OAIMess
       })
     } else if (msg.role === 'user' || msg.role === 'assistant') {
       if (typeof msg.content === 'string' || msg.content == null) {
-        result.push({ role: msg.role, content: msg.content ?? '' })
+        const thinking = (msg as { thinking?: string }).thinking
+        result.push({
+          role: msg.role,
+          content: msg.content ?? '',
+          ...(thinking ? { reasoning_content: thinking } : {}),
+        })
       } else {
         // 处理包含工具调用的 assistant 消息
         const textParts = (msg.content as Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>)

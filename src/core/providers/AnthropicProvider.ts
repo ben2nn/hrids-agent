@@ -35,6 +35,12 @@ function toAnthropicMessages(messages: ChatMessage[]): Anthropic.MessageParam[] 
       // 构建 assistant 消息的 content blocks
       const contentBlocks: Anthropic.ContentBlockParam[] = []
 
+      // thinking 必须在 text 之前（Anthropic API 要求）
+      const msgAny = msg as unknown as { thinking?: string; thinkingSignature?: string }
+      if (msgAny.thinking) {
+        contentBlocks.push({ type: 'thinking', thinking: msgAny.thinking, signature: msgAny.thinkingSignature ?? '' } as Anthropic.ContentBlockParam)
+      }
+
       // 处理文本内容
       if (typeof msg.content === 'string') {
         if (msg.content) {
@@ -46,7 +52,8 @@ function toAnthropicMessages(messages: ChatMessage[]): Anthropic.MessageParam[] 
           if (block.type === 'text' && (block as { text?: string }).text) {
             contentBlocks.push({ type: 'text', text: (block as { text: string }).text })
           } else if (block.type === 'thinking' && (block as { thinking?: string }).thinking) {
-            contentBlocks.push({ type: 'thinking', thinking: (block as { thinking: string }).thinking } as Anthropic.ContentBlockParam)
+            const tb = block as { thinking: string; signature?: string }
+            contentBlocks.push({ type: 'thinking', thinking: tb.thinking, signature: tb.signature ?? '' } as Anthropic.ContentBlockParam)
           }
         }
       }
@@ -131,6 +138,7 @@ export class AnthropicProvider implements LLMProvider {
     maxTokens: number,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {
+    let thinkingSignature: string | undefined
     const anthropicMessages = toAnthropicMessages(messages)
 
     // 将 string[] 转为 Anthropic system blocks，精确控制缓存边界：
@@ -176,10 +184,14 @@ export class AnthropicProvider implements LLMProvider {
           yield { type: 'thinking_delta', delta: event.delta.thinking }
         } else if (event.type === 'message_stop') {
           const final = await stream.finalMessage()
+          let thinkingSignature: string | undefined
           for (const block of final.content) {
             // 跳过原生 web_search 工具调用，它由 Anthropic API 内部处理
             if (block.type === 'tool_use' && !(this.nativeWebSearch && block.name === 'web_search')) {
               yield { type: 'tool_call', toolCall: { id: block.id, name: block.name, input: block.input } }
+            }
+            if (block.type === 'thinking' && (block as { signature?: string }).signature) {
+              thinkingSignature = (block as { signature: string }).signature
             }
           }
           const u = final.usage
@@ -204,6 +216,6 @@ export class AnthropicProvider implements LLMProvider {
       throw err
     }
 
-    yield { type: 'done' }
+    yield { type: 'done', thinkingSignature }
   }
 }

@@ -25,6 +25,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'tool' | 'system'
   content: string | ContentBlock[] | null
   thinking?: string
+  thinkingSignature?: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
   is_error?: boolean
@@ -37,7 +38,7 @@ export interface ChatMessage {
 }
 
 export type ContentBlock =
-  | { type: 'thinking'; thinking: string }
+  | { type: 'thinking'; thinking: string; signature?: string }
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }

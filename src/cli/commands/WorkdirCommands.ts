@@ -1,8 +1,8 @@
 import { readdirSync, statSync, existsSync } from 'fs'
 import { join } from 'path'
-import type { SlashCommand, CommandResult } from '../core/CommandRegistry.js'
-import { getGlobalCwd, ensureWorkDirForCurrentCwd } from '../core/cwd.js'
-import { getConfigDir } from '../core/Config.js'
+import type { SlashCommand, CommandResult } from '../../core/CommandRegistry.js'
+import { getGlobalCwd, ensureWorkDirForCurrentCwd } from '../../core/cwd.js'
+import { getConfigDir } from '../../core/Config.js'
 
 export function createWorkdirCommands(): SlashCommand[] {
   return [
