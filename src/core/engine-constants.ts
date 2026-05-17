@@ -9,3 +9,4 @@ export const BUDGET_WARN_RATIO = 0.8
 export const STORM_WINDOW_SIZE = 10
 export const TODO_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset', 'todo_read'])
 export const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
+export const MAX_INTENT_RECOVERY_LIMIT = 2

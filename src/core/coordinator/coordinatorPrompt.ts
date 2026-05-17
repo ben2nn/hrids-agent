@@ -440,7 +440,9 @@ SkillHub 收录 3.4 万个 AI 技能（https://skillhub.cloud.tencent.com）。�
  - 用户说"帮我找技能"、"有没有现成工具"、"安装技能"
  - 需要专业领域能力（PDF 处理、数据分析、浏览器控制等）
 
-安装流程：skillhub_setup（首次）→ skillhub_search → skillhub_install → skill 调用`,
+安装流程：skillhub_setup（首次）→ skillhub_search → skillhub_install → skill 调用
+
+**重要**：技能必须经过安装才能使用。不要假设任何技能已安装，不要编造技能名称。需要技能时先调用 skill_list 查看已安装列表，为空则说明没有可用技能。没有合适技能时直接用内置工具（file_read/grep/glob/bash 等）完成任务。`,
 }
 
 // ─────────────────────────────────────────────

@@ -25,9 +25,42 @@ import {
   ABSOLUTE_MAX_MULTIPLIER,
   BUDGET_WARN_RATIO,
   MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+  MAX_INTENT_RECOVERY_LIMIT,
 } from './engine-constants.js'
 
 const log = logger.child({ component: 'query-engine' })
+
+/**
+ * 检测 LLM 输出是否为"意图声明"——说了要做某事但没实际执行。
+ * 典型模式：短文本 + 包含意图动词 + 无实质内容。
+ */
+function isIntentDeclaration(text: string): boolean {
+  const trimmed = text.trim()
+  // 文本过长说明有实质内容，不是纯意图声明
+  if (trimmed.length > 200) return false
+  // 空文本不算
+  if (trimmed.length === 0) return false
+
+  // 意图声明模式：主语 + 意图动词
+  const intentPatterns = [
+    /我来[^\n]*[，。\n]/,          // 我来扫描...，/。/\n
+    /^我来[^\n]{2,30}$/,           // 我来扫描项目
+    /让我[^\n]*[，。\n]/,          // 让我看看...，
+    /^让我[^\n]{2,30}$/,           // 让我检查一下
+    /我需要[^\n]*(查看|分析|了解|检查|扫描|读取|确认|探索|研究)/,
+    /需要[^\n]*(查看|分析|了解|检查|扫描|读取|确认|探索|研究)/,
+    /接下来[^\n]*(分析|查看|检查|扫描|探索)/,
+    /首先[^\n]*(了解|查看|分析|探索|扫描)/,
+    /先[^\n]*(探索|了解|查看|分析|扫描)[^\n]*[，。]/,
+    /我先[^\n]*然后/,              // 我先X，然后Y
+    /并行[^\n]*(扫描|分析|查看|检查)/, // 并行扫描...
+  ]
+
+  const matchCount = intentPatterns.filter(p => p.test(trimmed)).length
+  // 短文本（<100字符）只要有 1 个意图模式就判定为意图声明
+  // 较长文本（100-200字符）需要 2+ 个模式匹配
+  return trimmed.length < 100 ? matchCount >= 1 : matchCount >= 2
+}
 
 /**
  * 根据会话级任务快照构建任务状态字符串，注入到 system prompt。
@@ -388,10 +421,11 @@ ${contentToSummarize}
     fullText: string,
     hitMaxOutputTokens: boolean,
     recoveryCount: number,
+    intentRecoveryCount: number,
     turns: number,
     maxTurns: number,
     events: EventBridge,
-  ): { action: 'break' | 'continue'; newRecoveryCount: number } {
+  ): { action: 'break' | 'continue'; newRecoveryCount: number; newIntentRecoveryCount: number } {
     log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length })
 
     if (hitMaxOutputTokens && recoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
@@ -403,12 +437,12 @@ ${contentToSummarize}
         timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
       })
       events.userMessage('[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。', 'user')
-      return { action: 'continue', newRecoveryCount: newCount }
+      return { action: 'continue', newRecoveryCount: newCount, newIntentRecoveryCount: intentRecoveryCount }
     }
 
     if (fullText.includes(HEARTBEAT_DONE)) {
       log.debug('心跳协议：DONE，停止执行', { turn: turns })
-      return { action: 'break', newRecoveryCount: recoveryCount }
+      return { action: 'break', newRecoveryCount: recoveryCount, newIntentRecoveryCount: intentRecoveryCount }
     }
 
     const allTasksDone = this.activeTodoSnapshot !== null &&
@@ -416,19 +450,32 @@ ${contentToSummarize}
       this.activeTodoSnapshot.every(t => t.status === 'completed')
     if (allTasksDone) {
       log.debug('任务系统确认全部完成，停止执行', { turn: turns })
-      return { action: 'break', newRecoveryCount: recoveryCount }
+      return { action: 'break', newRecoveryCount: recoveryCount, newIntentRecoveryCount: intentRecoveryCount }
     }
 
     if (fullText.includes(HEARTBEAT_CONTINUE)) {
       if (turns < maxTurns) {
         log.debug('心跳协议：CONTINUE（无工具调用），继续', { turn: turns })
-        return { action: 'continue', newRecoveryCount: recoveryCount }
+        return { action: 'continue', newRecoveryCount: recoveryCount, newIntentRecoveryCount: intentRecoveryCount }
       }
       log.debug('心跳协议：CONTINUE 但已达轮次上限，停止', { turn: turns })
     }
 
+    // 意图声明检测：LLM 说了"要做X"但没实际执行
+    if (intentRecoveryCount < MAX_INTENT_RECOVERY_LIMIT && turns < maxTurns && isIntentDeclaration(fullText)) {
+      const newCount = intentRecoveryCount + 1
+      log.info('检测到意图声明，注入继续指令', { turn: turns, recovery: newCount, textLen: fullText.length })
+      const recoveryMsg = '[系统内部] 你刚才只表达了意图但没有实际执行。请立即调用工具完成任务，不要输出计划或意图声明，直接开始执行。'
+      this.store.appendMessage({
+        role: 'user', content: recoveryMsg,
+        timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
+      })
+      events.userMessage(recoveryMsg, 'user')
+      return { action: 'continue', newRecoveryCount: recoveryCount, newIntentRecoveryCount: newCount }
+    }
+
     log.debug('无工具调用无心跳标记，自然结束', { turn: turns })
-    return { action: 'break', newRecoveryCount: recoveryCount }
+    return { action: 'break', newRecoveryCount: recoveryCount, newIntentRecoveryCount: intentRecoveryCount }
   }
 
   // ── 媒体预处理 ───────────────────────────────────────────────────
@@ -570,6 +617,7 @@ ${contentToSummarize}
     let turns = 0
     let lastKnownInputTokens = 0
     let maxOutputTokensRecoveryCount = 0
+    let intentRecoveryCount = 0
 
     // 事件队列（工具执行 → 主循环）
     type QueueItem = { event: RuntimeEvent } | { done: true; toolCallId: string; result?: ContentBlock }
@@ -769,8 +817,9 @@ ${contentToSummarize}
 
         // 无工具调用：心跳判定
         if (toolCalls.length === 0) {
-          const heartbeat = this.resolveHeartbeat(fullText, hitMaxOutputTokens, maxOutputTokensRecoveryCount, turns, maxTurns, events)
+          const heartbeat = this.resolveHeartbeat(fullText, hitMaxOutputTokens, maxOutputTokensRecoveryCount, intentRecoveryCount, turns, maxTurns, events)
           maxOutputTokensRecoveryCount = heartbeat.newRecoveryCount
+          intentRecoveryCount = heartbeat.newIntentRecoveryCount
           // drain remaining events
           for (const ev of drainRuntimeBuffer()) yield ev
           if (heartbeat.action === 'continue') continue
