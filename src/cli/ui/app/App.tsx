@@ -101,6 +101,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [activeModal, setActiveModal] = useState<'help' | 'config' | null>(null)
   const [showSessionList, setShowSessionList] = useState(false)
   const [completedTools, setCompletedTools] = useState<Array<{ name: string; description: string; ok: boolean }>>([])
+  const [justCompleted, setJustCompleted] = useState<{ name: string; description: string; ok: boolean } | null>(null)
+  const justCompletedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const currentToolDescRef = useRef('')  // 当前执行中工具的描述
   const idCounterRef = useRef(0)
   const store = useScrollStore()
@@ -131,11 +133,13 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     loadingRef.current = true
     setStreamBuf('')
     setCompletedTools([])
+    setJustCompleted(null)
+    if (justCompletedTimerRef.current) { clearTimeout(justCompletedTimerRef.current); justCompletedTimerRef.current = null }
     let assistantText = ''
     let thinkingText = ''
     let eventCount = 0
     try {
-      for await (const ev of engine.sendStreaming(prompt)) {
+      for await (const ev of engine.run(prompt)) {
         eventCount++
         modelLog.write(`[App] 事件 #${eventCount}`, { type: ev.type, delta: 'delta' in ev ? String(ev.delta).slice(0, 50) : undefined })
         switch (ev.type) {
@@ -159,8 +163,16 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             break
           case 'tool_log': break  // 隐藏工具日志
           case 'tool_end': {
-            setCompletedTools(prev => [...prev, { name: ev.name, description: currentToolDescRef.current, ok: ev.result.type !== 'error' }])
+            const completed = { name: ev.name, description: currentToolDescRef.current, ok: ev.result.type !== 'error' }
+            // 先显示"刚完成"的过渡状态
+            setJustCompleted(completed)
             setToolProgress('')
+            // 延迟后移入已完成列表
+            if (justCompletedTimerRef.current) clearTimeout(justCompletedTimerRef.current)
+            justCompletedTimerRef.current = setTimeout(() => {
+              setCompletedTools(prev => [...prev, completed])
+              setJustCompleted(null)
+            }, 600)
             setAskUserPrompt(null)
             if (ev.name === 'ask_user') {
               setLoading(true)
@@ -229,6 +241,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     }
     setStreamBuf('')
     setToolProgress('')
+    setJustCompleted(null)
+    if (justCompletedTimerRef.current) { clearTimeout(justCompletedTimerRef.current); justCompletedTimerRef.current = null }
     setLoading(false)
     loadingRef.current = false
 
@@ -514,6 +528,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         loadingRef.current = false
         setStreamBuf('')
         setToolProgress('')
+        setJustCompleted(null)
+        if (justCompletedTimerRef.current) { clearTimeout(justCompletedTimerRef.current); justCompletedTimerRef.current = null }
         push({ role: 'system', text: '⚠ 任务已中断（Ctrl+C）' })
       } else {
         exit()
@@ -598,7 +614,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const bottomContent = (
     <Box flexDirection="column" paddingX={1}>
       {/* 工具进度 + 流式输出（统一容器） */}
-      {loading && (completedTools.length > 0 || toolProgress || streamBuf) && (
+      {loading && (completedTools.length > 0 || justCompleted || toolProgress || streamBuf) && (
         <Box
           borderStyle={STRIPE_BORDER}
           borderColor={TONE.brand}
@@ -606,20 +622,23 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           paddingLeft={1} marginTop={1} width="100%"
           flexDirection="column"
         >
-          {/* 已完成工具：超过 3 个折叠为摘要 */}
-          {completedTools.length > 0 && (
-            completedTools.length > 3
-              ? <Box>
-                  <Text color={TONE.ok}>✓ </Text>
-                  <Text color={FG.sub}>{completedTools.length} 个工具已完成</Text>
-                </Box>
-              : completedTools.map((t, i) => (
-                  <Box key={i}>
-                    <Text color={t.ok ? TONE.ok : TONE.err}>{t.ok ? '✓' : '✗'} </Text>
-                    <Text color={FG.sub}>{getToolDisplayName(t.name)}</Text>
-                    <Text color={FG.faint} dimColor>{' '}{t.description}</Text>
-                  </Box>
-                ))
+          {/* 已完成工具：逐条显示 */}
+          {completedTools.map((t, i) => (
+            <Box key={i}>
+              <Text color={t.ok ? TONE.ok : TONE.err}>{t.ok ? '✓' : '✗'} </Text>
+              <Text color={FG.sub}>{getToolDisplayName(t.name)}</Text>
+              <Text color={FG.faint} dimColor>{' '}{t.description}</Text>
+            </Box>
+          ))}
+
+          {/* 刚完成的工具（过渡状态） */}
+          {justCompleted && (
+            <Box>
+              <Text color={TONE.ok} bold>{'✓ '}</Text>
+              <Text color={TONE.ok}>{getToolDisplayName(justCompleted.name)}</Text>
+              <Text color={FG.faint} dimColor>{' '}{justCompleted.description}</Text>
+              <Text color={FG.faint} dimColor>{' — 完成'}</Text>
+            </Box>
           )}
 
           {/* 工具执行中 */}
@@ -638,7 +657,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
               <Box>
                 <Text color={TONE.brand} bold>{'◈ '}</Text>
                 <Spinner variant="circle" color={TONE.brand} />
-                <Text color={FG.sub}> 写作中...</Text>
+                <Text color={FG.sub}> 执行中...</Text>
               </Box>
               <Box paddingLeft={2} flexDirection="column">
                 {streamBuf.split('\n').slice(-Math.max(3, Math.floor(termRows * 0.25))).map((line, i) => (

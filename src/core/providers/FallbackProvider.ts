@@ -111,6 +111,8 @@ export class FallbackProvider implements LLMProvider {
     // 从上次成功的位置开始
     let cursor = this.currentModelIdx
     let lastErr: unknown
+    let lastErrCode = ''
+    let lastErrMsg = ''
 
     while (failed.size < allProviders.length) {
       if (signal?.aborted) return
@@ -150,6 +152,8 @@ export class FallbackProvider implements LLMProvider {
         } catch (err) {
           lastErr = err
           const llmErr = LlmError.fromUnknown(err)
+          lastErrCode = llmErr.code
+          lastErrMsg = llmErr.message
           if (hasContent) throw err
           if (!llmErr.retryable) {
             log.warn(`模型 ${provider.name}/${provider.model} 不可恢复错误: ${llmErr.message}`)
@@ -157,7 +161,7 @@ export class FallbackProvider implements LLMProvider {
           }
           if (attempt < MAX_RETRIES) {
             const delay = calcBackoff(attempt, llmErr.retryAfterMs)
-            log.warn(`模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败，${Math.round(delay / 1000)}s 后重试`)
+            log.warn(`模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败（${llmErr.code}: ${llmErr.message}），${Math.round(delay / 1000)}s 后重试`)
             try { await sleep(delay, signal) } catch { return }
           }
         }
@@ -169,13 +173,14 @@ export class FallbackProvider implements LLMProvider {
         cursor = (cursor + 1) % allProviders.length
         while (failed.has(cursor)) cursor = (cursor + 1) % allProviders.length
         const next = allProviders[cursor]
-        log.warn(`模型 ${provider.name}/${provider.model} 已排除，切换到 ${next.model}`)
+        log.warn(`模型 ${provider.name}/${provider.model} 已排除（${lastErrCode}: ${lastErrMsg}），切换到 ${next.model}`)
         this.onStatus?.({ type: 'switching', provider: next.name, model: next.model, reason: `${provider.model} 失败` })
       }
     }
 
     const errMsg = lastErr instanceof LlmError ? lastErr.message : String(lastErr)
-    log.error('所有模型均失败', { error: errMsg })
+    const errCode = lastErr instanceof LlmError ? lastErr.code : lastErrCode || 'unknown'
+    log.error('所有模型均失败', { code: errCode, error: errMsg })
     throw lastErr instanceof LlmError ? lastErr : new LlmError('unknown', `所有模型均失败: ${errMsg}`, false, undefined, lastErr)
   }
 }

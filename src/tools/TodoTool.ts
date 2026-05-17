@@ -382,7 +382,13 @@ export const TodoWriteTool: ToolDef<typeof todoWriteInputSchema> = {
 const todoUpdateInputSchema = z.strictObject({
   id:            z.string().describe('要更新的任务 id'),
   status:        z.enum(['in_progress', 'completed']).describe('目标状态'),
-  confirmations: z.array(z.boolean()).optional().describe('验收标准逐条确认布尔数组'),
+  confirmations: z.preprocess(
+    (val) => {
+      if (!Array.isArray(val)) return val
+      return val.map(v => v === true || v === 'true')
+    },
+    z.array(z.boolean()).optional()
+  ).describe('验收标准逐条确认布尔数组'),
 })
 
 /**

@@ -1,51 +1,42 @@
 import type { LLMProvider } from './providers/index.js'
-import type { ToolDef, ToolResult } from './Tool.js'
-import { isReadOnlyCall } from './Tool.js'
+import type { ToolDef } from './Tool.js'
 import type { ToolRegistry } from './ToolRegistry.js'
 import type { PermissionManager, PermissionRequest } from './PermissionManager.js'
 import { CostTracker } from './CostTracker.js'
 import { logger, modelLog } from './logger.js'
-import { auditLog } from './audit.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
 import { clearFileCache } from '../tools/FileReadTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
 import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
 import {
   ConversationStore,
-  createUserEvent, createAssistantEvent, createCompactEvent,
-  createReqStartEvent, createReqEndEvent,
-  createToolIntentEvent, createToolConfirmEvent, createToolStartEvent, createToolEndEvent,
-  createLlmStartEvent, createLlmEndEvent,
-  createStormBlockedEvent, createBudgetWarnEvent, createBudgetExceededEvent,
-  createSessionOpenEvent, createFileTouchedEvent, createErrorEvent,
-  createPlanBlockedEvent, createTurnLimitEvent, createMaxOutputRecoveryEvent,
   type ChatMessage, type ContentBlock, type ImageSource,
 } from './ConversationStore.js'
-import { projectForDisplay, projectForLLM, estimateEventTokens, MAX_TOOL_RESULT_CHARS, truncateToolResult, applyToolResultBudget, pruneOldToolResults, pruneOldImageBlocks } from './projections.js'
+import { projectForDisplay, projectForLLM, estimateEventTokens, applyToolResultBudget, pruneOldToolResults, pruneOldImageBlocks } from './projections.js'
 
 import { StormBreaker } from './StormBreaker.js'
-import { partitionToolCalls, type ToolCall } from './ToolScheduler.js'
+import { EventBridge } from './EventBridge.js'
+import { ToolExecutor } from './ToolExecutor.js'
+import type { RuntimeEvent } from './RuntimeEvent.js'
+import {
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_MAX_TURNS,
+  DEFAULT_AUTO_COMPACT_THRESHOLD,
+  ABSOLUTE_MAX_MULTIPLIER,
+  BUDGET_WARN_RATIO,
+  MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+} from './engine-constants.js'
 
 const log = logger.child({ component: 'query-engine' })
 
 /**
  * 根据会话级任务快照构建任务状态字符串，注入到 system prompt。
- *
- * 接受快照而非直接读文件，由调用方（QueryEngine）控制何时刷新快照：
- *   - 快照为 null：本会话尚未执行过任何任务工具，不注入任何内容
- *   - 快照非空但无活跃任务：所有任务已完成，不注入（避免无意义 token）
- *   - 快照有活跃任务：注入完整状态 + 执行驱动指令
- *
- * 这样"你好"等简单消息在会话初始状态（快照为 null）时不会触发工具调用，
- * 只有任务工具实际执行后快照才会被填充，后续轮次才注入执行指令。
  */
 function buildLiveTodoContext(snapshot: Todo[] | null): string | null {
   if (snapshot === null) return null
 
   try {
     const active = snapshot.filter(t => t.status !== 'completed')
-    // 所有任务已完成：注入一条简短的完成提示，让 LLM 知道不需要再调用任务工具
-    // 避免 LLM 在最后一轮看不到任务状态而重复执行或调用 todo_read 确认
     if (active.length === 0) {
       if (snapshot.length === 0) return null
       return `## 当前任务状态（实时）\n进度：${snapshot.length}/${snapshot.length}（全部完成）\n请直接输出最终结果，不要再调用任何任务工具。`
@@ -80,7 +71,6 @@ function buildLiveTodoContext(snapshot: Todo[] | null): string | null {
     const inProgress = active.find(t => t.status === 'in_progress')
     if (inProgress) {
       lines.push(`当前执行中：「${inProgress.content}」（id: ${inProgress.id}）`)
-      // 根据是否有验收标准，动态生成正确的完成调用指令
       if (inProgress.acceptance && inProgress.acceptance.length > 0) {
         const trueArr = inProgress.acceptance.map(() => 'true').join(', ')
         lines.push(`完成后调用：todo_update(id='${inProgress.id}', status='completed', confirmations=[${trueArr}])`)
@@ -104,8 +94,6 @@ export interface Message {
   cronDescription?: string
 }
 
-// ContentBlock 和 ImageSource 从 ConversationStore.ts 导入
-
 export interface QueryEngineConfig {
   provider: LLMProvider
   systemPrompt: string[]
@@ -113,106 +101,70 @@ export interface QueryEngineConfig {
   permissions: PermissionManager
   maxTokens?: number
   maxTurns?: number
-  maxBudgetUsd?: number          // 成本预算上限（USD），超出后停止执行
-  autoCompactThreshold?: number  // 自动压缩 token 阈值（默认 100000）
-  sessionCwd?: string            // 会话工作目录，用于图片预处理
-  uploadsDir?: string            // 会话上传目录，用于 @引用 搜索
-  sessionId?: string             // 会话 ID，用于快照和事件记录
-  resumed?: boolean              // 是否为恢复的会话
-  /** FallbackProvider 状态回调（用于通知用户重试/切换状态） */
-  onFallbackStatus?: (event: { type: 'retrying' | 'switching' | 'rate_limited'; provider: string; model: string; delayMs?: number; reason?: string }) => void
+  maxBudgetUsd?: number
+  autoCompactThreshold?: number
+  sessionCwd?: string
+  uploadsDir?: string
+  sessionId?: string
+  resumed?: boolean
 }
-export type InterruptReason = 'turn_limit' | 'budget_exceeded' | 'aborted' | 'error' | 'permission_denied'
-
-export type StreamEvent =
-  | { type: 'text_delta'; delta: string }
-  | { type: 'thinking_delta'; delta: string }
-  | { type: 'tool_start'; id: string; name: string; input: unknown; description: string }
-  | { type: 'tool_log'; id: string; name: string; line: string }
-  | { type: 'tool_end'; id: string; name: string; result: ToolResult }
-  | { type: 'permission_request'; toolName: string; description: string; isReadonly: boolean; isDestructive?: boolean; ruleContent?: string; key: string }
-  | { type: 'permission_denied'; id: string; toolName: string; description: string }
-  | { type: 'usage'; inputTokens: number; outputTokens: number; costUsd: number }
-  | { type: 'turn_limit'; turns: number }
-  | { type: 'budget_exceeded'; costUsd: number; limitUsd: number }
-  | { type: 'compact_start' }
-  | { type: 'compact_done'; summary: string }
-  | { type: 'interrupted'; reason: InterruptReason; message: string }
-  | { type: 'continuation_needed' }  // 非自动模式下，LLM 表达了继续意图但需用户确认
-  | { type: 'fallback_status'; status: 'retrying' | 'switching' | 'rate_limited'; provider: string; model: string; delayMs?: number; reason?: string }
-  | { type: 'done' }
-  | { type: 'error'; message: string }
 
 export class QueryEngine {
   private config: QueryEngineConfig
-  /** 事件溯源对话存储（单一数据源） */
   readonly store: ConversationStore
   private abortController: AbortController
-  // 防止并发执行：同一时刻只允许一个 send() 运行
   private running = false
   readonly costs: CostTracker
-  // 上次压缩生成的摘要，用于迭代更新（避免多次压缩后信息层层丢失）
   private previousSummary: string | null = null
-  // 压缩前归档回调（由外部注册，用于持久化原始历史）
   onBeforeCompact: ((summary: string) => Promise<void>) | null = null
-  // 每次 send 前的钩子（由外部注册，用于动态更新 systemPrompt、保存会话等）
-  // 替代 monkey-patch engine.send 的方式，类型安全且调用栈清晰
   onBeforeSend: ((message: string) => Promise<void>) | null = null
-  // 每次 send 完成后的钩子
   onAfterSend: (() => void) | null = null
-  // 权限请求回调（由外部注册，用于显示权限请求 UI）
   onPermissionRequest: ((req: PermissionRequest) => Promise<boolean>) | null = null
-  // 当前请求的 requestId，用于关联消息分组
   private currentRequestId: string | null = null
-  // 当前请求的触发来源
   private currentTrigger: 'user' | 'cron' = 'user'
-  // 当前 cron 任务的描述（仅 trigger=cron 时有值）
   private currentCronDescription: string | undefined = undefined
-  /**
-   * 会话级任务快照。
-   *
-   * - null：本会话尚未执行过任何 todo 工具，system prompt 不注入任务状态。
-   *         这是初始状态，确保"你好"等简单消息不会触发工具调用。
-   * - Todo[]：最近一次 todo 工具执行后从文件刷新的快照，用于构建 system prompt 注入内容。
-   *           所有任务完成后快照仍保留（数组全为 completed），buildLiveTodoContext 会返回 null。
-   *
-   * 刷新时机：executeOneTool 检测到 todo_* 工具调用成功后立即调用 loadTodos() 更新。
-   */
   private activeTodoSnapshot: Todo[] | null = null
-  /** Storm Breaker — 防重复调用风暴 */
   private stormBreaker = new StormBreaker()
-  /** 工具调用计数器（用于 Storm Breaker 滑动窗口） */
-  private totalToolCalls = 0
-  /** max_output_tokens 恢复重试上限 */
-  private static readonly MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
-  /** todo 工具集合（postExecution 刷新快照用） */
-  private static readonly TODO_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset', 'todo_read'])
+  private chatMode = false
+
+  /** ToolExecutor — 工具执行生命周期 */
+  private toolExecutor: ToolExecutor
 
   constructor(config: QueryEngineConfig, store?: ConversationStore) {
     this.config = config
     this.store = store ?? new ConversationStore()
     this.abortController = new AbortController()
     this.costs = new CostTracker(config.provider.model)
-    this.store.appendEvents(createSessionOpenEvent(config.sessionId ?? 'unknown', config.resumed ?? false))
+
+    // 初始化 ToolExecutor（events 在 run() 中更新）
+    this.toolExecutor = new ToolExecutor(
+      config.registry,
+      config.permissions,
+      new EventBridge(this.store, []), // 临时实例，run() 时重建
+      {
+        getAbortSignal: () => this.abortController.signal,
+        getStormBreaker: () => this.stormBreaker,
+        getOnPermissionRequest: () => this.onPermissionRequest ?? undefined,
+        onTodoSnapshotRefresh: (snapshot) => { this.activeTodoSnapshot = snapshot },
+      },
+    )
+
+    // 写入 session_opened 事件
+    const events = new EventBridge(this.store, [])
+    events.sessionOpened(config.sessionId ?? 'unknown', config.resumed ?? false)
   }
 
-  /**
-   * 设置当前请求的 requestId，用于关联消息分组
-   */
   setRequestId(requestId: string): void {
     this.currentRequestId = requestId
   }
 
-  /**
-   * 设置当前请求的触发来源
-   */
   setTrigger(trigger: 'user' | 'cron', cronDescription?: string): void {
     this.currentTrigger = trigger
     this.currentCronDescription = cronDescription
   }
 
-  // ── 优先级 3：结构化摘要 + 迭代更新 ─────────────────────────────────────────
-  // 序列化历史消息为摘要器可读的文本（工具调用保留名称和参数摘要）
+  // ── 摘要生成 ─────────────────────────────────────────────────────
+
   private serializeForSummary(displayMsgs: import('./ConversationStore.js').DisplayMessage[]): string {
     return displayMsgs.map(dm => {
       const role = dm.role === 'user' ? '用户' : '助手'
@@ -228,12 +180,9 @@ export class QueryEngine {
     }).join('\n\n')
   }
 
-  // 调用 LLM 生成对话摘要，用于自动压缩（公开方法，供 UI 层 /compact 命令调用）
   async generateCompactSummary(): Promise<string> {
-    // prune 已在投影层处理，此处直接用事件日志序列化
     const contentToSummarize = this.serializeForSummary(projectForDisplay(this.store.getMessages()))
 
-    // Phase 2: 结构化摘要 prompt，支持迭代更新
     let summaryPrompt: string
     if (this.previousSummary) {
       summaryPrompt = `你正在更新一份上下文压缩摘要。之前的压缩已生成以下摘要，现在有新的对话轮次需要合并进去。
@@ -316,7 +265,7 @@ ${contentToSummarize}
         [{ role: 'user', content: summaryPrompt }],
         [],
         ['你是一个对话摘要助手，请生成简洁准确的结构化摘要。'],
-        3000,
+        DEFAULT_MAX_TOKENS,
       )) {
         if (chunk.type === 'text_delta' && chunk.delta) {
           summary += chunk.delta
@@ -329,27 +278,25 @@ ${contentToSummarize}
     }
 
     const result = summary || `[对话历史：${this.store.getMessageCount()} 条消息]`
-    // 保存本次摘要，供下次迭代更新使用
     this.previousSummary = result
     return result
   }
 
-  // ── 流式调用 LLM，yield StreamEvent，最后 yield 一个内部结果对象 ──────────────
-  // 返回类型用 type 字段区分，避免 _internal 字段的类型推断问题
+  // ── 流式调用 LLM ─────────────────────────────────────────────────
+
   private async *streamOneTurn(
     turns: number,
     maxBudgetUsd: number | undefined,
-  ): AsyncGenerator<StreamEvent | { type: '__llm_result__'; fullText: string; thinkingText: string; toolCalls: Array<{ id: string; name: string; input: unknown }>; hitMaxOutputTokens: boolean }> {
+    events: EventBridge,
+  ): AsyncGenerator<RuntimeEvent | { type: '__llm_result__'; fullText: string; thinkingText: string; toolCalls: Array<{ id: string; name: string; input: unknown }>; hitMaxOutputTokens: boolean }> {
     let fullText = ''
     let thinkingText = ''
     const toolCalls: Array<{ id: string; name: string; input: unknown }> = []
     let hitMaxOutputTokens = false
 
-    // plan 模式下对写工具 description 追加不可用标注，
-    // 让 LLM 在工具选择阶段就知道这些工具当前不可用，避免盲目调用。
     const isPlanMode = this.config.permissions.getMode() === 'plan'
     const toolsForLLM = this.chatMode
-      ? []  // chat 模式：不传任何工具，模型只能直接回复
+      ? []
       : this.config.registry.getToolsForLLM(isPlanMode)
 
     log.debug('调用 LLM stream', { model: this.config.provider.model, turn: turns })
@@ -360,26 +307,23 @@ ${contentToSummarize}
         ? [...this.config.systemPrompt, liveTodo]
         : this.config.systemPrompt
 
-      // 从 store 事件日志投影出 LLM 所需的消息
       const rawMessages = projectForLLM(this.store.getMessages())
 
-      // 依次应用 prune 优化（纯函数，只修改投影副本不修改主存储）
       const { messages: afterOldPrune, prunedIds: oldPruned } = pruneOldToolResults(rawMessages)
       const { messages: afterBudget, prunedIds: budgetPruned } = applyToolResultBudget(afterOldPrune)
       const projectedMessages = pruneOldImageBlocks(afterBudget)
 
-      // 合并 prunedIds 存回 store，供下次投影跳过已 prune 的 tool_use
       for (const id of oldPruned) this.store.markToolCallPruned(id)
       for (const id of budgetPruned) this.store.markToolCallPruned(id)
 
-      // 重试 + 故障转移由 FallbackProvider 内部统一处理
       const llmStartTime = Date.now()
-      this.store.appendEvents(createLlmStartEvent(this.currentRequestId ?? undefined, this.config.provider.model, this.config.provider.name ?? 'unknown'))
+      events.modelTurnStarted(this.config.provider.model, this.config.provider.name ?? 'unknown')
+
       for await (const chunk of this.config.provider.stream(
         projectedMessages as import('./providers/types.js').ChatMessage[],
         toolsForLLM,
         systemPromptForThisTurn,
-        this.config.maxTokens ?? 8096,
+        this.config.maxTokens ?? DEFAULT_MAX_TOKENS,
         this.abortController.signal,
       )) {
         if (this.abortController.signal.aborted) break
@@ -387,11 +331,11 @@ ${contentToSummarize}
         if (chunk.type === 'thinking_delta' && chunk.delta) {
           thinkingText += chunk.delta
           modelLog.write('[stream] thinking_delta', { len: chunk.delta.length, total: thinkingText.length })
-          yield { type: 'thinking_delta', delta: chunk.delta }
+          events.thinkingDelta(chunk.delta)
         } else if (chunk.type === 'text_delta' && chunk.delta) {
           fullText += chunk.delta
           modelLog.write('[stream] text_delta', { len: chunk.delta.length, total: fullText.length })
-          yield { type: 'text_delta', delta: chunk.delta }
+          events.textDelta(chunk.delta)
         } else if (chunk.type === 'tool_call' && chunk.toolCall) {
           toolCalls.push(chunk.toolCall)
           modelLog.write('[stream] tool_call', { name: chunk.toolCall.name, id: chunk.toolCall.id })
@@ -405,41 +349,30 @@ ${contentToSummarize}
             cacheWriteTokens: chunk.usage.cacheWriteTokens ?? 0,
           })
           const costUsd = this.costs.getCostUsd()
-          yield {
-            type: 'usage',
-            inputTokens: chunk.usage.inputTokens,
-            outputTokens: chunk.usage.outputTokens,
-            costUsd,
-          }
-          // 成本超限：立即停止（在流式输出中途也能响应）
+          events.usage(chunk.usage.inputTokens, chunk.usage.outputTokens, costUsd)
           if (maxBudgetUsd !== undefined && costUsd >= maxBudgetUsd) {
-            this.store.appendEvents(createBudgetExceededEvent(costUsd, maxBudgetUsd))
-            yield { type: 'budget_exceeded', costUsd, limitUsd: maxBudgetUsd }
+            events.budgetExceeded(costUsd, maxBudgetUsd)
             return
           }
         } else if (chunk.type === 'stop_reason' && chunk.stopReason === 'max_tokens') {
           hitMaxOutputTokens = true
         }
       }
+
       const llmUsage = this.costs.getUsage()
-      this.store.appendEvents(createLlmEndEvent(
-        this.currentRequestId ?? undefined, Date.now() - llmStartTime,
-        llmUsage.inputTokens, llmUsage.outputTokens,
-      ))
+      events.modelTurnEnded(Date.now() - llmStartTime, llmUsage.inputTokens, llmUsage.outputTokens)
     } catch (err) {
       const errMsg = String(err)
       log.error('LLM 请求失败', { turn: turns, error: errMsg })
-      this.store.appendEvents(createErrorEvent(`LLM 请求失败: ${errMsg}`, !this.abortController.signal.aborted, this.currentRequestId ?? undefined))
-      yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` }
-      yield { type: 'error', message: errMsg }
-      // abort 导致的异常不写 error_recovery，由 send() 的 abort 处理统一负责
+      events.error(`LLM 请求失败: ${errMsg}`, !this.abortController.signal.aborted)
+      events.interrupted('error', `LLM 请求失败: ${errMsg}`)
       if (!this.abortController.signal.aborted) {
         const recoveryMsg = `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。`
         this.store.appendMessage({
           role: 'user', content: recoveryMsg,
           timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
         })
-        this.store.appendEvents(createUserEvent(recoveryMsg, this.currentRequestId ?? undefined))
+        events.userMessage(recoveryMsg, 'user')
       }
       return
     }
@@ -447,214 +380,35 @@ ${contentToSummarize}
     yield { type: '__llm_result__', fullText, thinkingText, toolCalls, hitMaxOutputTokens }
   }
 
-  // ── 工具执行辅助方法 ──────────────────────────────────────────────────────
+  // ── 心跳协议 ─────────────────────────────────────────────────────
 
-  /**
-   * 阶段 1：工具查找 + 权限检查 + Zod 校验 + Storm Breaker。
-   * 成功返回 { ok: true, ... }，失败返回 { ok: false, ... }。
-   * 调用方负责 yield 事件（通过返回的 events 数组）。
-   */
-  private async validateAndPrepareTool(
-    tc: { id: string; name: string; input: unknown },
-  ): Promise<
-    | { ok: true; tool: ToolDef; effectiveInput: unknown; events: StreamEvent[] }
-    | { ok: false; execStatus: 'error' | 'denied'; errorSummary: string; resultContent: string; events: StreamEvent[] }
-  > {
-    const events: StreamEvent[] = []
-
-    const tool = this.config.registry.get(tc.name)
-    if (!tool) {
-      const errorSummary = `未找到工具: ${tc.name}`
-      events.push(
-        { type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description: tc.name },
-        { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errorSummary } },
-      )
-      return { ok: false, execStatus: 'error', errorSummary, resultContent: `错误: ${errorSummary}`, events }
-    }
-
-    const description = tool.describe?.(tc.input) ?? tc.name
-
-    // 写入 tool_intent 事件（模型决定调用此工具）
-    this.store.appendEvents(createToolIntentEvent(this.currentRequestId ?? undefined, tc.id, tc.name, tc.input, description))
-
-    events.push({ type: 'tool_start', id: tc.id, name: tc.name, input: tc.input, description })
-    log.debug('工具开始执行', { toolName: tc.name, toolId: tc.id, description })
-
-    // 第一道：工具级硬拦截（checkPermission）
-    if (tool.checkPermission) {
-      const hardCheck = await tool.checkPermission(tc.input as never)
-      if (!hardCheck.granted) {
-        log.info('工具硬拦截', { toolName: tc.name, reason: hardCheck.reason })
-        auditLog({ action: 'permission_denied', resource: tc.name, result: 'denied', permissionMode: this.config.permissions.getMode(), details: { reason: hardCheck.reason, stage: 'hard_check' } })
-        events.push({ type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: hardCheck.reason } })
-        return { ok: false, execStatus: 'denied', errorSummary: hardCheck.reason, resultContent: `错误: ${hardCheck.reason}`, events }
-      }
-    }
-
-    // 第二道：PermissionManager 策略决策
-    const filePath = tool.getFilePath?.(tc.input as never)
-    const ruleContent = tool.getRuleContent?.(tc.input as never)
-    const permReq: PermissionRequest = {
-      toolName: tc.name, description, isReadonly: isReadOnlyCall(tool, tc.input),
-      isDestructive: tool.isDestructive, planSafe: tool.planSafe, filePath, ruleContent,
-    }
-
-    // 如果设置了 onPermissionRequest 回调，使用回调处理权限请求
-    let allowed: boolean
-    if (this.onPermissionRequest && !permReq.isReadonly) {
-      allowed = await this.onPermissionRequest(permReq)
-      // 如果用户允许，更新 PermissionManager 的会话内批准
-      if (allowed) {
-        this.config.permissions.approveSession(tc.name, ruleContent)
-      }
-    } else {
-      allowed = await this.config.permissions.check(permReq)
-    }
-    if (!allowed) {
-      log.info('权限拒绝', { toolName: tc.name, description })
-      auditLog({ action: 'permission_denied', resource: tc.name, result: 'denied', permissionMode: this.config.permissions.getMode(), details: { description } })
-      let denyReason: string
-      if (this.config.permissions.getMode() === 'plan') {
-        denyReason = '[Plan 模式] 此操作在规划模式下被禁止。请继续完成规划，不要尝试执行写操作。'
-        this.store.appendEvents(createPlanBlockedEvent(this.currentRequestId ?? undefined, tc.id, tc.name, denyReason))
-      } else if (this.config.permissions.isDenialThresholdReached()) {
-        const { consecutive, total } = this.config.permissions.getDenialState()
-        denyReason = `用户拒绝了此操作（已连续拒绝 ${consecutive} 次，会话内共拒绝 ${total} 次）。请停止尝试此类操作，直接询问用户希望如何处理。`
-      } else {
-        denyReason = '用户拒绝了此操作'
-      }
-      events.push({ type: 'permission_denied', id: tc.id, toolName: tc.name, description })
-      // 写入 tool_confirm(deny) 事件
-      this.store.appendEvents(createToolConfirmEvent(
-        this.currentRequestId ?? undefined, tc.id, tc.name, 'deny',
-        this.config.permissions.getMode(), permReq.isReadonly, permReq.isDestructive ?? false,
-        denyReason,
-      ))
-      return { ok: false, execStatus: 'denied', errorSummary: `权限拒绝: ${description}`, resultContent: denyReason, events }
-    }
-
-    // 权限已授予，写入 tool_confirm(allow) 事件
-    this.store.appendEvents(createToolConfirmEvent(
-      this.currentRequestId ?? undefined, tc.id, tc.name, 'allow',
-      this.config.permissions.getMode(), permReq.isReadonly, permReq.isDestructive ?? false,
-    ))
-
-    // 写操作记录审计日志
-    if (!tool.readonly) {
-      auditLog({ action: tc.name as never, resource: description, result: 'allowed', details: { toolName: tc.name } })
-    }
-
-    // Zod 参数校验 + 自动修复
-    let effectiveInput: unknown = tc.input
-    if (tool.inputSchema) {
-      const inputObj = tc.input as Record<string, unknown>
-      if (inputObj && typeof inputObj === 'object' && !Array.isArray(inputObj)) {
-        for (const field of ['todos']) {
-          if (field in inputObj && inputObj[field] !== null && typeof inputObj[field] === 'object' && !Array.isArray(inputObj[field])) {
-            const patched = { ...inputObj, [field]: [inputObj[field]] }
-            if (tool.inputSchema.safeParse(patched).success) {
-              log.info('自动修复工具参数：将单个对象包装为数组', { toolName: tc.name, field })
-              effectiveInput = patched
-              break
-            }
-          }
-        }
-      }
-      const parseResult = tool.inputSchema.safeParse(effectiveInput)
-      if (!parseResult.success) {
-        const issues = parseResult.error.issues.map(i => `  - ${i.path.join('.')}: ${i.message}`).join('\n')
-        const errMsg = `工具参数校验失败 [${tc.name}]:\n${issues}`
-        log.warn('工具参数校验失败', { toolName: tc.name, issues: parseResult.error.issues })
-        events.push({ type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: errMsg } })
-        return { ok: false, execStatus: 'error', errorSummary: errMsg.slice(0, 200), resultContent: `错误: ${errMsg}`, events }
-      }
-    }
-
-    // Storm Breaker
-    this.totalToolCalls++
-    const stormError = this.stormBreaker.check(tc.name, effectiveInput, this.totalToolCalls, tool.stormExempt)
-    if (stormError) {
-      this.store.appendEvents(createStormBlockedEvent(
-        this.currentRequestId ?? undefined, tc.id, tc.name, effectiveInput, this.totalToolCalls, 10,
-      ))
-      events.push({ type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: stormError } })
-      return { ok: false, execStatus: 'error', errorSummary: 'Storm Breaker 拦截', resultContent: stormError, events }
-    }
-
-    return { ok: true, tool, effectiveInput, events }
-  }
-
-  /**
-   * 阶段 3：执行后处理（Storm Breaker 清理、todo 快照刷新、结果截断）。
-   * 返回截断后的 __tool_result__ block 和 outputPreview。
-   */
-  private postExecution(
-    tc: { id: string; name: string; input: unknown },
-    tool: ToolDef,
-    finalResult: ToolResult,
-  ): { block: ContentBlock; outputPreview: string } {
-    if (finalResult.type === 'success' && !tool.readonly) {
-      this.stormBreaker.clearOnMutation()
-      // 写入文件变更副作用事件
-      const filePath = (tc.input as Record<string, unknown>)?.path ?? (tc.input as Record<string, unknown>)?.file_path ?? (tc.input as Record<string, unknown>)?.filename
-      if (typeof filePath === 'string') {
-        const mode = tc.name.includes('delete') ? 'delete' : tc.name.includes('edit') || tc.name.includes('replace') ? 'edit' : 'create'
-        this.store.appendEvents(createFileTouchedEvent(this.currentRequestId ?? undefined, filePath, mode, finalResult.output?.length ?? 0))
-      }
-    }
-
-    if (QueryEngine.TODO_TOOLS.has(tc.name) && finalResult.type === 'success') {
-      try {
-        this.activeTodoSnapshot = loadTodos()
-        log.debug('任务快照已刷新', { toolName: tc.name, count: this.activeTodoSnapshot.length })
-      } catch { /* 读取失败不影响主流程 */ }
-    }
-
-    const resultContent = finalResult.type === 'success' ? finalResult.output : `错误: ${finalResult.message}`
-    const outputPreview = resultContent.slice(0, 500)
-    const truncatedContent = truncateToolResult(resultContent, MAX_TOOL_RESULT_CHARS)
-    return {
-      block: { type: 'tool_result', tool_use_id: tc.id, content: truncatedContent, is_error: finalResult.type === 'error' },
-      outputPreview,
-    }
-  }
-
-  /**
-   * 无工具调用时的心跳协议判定。
-   * 返回 'break' 结束循环，'continue' 继续下一轮。
-   */
   private resolveHeartbeat(
     fullText: string,
     hitMaxOutputTokens: boolean,
     recoveryCount: number,
     turns: number,
     maxTurns: number,
+    events: EventBridge,
   ): { action: 'break' | 'continue'; newRecoveryCount: number } {
     log.debug('本轮无工具调用', { turn: turns, textLength: fullText.length })
 
-    // 输出被截断时注入继续指令，让 LLM 从中断处接着写，最多重试3次
-    if (hitMaxOutputTokens && recoveryCount < QueryEngine.MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
+    if (hitMaxOutputTokens && recoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
       const newCount = recoveryCount + 1
       log.info('输出被截断，注入继续指令', { turn: turns, recovery: newCount })
-      this.store.appendEvents(createMaxOutputRecoveryEvent(newCount, QueryEngine.MAX_OUTPUT_TOKENS_RECOVERY_LIMIT))
+      events.recoveryMaxOutput(newCount, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT)
       this.store.appendMessage({
         role: 'user', content: '[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。',
         timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
       })
-      this.store.appendEvents(createUserEvent(
-        '[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。',
-        this.currentRequestId ?? undefined,
-      ))
+      events.userMessage('[系统内部] 输出已被截断。请直接从中断处继续，不要重复已输出的内容，不要道歉或解释。', 'user')
       return { action: 'continue', newRecoveryCount: newCount }
     }
 
-    // DONE 标记：立即结束
     if (fullText.includes(HEARTBEAT_DONE)) {
       log.debug('心跳协议：DONE，停止执行', { turn: turns })
       return { action: 'break', newRecoveryCount: recoveryCount }
     }
 
-    // 任务系统确认全部完成：结束
     const allTasksDone = this.activeTodoSnapshot !== null &&
       this.activeTodoSnapshot.length > 0 &&
       this.activeTodoSnapshot.every(t => t.status === 'completed')
@@ -663,7 +417,6 @@ ${contentToSummarize}
       return { action: 'break', newRecoveryCount: recoveryCount }
     }
 
-    // CONTINUE 标记但无工具调用：允许继续
     if (fullText.includes(HEARTBEAT_CONTINUE)) {
       if (turns < maxTurns) {
         log.debug('心跳协议：CONTINUE（无工具调用），继续', { turn: turns })
@@ -672,254 +425,22 @@ ${contentToSummarize}
       log.debug('心跳协议：CONTINUE 但已达轮次上限，停止', { turn: turns })
     }
 
-    // 无标记、无工具调用：自然结束
     log.debug('无工具调用无心跳标记，自然结束', { turn: turns })
     return { action: 'break', newRecoveryCount: recoveryCount }
   }
 
-  /**
-   * 执行一批工具调用（按 parallelSafe 自动分区）。
-   * 通过 yield 流式产出事件，abort 时提前终止。
-   */
-  private async *executeToolBatches(
-    toolCalls: Array<{ id: string; name: string; input: unknown }>,
-  ): AsyncGenerator<StreamEvent> {
-    const batches = partitionToolCalls(toolCalls as ToolCall[], this.config.registry.getAll())
-    log.debug('本轮工具调用', {
-      tools: toolCalls.map(tc => tc.name),
-      batches: batches.map(b => ({ parallel: b.parallel, count: b.calls.length })),
-    })
+  // ── 媒体预处理 ───────────────────────────────────────────────────
 
-    for (const batch of batches) {
-      if (batch.parallel && batch.calls.length > 1) {
-        for await (const ev of this.executeBatch(batch.calls)) {
-          if (this.abortController.signal.aborted) return
-          yield ev
-        }
-      } else {
-        for (const tc of batch.calls) {
-          const gen = this.executeOneTool(tc)
-          let aborted = false
-          try {
-            for await (const ev of gen) {
-              if ('type' in ev && ev.type === '__tool_result__') {
-                const block = ev.block as { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
-                // 写入主存储：tool ChatMessage
-                this.store.appendMessage({
-                  role: 'tool',
-                  content: block.content,
-                  tool_call_id: block.tool_use_id,
-                  name: tc.name,
-                  is_error: block.is_error === true,
-                  timestamp: Date.now(),
-                  requestId: this.currentRequestId ?? undefined,
-                })
-              } else {
-                yield ev as StreamEvent
-                if (this.abortController.signal.aborted) { aborted = true; break }
-              }
-            }
-          } finally {
-            if (aborted) await gen.return(undefined)
-          }
-          if (aborted) return
-        }
-      }
-    }
-  }
-
-  // ── 执行单个工具调用（主入口）──────────────────────────────────────────
-  private async *executeOneTool(
-    tc: { id: string; name: string; input: unknown },
-  ): AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: ContentBlock }> {
-    const startTime = Date.now()
-    let execStatus: 'success' | 'error' | 'denied' | 'aborted' = 'success'
-    let outputPreview: string | undefined
-    let errorSummary: string | undefined
-    const logQueue: string[] = []
-    const onLog = (line: string) => { logQueue.push(line) }
-
-    try {
-      // 阶段 1：校验 + 权限 + Storm Breaker
-      const prepared = await this.validateAndPrepareTool(tc)
-      for (const ev of prepared.events) yield ev
-
-      if (!prepared.ok) {
-        execStatus = prepared.execStatus
-        errorSummary = prepared.errorSummary
-        yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: prepared.resultContent, is_error: true } }
-        return
-      }
-
-      const { tool, effectiveInput } = prepared
-
-      // 写入工具开始执行事件
-      this.store.appendEvents(createToolStartEvent(this.currentRequestId ?? undefined, tc.id, tc.name, effectiveInput, tool.describe?.(tc.input) ?? tc.name))
-
-      // 阶段 2：工具执行（超时 + abort 竞争 + 日志 flush）
-      const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
-      const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
-        ? inputTimeout + 5000
-        : 60 * 60 * 1000
-
-      const toolPromise: Promise<ToolResult> = tool.execute(effectiveInput as never, { onLog })
-        .then(r => r)
-        .catch((e: unknown) => ({
-          type: 'error' as const,
-          message: `工具执行异常 [${tc.name}]: ${e instanceof Error ? e.message : String(e)}`,
-        }))
-
-      const timeoutPromise: Promise<ToolResult> = new Promise(resolve =>
-        setTimeout(() => resolve({ type: 'error', message: `工具执行超时（超过 ${TOOL_TIMEOUT_MS / 1000}s）：${tc.name}` }), TOOL_TIMEOUT_MS))
-
-      let abortListener: (() => void) | undefined
-      const abortPromise: Promise<ToolResult> = new Promise(resolve => {
-        abortListener = () => resolve({ type: 'error', message: '任务已被中止' })
-        this.abortController.signal.addEventListener('abort', abortListener, { once: true })
-      })
-
-      const racePromise = Promise.race([toolPromise, timeoutPromise, abortPromise])
-
-      let finalResult: ToolResult | undefined = undefined
-      while (true) {
-        const raceOrTick = await Promise.race([
-          racePromise,
-          new Promise<'tick'>(r => setTimeout(() => r('tick'), 30)),
-        ])
-        while (logQueue.length > 0) {
-          yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
-        }
-        if (raceOrTick !== 'tick') {
-          finalResult = raceOrTick
-          break
-        }
-      }
-
-      // 清理 abort 事件监听器，防止泄漏
-      if (abortListener) {
-        this.abortController.signal.removeEventListener('abort', abortListener)
-      }
-
-      // flush 残留日志
-      while (logQueue.length > 0) {
-        yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
-      }
-
-      if (this.abortController.signal.aborted) {
-        execStatus = 'aborted'
-        errorSummary = '任务已被中止'
-        // 标记此 tool_use 为 pruned，避免投影时产生孤立 tool_use（无对应 tool_result）
-        this.store.markToolCallPruned(tc.id)
-        yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: '任务已被中止' } }
-        return
-      }
-
-      yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult }
-      log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type })
-
-      // 阶段 3：后处理
-      const post = this.postExecution(tc, tool, finalResult)
-      outputPreview = post.outputPreview
-      yield { type: '__tool_result__', block: post.block }
-
-    } finally {
-      const statusMap: Record<string, 'ok' | 'err' | 'denied' | 'abort'> = {
-        success: 'ok', error: 'err', denied: 'denied', aborted: 'abort',
-      }
-      this.store.appendEvents(createToolEndEvent(
-        this.currentRequestId ?? undefined, tc.id, tc.name, Date.now() - startTime,
-        statusMap[execStatus] ?? 'ok', outputPreview, errorSummary,
-      ))
-    }
-  }
-
-  /**
-   * 并行执行一批 parallelSafe 工具调用，流式产出事件。
-   * 为每个 generator 维护独立的 pending promise，通过 Promise.race 竞争消费。
-   * 避免对同一 AsyncGenerator 并发调用 next() 导致 ERR_GENERATOR_ALREADY_EXECUTING。
-   */
-  private async *executeBatch(
-    calls: ToolCall[],
-  ): AsyncGenerator<StreamEvent> {
-    type GenResult = IteratorResult<StreamEvent | { type: '__tool_result__'; block: unknown }>
-    interface GenState {
-      tc: ToolCall
-      gen: AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: unknown }>
-      pending: Promise<GenResult>
-    }
-
-    // 启动所有 generator，为每个创建初始 next() promise
-    const gens: GenState[] = calls.map(tc => {
-      const gen = this.executeOneTool(tc)
-      const pending = gen.next()
-      return { tc, gen, pending }
-    })
-
-    const active = new Set(gens.map((_, i) => i))
-
-    try {
-      while (active.size > 0) {
-        // 竞争所有活跃 generator 的当前 pending promise
-        const racePromises = [...active].map(i =>
-          gens[i].pending.then(result => ({ i, done: result.done, value: result.value })),
-        )
-
-        const { i, done, value } = await Promise.race(racePromises)
-
-        if (done) {
-          active.delete(i)
-          continue
-        }
-
-        // 只对 winner generator 调用 next()，获取下一个 pending promise
-        // 其他 generator 的 pending 不变，避免并发 next() 问题
-        gens[i].pending = gens[i].gen.next()
-
-        const ev = value as StreamEvent | { type: '__tool_result__'; block: unknown }
-        if ('type' in ev && ev.type === '__tool_result__') {
-          const block = ev.block as { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
-          this.store.appendMessage({
-            role: 'tool', tool_call_id: block.tool_use_id, name: gens[i].tc.name,
-            content: block.content, is_error: block.is_error === true,
-            timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
-          })
-        } else {
-          yield ev as StreamEvent
-        }
-
-        // abort 时跳出，由 finally 清理所有活跃 generator
-        if (this.abortController.signal.aborted) break
-      }
-    } finally {
-      // 确保所有活跃 generator 被正确关闭，触发其 finally 块（审计日志写入）
-      const cleanup = [...active].map(idx => gens[idx].gen.return(undefined))
-      await Promise.allSettled(cleanup)
-    }
-  }
-
-  /**
-   * 预处理用户消息：将 @引用（本地文件 / URL）替换为 image/document ContentBlock。
-   *
-   * 委托给 MediaProcessor.extractMediaFromText，支持：
-   *   - @filename.jpg / @/abs/path/img.png  → 本地文件（压缩 + 缓存）
-   *   - @https://example.com/img.jpg        → URL 图片（fetch + 压缩 + 缓存）
-   *   - @doc.pdf                            → PDF 直接传输
-   *
-   * 若消息中没有任何媒体引用，直接返回原始字符串（不做转换）。
-   */
   private async preprocessUserMessage(text: string): Promise<string | ContentBlock[]> {
     const cwd = this.config.sessionCwd ?? process.cwd()
     const { attachments, cleanText, errors } = await extractMediaFromText(text, cwd, this.config.uploadsDir)
 
     if (attachments.length === 0) {
-      // 没有成功加载的媒体，返回原始文本（保留失败引用，让 LLM 知道）
       return text
     }
 
-    // 构建 ContentBlock 数组
     const blocks: ContentBlock[] = []
 
-    // 文本部分（去掉 @引用后的干净文本 + 错误提示）
     let textContent = cleanText
     if (errors.length > 0) {
       textContent += `\n\n[媒体加载失败]\n${errors.join('\n')}`
@@ -928,7 +449,6 @@ ${contentToSummarize}
       blocks.push({ type: 'text', text: textContent })
     }
 
-    // 媒体 block
     for (const att of attachments) {
       blocks.push({
         type: 'image',
@@ -943,8 +463,10 @@ ${contentToSummarize}
     return blocks
   }
 
-  async *send(userMessage: string | Message): AsyncGenerator<StreamEvent> {
-    // 并发保护：如果已有任务在运行，拒绝新任务
+  // ── 主循环 run() ─────────────────────────────────────────────────
+
+  async *run(userMessage: string | Message): AsyncGenerator<RuntimeEvent> {
+    // 并发保护
     if (this.running) {
       log.warn('并发保护触发：上一个任务仍在执行中', { historyLength: this.store.getMessageCount() })
       yield { type: 'error', message: '上一个任务仍在执行中，请等待完成后再发送新消息' }
@@ -953,18 +475,33 @@ ${contentToSummarize}
     this.running = true
     this.abortController = new AbortController()
 
-    // 请求级快照（用于 request_complete 事件）
+    // 请求级状态
     const requestStartTime = Date.now()
-    this.costs.reset()  // 每次请求重置，避免跨请求累积导致预算误触
+    this.costs.reset()
     const costBefore = this.costs.getCostUsd()
     const usageBefore = this.costs.getUsage()
     let exitStatus: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied' = 'completed'
-    this.totalToolCalls = 0  // 重置计数器（每个请求独立计数）
+    this.toolExecutor.resetCounter()
     this.stormBreaker.reset()
     let errorMessage: string | undefined
 
-    // 调用 onBeforeSend 钩子（动态更新 systemPrompt、保存会话等）
-    // 同时提取消息文本用于后续意图检测，避免重复计算
+    // 创建 EventBridge（新 requestId）
+    const runtimeBuffer: RuntimeEvent[] = []
+    const requestId = this.currentRequestId ?? `req-${Date.now()}`
+    const events = new EventBridge(this.store, runtimeBuffer, requestId)
+
+    // 更新 ToolExecutor 的 events
+    this.toolExecutor.updateEvents(events)
+    this.toolExecutor.resetCounter()
+
+    // drainRuntimeBuffer: 取出 buffer 中所有事件
+    const drainRuntimeBuffer = (): RuntimeEvent[] => {
+      const items = [...runtimeBuffer]
+      runtimeBuffer.length = 0
+      return items
+    }
+
+    // 提取消息文本
     const msgText = typeof userMessage === 'string'
       ? userMessage
       : (Array.isArray((userMessage as Message).content)
@@ -972,12 +509,13 @@ ${contentToSummarize}
               .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
               .map(b => b.text).join('')
           : String((userMessage as Message).content))
+
+    // onBeforeSend 钩子
     if (this.onBeforeSend) {
       try { await this.onBeforeSend(msgText) } catch { /* 钩子失败不阻断执行 */ }
     }
 
-    // 预处理用户消息：将 @filename 转换为 image block（仅用于发给 LLM）
-    // 事件日志里保留原始文本（含 @filename），避免 base64 数据膨胀事件流
+    // 预处理用户消息
     let processedContent: string | ContentBlock[] = typeof userMessage === 'string' ? userMessage : (userMessage as Message).content
     if (typeof processedContent === 'string' && this.config.sessionCwd) {
       try {
@@ -986,36 +524,26 @@ ${contentToSummarize}
         log.warn('图片预处理失败', { error: String(err) })
       }
     }
-    // 在 preprocess 之后检查，确保 @filename 转换的 image block 能被检测到
     const hasImageBlocks = Array.isArray(processedContent) &&
       (processedContent as ContentBlock[]).some(b => b.type === 'image')
 
-    // 提取原始文本（不含 base64），存入事件日志
     const originalText = typeof userMessage === 'string' ? userMessage : msgText
 
-    // 如果有 image block，将预处理结果存入 store 供 LLM 投影使用
     if (hasImageBlocks) {
       this.store.setLatestPreprocessed(
         Array.isArray(processedContent) ? processedContent as ContentBlock[] : null,
       )
     }
 
-    // 追加用户消息到主存储和事件日志（原始文本，不含 base64）
+    // 写入用户消息
     this.store.appendMessage({
       role: 'user', content: originalText,
-      timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
+      timestamp: Date.now(), requestId,
       trigger: this.currentTrigger, cronDescription: this.currentCronDescription,
       images: hasImageBlocks ? (processedContent as ContentBlock[]).filter(b => b.type === 'image').map(b => ((b as { type: 'image'; source: ImageSource }).source.url) ?? '') : undefined,
     })
-    this.store.appendEvents(createUserEvent(
-      originalText,
-      this.currentRequestId ?? undefined,
-      this.currentTrigger,
-      this.currentCronDescription,
-    ))
-    this.store.appendEvents(createReqStartEvent(
-      this.currentRequestId ?? '', this.config.permissions.getMode(), this.config.provider.model ?? 'unknown',
-    ))
+    events.userMessage(originalText, this.currentTrigger, this.currentCronDescription)
+    events.requestStarted(this.config.permissions.getMode(), this.config.provider.model ?? 'unknown')
 
     // 任务快照预热
     if (this.activeTodoSnapshot === null) {
@@ -1026,397 +554,23 @@ ${contentToSummarize}
           log.debug('任务快照预热：从磁盘读取到已有任务', { count: existing.length })
         }
       } catch {
-        // 读取失败不影响主流程，快照保持 null
-      }
-    }
-
-    // craft 模式：不设轮次上限，完全依赖 autocompact 管理上下文
-    // ask/plan 模式：保留轮次限制，超出后通知用户决定是否继续
-    const isCraftMode = this.config.permissions.getMode() === 'craft'
-    const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? 50)
-
-    log.debug('send 开始', { messageCount: this.store.getMessageCount(), estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
-
-    const maxBudgetUsd = this.config.maxBudgetUsd
-    // 自动压缩阈值：默认 100000 tokens（约 40-80 轮对话后才触发，参考 Kiro/Claude Code 的策略）
-    const autoCompactThreshold = this.config.autoCompactThreshold ?? 100000
-    let turns = 0
-    // 用 API 返回的真实 inputTokens 校准估算，避免中文场景低估
-    let lastKnownInputTokens = 0
-    // max_output_tokens 恢复计数（最多重试3次，参考 claude-code）
-    let maxOutputTokensRecoveryCount = 0
-
-    try {
-      while (turns < maxTurns) {
-        if (this.abortController.signal.aborted) {
-          exitStatus = 'aborted'
-          break
-        }
-        turns++
-
-        log.debug(`第 ${turns} 轮开始`, {
-          messageCount: this.store.getMessageCount(),
-          estimatedTokens: this.getEstimatedTokens(),
-          lastKnownInputTokens,
-          maxTurns: isCraftMode ? 'unlimited' : maxTurns,
-        })
-
-        // 成本预算检查（每轮开始前）
-        if (maxBudgetUsd !== undefined) {
-          const spent = this.costs.getCostUsd()
-          if (spent >= maxBudgetUsd) {
-            this.store.appendEvents(createBudgetExceededEvent(spent, maxBudgetUsd))
-            exitStatus = 'budget_exceeded'
-            yield { type: 'budget_exceeded', costUsd: spent, limitUsd: maxBudgetUsd }
-            break
-          } else if (spent >= maxBudgetUsd * 0.8) {
-            this.store.appendEvents(createBudgetWarnEvent(spent, maxBudgetUsd, spent / maxBudgetUsd))
-          }
-        }
-
-        // 廉价优化（prune/budget）现在在 projectForLLM 投影时执行，无需在此处调用
-
-        // autocompact 触发判断：优先用 API 返回的真实 inputTokens，其次用估算值
-        const tokenCount = lastKnownInputTokens > 0
-          ? lastKnownInputTokens
-          : this.getEstimatedTokens()
-
-        // 检查最新用户消息是否包含图片（图片消息不触发压缩）
-        const latestHasImage = this.store.getLatestPreprocessed() !== null
-
-        // 图片消息不触发压缩（避免图片上下文丢失），但超过绝对上限时强制压缩
-        const absoluteMaxTokens = autoCompactThreshold * 3
-        if ((!latestHasImage && tokenCount > autoCompactThreshold) || tokenCount > absoluteMaxTokens) {
-          yield { type: 'compact_start' }
-          const summary = await this.generateCompactSummary()
-          if (this.onBeforeCompact) {
-            try { await this.onBeforeCompact(summary) } catch { /* 归档失败不阻断压缩 */ }
-          }
-          this.compactHistory(summary)
-          // 孤立 tool_use/tool_result 对的修复已由投影层处理
-          lastKnownInputTokens = 0
-          yield { type: 'compact_done', summary }
-        }
-
-        // ── 调用 LLM（委托给 streamOneTurn）────────────────────────────────
-        let fullText = ''
-        let thinkingText = ''
-        let toolCalls: Array<{ id: string; name: string; input: unknown }> = []
-        let hitMaxOutputTokens = false
-        let llmError = false
-
-        for await (const ev of this.streamOneTurn(turns, maxBudgetUsd)) {
-          if ('type' in ev && ev.type === '__llm_result__') {
-            // 内部结果信号，不向外 yield
-            fullText = ev.fullText
-            thinkingText = ev.thinkingText
-            toolCalls = ev.toolCalls
-            hitMaxOutputTokens = ev.hitMaxOutputTokens
-          } else if (ev.type === 'error') {
-            yield ev
-            exitStatus = 'error'
-            llmError = true
-          } else if (ev.type === 'interrupted') {
-            yield ev
-            exitStatus = ev.reason === 'error' ? 'error' : ev.reason
-            llmError = true
-          } else if (ev.type === 'usage') {
-            // 用 API 返回的真实 inputTokens 更新计量
-            if (ev.inputTokens > 0) lastKnownInputTokens = ev.inputTokens
-            yield ev
-          } else if (ev.type === 'budget_exceeded') {
-            exitStatus = 'budget_exceeded'
-            yield ev
-            break
-          } else {
-            yield ev
-          }
-        }
-        if (llmError || exitStatus === 'budget_exceeded') break
-
-        // 将 assistant 回复写入事件日志
-        const toolCallEvents = toolCalls.length > 0
-          ? toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input }))
-          : undefined
-        // 过滤心跳标记，避免内部协议标记污染前端展示
-        const cleanText = fullText
-          .replace(HEARTBEAT_DONE, '')
-          .replace(HEARTBEAT_CONTINUE, '')
-          .trim()
-        if (cleanText || thinkingText || toolCallEvents) {
-          // 写入主存储：assistant ChatMessage（含 tool_calls）
-          this.store.appendMessage({
-            role: 'assistant',
-            content: cleanText || null,
-            thinking: thinkingText || undefined,
-            tool_calls: toolCallEvents,
-            timestamp: Date.now(),
-            requestId: this.currentRequestId ?? undefined,
-          })
-          // 写入旁路日志：assistant 事件
-          this.store.appendEvents(createAssistantEvent(
-            cleanText, this.currentRequestId ?? undefined,
-            thinkingText || undefined, toolCallEvents?.length,
-          ))
-        }
-
-        // 第一轮 LLM 调用完成后，清除预处理状态（后续轮次不再需要图片）
-        if (hasImageBlocks && turns === 1) {
-          this.store.setLatestPreprocessed(null)
-        }
-
-        // ── 无工具调用：心跳协议判定 ─────────────────────────────────
-        if (toolCalls.length === 0) {
-          const heartbeat = this.resolveHeartbeat(fullText, hitMaxOutputTokens, maxOutputTokensRecoveryCount, turns, maxTurns)
-          maxOutputTokensRecoveryCount = heartbeat.newRecoveryCount
-          if (heartbeat.action === 'continue') continue
-          break
-        }
-
-        // ── 执行工具调用（按 parallelSafe 自动分区：并行批次 + 串行批次）──────────
-        for await (const ev of this.executeToolBatches(toolCalls)) {
-          yield ev
-        }
-        if (this.abortController.signal.aborted) break
-      }
-
-      // 达到最大轮次（仅 ask/plan 模式会触发，craft 模式 maxTurns = Infinity）
-      if (turns >= maxTurns) {
-        exitStatus = 'turn_limit'
-        this.store.appendEvents(createTurnLimitEvent(turns, maxTurns))
-        yield { type: 'interrupted', reason: 'turn_limit', message: `已达到最大执行轮次 ${maxTurns}，任务可能未完成。发送"继续"可恢复执行。` }
-        yield { type: 'turn_limit', turns }
-        const turnLimitMsg = `[系统提示] 任务因达到最大轮次限制（${maxTurns} 轮）而中断，尚未完成。请继续执行剩余工作。`
-        this.store.appendMessage({ role: 'user', content: turnLimitMsg, timestamp: Date.now(), requestId: this.currentRequestId ?? undefined })
-        this.store.appendEvents(createUserEvent(turnLimitMsg, this.currentRequestId ?? undefined))
-      }
-      // 被用户中止
-      if (this.abortController.signal.aborted) {
-        exitStatus = 'aborted'
-        yield { type: 'interrupted', reason: 'aborted', message: '任务已被中止。发送"继续"可恢复执行。' }
-        const abortMsg = '[系统提示] 任务被用户中止。如需继续，请发送指令。'
-        this.store.appendMessage({ role: 'user', content: abortMsg, timestamp: Date.now(), requestId: this.currentRequestId ?? undefined })
-        this.store.appendEvents(createUserEvent(abortMsg, this.currentRequestId ?? undefined))
-      }
-    } catch (err) {
-      exitStatus = 'error'
-      errorMessage = String(err)
-      this.store.appendEvents(createErrorEvent(errorMessage, true, this.currentRequestId ?? undefined))
-      yield { type: 'error', message: `消息处理失败: ${errorMessage}` }
-    } finally {
-      // 写入请求完成事件（持久化，不 yield 给外部）
-      const usageAfter = this.costs.getUsage()
-      this.store.appendEvents(createReqEndEvent(
-        this.currentRequestId ?? undefined,
-        exitStatus === 'completed' ? 'ok' : exitStatus === 'permission_denied' ? 'err' : exitStatus === 'turn_limit' ? 'turn' : exitStatus === 'budget_exceeded' ? 'budget' : exitStatus === 'aborted' ? 'abort' : 'err',
-        turns,
-        this.totalToolCalls,
-        Date.now() - requestStartTime,
-        usageAfter.inputTokens - usageBefore.inputTokens,
-        usageAfter.outputTokens - usageBefore.outputTokens,
-        this.costs.getCostUsd() - costBefore,
-      ))
-
-      // 无论正常结束还是异常，都要释放锁并发 done
-      this.running = false
-      if (this.onAfterSend) {
-        try { this.onAfterSend() } catch { /* 钩子失败不阻断 */ }
-      }
-      modelLog.write('[sendStreaming] yield done', { exitStatus, totalToolCalls: this.totalToolCalls })
-      yield { type: 'done' }
-    }
-  }
-
-  // ── 流式工具执行核心（不含 store 写入）────────────────────────────────────
-  // 与 executeOneTool 相同的逻辑，但不写入 ConversationStore（由调用方控制写入时机）
-  private async *executeOneToolCore(
-    tc: { id: string; name: string; input: unknown },
-  ): AsyncGenerator<StreamEvent | { type: '__tool_result__'; block: ContentBlock }> {
-    const startTime = Date.now()
-    let execStatus: 'success' | 'error' | 'denied' | 'aborted' = 'success'
-    let outputPreview: string | undefined
-    let errorSummary: string | undefined
-    const logQueue: string[] = []
-    const onLog = (line: string) => { logQueue.push(line) }
-
-    try {
-      const prepared = await this.validateAndPrepareTool(tc)
-      for (const ev of prepared.events) yield ev
-
-      if (!prepared.ok) {
-        execStatus = prepared.execStatus
-        errorSummary = prepared.errorSummary
-        yield { type: '__tool_result__', block: { type: 'tool_result', tool_use_id: tc.id, content: prepared.resultContent, is_error: true } }
-        return
-      }
-
-      const { tool, effectiveInput } = prepared
-
-      // 写入工具开始执行事件
-      this.store.appendEvents(createToolStartEvent(this.currentRequestId ?? undefined, tc.id, tc.name, effectiveInput, tool.describe?.(tc.input) ?? tc.name))
-
-      const inputTimeout = (effectiveInput as Record<string, unknown>)?.timeout
-      const TOOL_TIMEOUT_MS = (typeof inputTimeout === 'number' && inputTimeout > 0)
-        ? inputTimeout + 5000
-        : 60 * 60 * 1000
-
-      const toolPromise: Promise<ToolResult> = tool.execute(effectiveInput as never, { onLog })
-        .then(r => r)
-        .catch((e: unknown) => ({
-          type: 'error' as const,
-          message: `工具执行异常 [${tc.name}]: ${e instanceof Error ? e.message : String(e)}`,
-        }))
-
-      const timeoutPromise: Promise<ToolResult> = new Promise(resolve =>
-        setTimeout(() => resolve({ type: 'error', message: `工具执行超时（超过 ${TOOL_TIMEOUT_MS / 1000}s）：${tc.name}` }), TOOL_TIMEOUT_MS))
-
-      let abortListener: (() => void) | undefined
-      const abortPromise: Promise<ToolResult> = new Promise(resolve => {
-        abortListener = () => resolve({ type: 'error', message: '任务已被中止' })
-        this.abortController.signal.addEventListener('abort', abortListener, { once: true })
-      })
-
-      const racePromise = Promise.race([toolPromise, timeoutPromise, abortPromise])
-
-      let finalResult: ToolResult | undefined = undefined
-      while (true) {
-        const raceOrTick = await Promise.race([
-          racePromise,
-          new Promise<'tick'>(r => setTimeout(() => r('tick'), 30)),
-        ])
-        while (logQueue.length > 0) {
-          yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
-        }
-        if (raceOrTick !== 'tick') {
-          finalResult = raceOrTick
-          break
-        }
-      }
-
-      if (abortListener) {
-        this.abortController.signal.removeEventListener('abort', abortListener)
-      }
-
-      while (logQueue.length > 0) {
-        yield { type: 'tool_log', id: tc.id, name: tc.name, line: logQueue.shift()! }
-      }
-
-      if (this.abortController.signal.aborted) {
-        execStatus = 'aborted'
-        errorSummary = '任务已被中止'
-        this.store.markToolCallPruned(tc.id)
-        yield { type: 'tool_end', id: tc.id, name: tc.name, result: { type: 'error', message: '任务已被中止' } }
-        return
-      }
-
-      yield { type: 'tool_end', id: tc.id, name: tc.name, result: finalResult }
-      log.debug('工具执行完成', { toolName: tc.name, toolId: tc.id, resultType: finalResult.type })
-
-      const post = this.postExecution(tc, tool, finalResult)
-      outputPreview = post.outputPreview
-      yield { type: '__tool_result__', block: post.block }
-
-    } finally {
-      const statusMap: Record<string, 'ok' | 'err' | 'denied' | 'abort'> = {
-        success: 'ok', error: 'err', denied: 'denied', aborted: 'abort',
-      }
-      this.store.appendEvents(createToolEndEvent(
-        this.currentRequestId ?? undefined, tc.id, tc.name, Date.now() - startTime,
-        statusMap[execStatus] ?? 'ok', outputPreview, errorSummary,
-      ))
-    }
-  }
-
-  // ── 流式工具执行版 send ─────────────────────────────────────────────────
-  // 与 send() 相同的语义，但工具在 LLM 流式输出期间立即开始执行（不等 LLM 结束）
-  async *sendStreaming(userMessage: string | Message): AsyncGenerator<StreamEvent> {
-    if (this.running) {
-      log.warn('并发保护触发：上一个任务仍在执行中', { historyLength: this.store.getMessageCount() })
-      yield { type: 'error', message: '上一个任务仍在执行中，请等待完成后再发送新消息' }
-      return
-    }
-    this.running = true
-    this.abortController = new AbortController()
-
-    const requestStartTime = Date.now()
-    this.costs.reset()
-    const costBefore = this.costs.getCostUsd()
-    const usageBefore = this.costs.getUsage()
-    let exitStatus: 'completed' | 'error' | 'aborted' | 'turn_limit' | 'budget_exceeded' | 'permission_denied' = 'completed'
-    this.totalToolCalls = 0
-    this.stormBreaker.reset()
-    let errorMessage: string | undefined
-
-    const msgText = typeof userMessage === 'string'
-      ? userMessage
-      : (Array.isArray((userMessage as Message).content)
-          ? ((userMessage as Message).content as ContentBlock[])
-              .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-              .map(b => b.text).join('')
-          : String((userMessage as Message).content))
-    if (this.onBeforeSend) {
-      try { await this.onBeforeSend(msgText) } catch { /* 钩子失败不阻断执行 */ }
-    }
-
-    let processedContent: string | ContentBlock[] = typeof userMessage === 'string' ? userMessage : (userMessage as Message).content
-    if (typeof processedContent === 'string' && this.config.sessionCwd) {
-      try {
-        processedContent = await this.preprocessUserMessage(processedContent)
-      } catch (err) {
-        log.warn('图片预处理失败', { error: String(err) })
-      }
-    }
-    const hasImageBlocks = Array.isArray(processedContent) &&
-      (processedContent as ContentBlock[]).some(b => b.type === 'image')
-
-    const originalText = typeof userMessage === 'string' ? userMessage : msgText
-
-    if (hasImageBlocks) {
-      this.store.setLatestPreprocessed(
-        Array.isArray(processedContent) ? processedContent as ContentBlock[] : null,
-      )
-    }
-
-    this.store.appendMessage({
-      role: 'user', content: originalText,
-      timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
-      trigger: this.currentTrigger, cronDescription: this.currentCronDescription,
-    })
-    this.store.appendEvents(createUserEvent(
-      originalText,
-      this.currentRequestId ?? undefined,
-      this.currentTrigger,
-      this.currentCronDescription,
-    ))
-    this.store.appendEvents(createReqStartEvent(
-      this.currentRequestId ?? '', this.config.permissions.getMode(), this.config.provider.model ?? 'unknown',
-    ))
-
-    if (this.activeTodoSnapshot === null) {
-      try {
-        const existing = loadTodos()
-        if (existing.length > 0) {
-          this.activeTodoSnapshot = existing
-          log.debug('任务快照预热：从磁盘读取到已有任务', { count: existing.length })
-        }
-      } catch {
-        // 读取失败不影响主流程，快照保持 null
+        // 读取失败不影响主流程
       }
     }
 
     const isCraftMode = this.config.permissions.getMode() === 'craft'
-    const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? 50)
+    const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? DEFAULT_MAX_TURNS)
 
-    log.debug('sendStreaming 开始', { messageCount: this.store.getMessageCount(), estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
+    log.debug('run 开始', { messageCount: this.store.getMessageCount(), estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
 
     const maxBudgetUsd = this.config.maxBudgetUsd
-    const autoCompactThreshold = this.config.autoCompactThreshold ?? 100000
+    const autoCompactThreshold = this.config.autoCompactThreshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD
     let turns = 0
     let lastKnownInputTokens = 0
     let maxOutputTokensRecoveryCount = 0
 
-    // ── 事件队列（工具执行 → 主循环）────────────────────────
-    type QueueItem = { event: StreamEvent } | { done: true; toolCallId: string; result?: ContentBlock }
+    // 事件队列（工具执行 → 主循环）
+    type QueueItem = { event: RuntimeEvent } | { done: true; toolCallId: string; result?: ContentBlock }
     let queueResolve: (() => void) | null = null
     const eventQueue: QueueItem[] = []
     const waitQueue = (): Promise<void> => new Promise<void>(resolve => { queueResolve = resolve })
@@ -1438,7 +592,7 @@ ${contentToSummarize}
         }
         turns++
 
-        log.debug(`第 ${turns} 轮开始（流式）`, {
+        log.debug(`第 ${turns} 轮开始`, {
           messageCount: this.store.getMessageCount(),
           estimatedTokens: this.getEstimatedTokens(),
           lastKnownInputTokens,
@@ -1449,12 +603,12 @@ ${contentToSummarize}
         if (maxBudgetUsd !== undefined) {
           const spent = this.costs.getCostUsd()
           if (spent >= maxBudgetUsd) {
-            this.store.appendEvents(createBudgetExceededEvent(spent, maxBudgetUsd))
+            events.budgetExceeded(spent, maxBudgetUsd)
             exitStatus = 'budget_exceeded'
-            yield { type: 'budget_exceeded', costUsd: spent, limitUsd: maxBudgetUsd }
+            for (const ev of drainRuntimeBuffer()) yield ev
             break
-          } else if (spent >= maxBudgetUsd * 0.8) {
-            this.store.appendEvents(createBudgetWarnEvent(spent, maxBudgetUsd, spent / maxBudgetUsd))
+          } else if (spent >= maxBudgetUsd * BUDGET_WARN_RATIO) {
+            events.budgetWarn(spent, maxBudgetUsd, spent / maxBudgetUsd)
           }
         }
 
@@ -1463,16 +617,18 @@ ${contentToSummarize}
           ? lastKnownInputTokens
           : this.getEstimatedTokens()
         const latestHasImage = this.store.getLatestPreprocessed() !== null
-        const absoluteMaxTokens = autoCompactThreshold * 3
+        const absoluteMaxTokens = autoCompactThreshold * ABSOLUTE_MAX_MULTIPLIER
         if ((!latestHasImage && tokenCount > autoCompactThreshold) || tokenCount > absoluteMaxTokens) {
-          yield { type: 'compact_start' }
+          events.compactStart()
+          for (const ev of drainRuntimeBuffer()) yield ev
           const summary = await this.generateCompactSummary()
           if (this.onBeforeCompact) {
             try { await this.onBeforeCompact(summary) } catch { /* 归档失败不阻断压缩 */ }
           }
-          this.compactHistory(summary)
+          this.compactHistory(summary, events)
           lastKnownInputTokens = 0
-          yield { type: 'compact_done', summary }
+          events.compactDone(summary)
+          for (const ev of drainRuntimeBuffer()) yield ev
         }
 
         // ── 流式调用 LLM，同时立即执行工具 ────────────────────
@@ -1484,125 +640,97 @@ ${contentToSummarize}
 
         const inFlight = new Map<string, { resolve: (block?: ContentBlock) => void }>()
 
-        const isPlanMode = this.config.permissions.getMode() === 'plan'
-        const toolsForLLM = this.chatMode
-          ? []
-          : this.config.registry.getToolsForLLM(isPlanMode)
-
         try {
-          const liveTodo = buildLiveTodoContext(this.activeTodoSnapshot)
-          const systemPromptForThisTurn = liveTodo
-            ? [...this.config.systemPrompt, liveTodo]
-            : this.config.systemPrompt
-
-          const rawMessages = projectForLLM(this.store.getMessages())
-
-          const { messages: afterOldPrune, prunedIds: oldPruned } = pruneOldToolResults(rawMessages)
-          const { messages: afterBudget, prunedIds: budgetPruned } = applyToolResultBudget(afterOldPrune)
-          const projectedMessages = pruneOldImageBlocks(afterBudget)
-
-          for (const id of oldPruned) this.store.markToolCallPruned(id)
-          for (const id of budgetPruned) this.store.markToolCallPruned(id)
-
-          const llmStartTime = Date.now()
-          this.store.appendEvents(createLlmStartEvent(this.currentRequestId ?? undefined, this.config.provider.model ?? 'unknown', this.config.provider.name ?? 'unknown'))
-          for await (const chunk of this.config.provider.stream(
-            projectedMessages as import('./providers/types.js').ChatMessage[],
-            toolsForLLM,
-            systemPromptForThisTurn,
-            this.config.maxTokens ?? 8096,
-            this.abortController.signal,
-          )) {
-            if (this.abortController.signal.aborted) break
-
-            if (chunk.type === 'thinking_delta' && chunk.delta) {
-              thinkingText += chunk.delta
-              yield { type: 'thinking_delta', delta: chunk.delta }
-            } else if (chunk.type === 'text_delta' && chunk.delta) {
-              fullText += chunk.delta
-              yield { type: 'text_delta', delta: chunk.delta }
-            } else if (chunk.type === 'tool_call' && chunk.toolCall) {
-              toolCalls.push(chunk.toolCall)
-              // ★ 关键：立即启动工具执行（不等 LLM 流结束）
-              const tc = chunk.toolCall
-              let resolveRef: (block?: ContentBlock) => void = () => {}
-              inFlight.set(tc.id, { resolve: (block) => resolveRef(block) })
-              void (async () => {
-                let resultBlock: ContentBlock | undefined
-                try {
-                  for await (const ev of this.executeOneToolCore(tc)) {
-                    if ('type' in ev && ev.type === '__tool_result__') {
-                      resultBlock = ev.block
-                    } else {
-                      pushQueue({ event: ev as StreamEvent })
-                    }
-                  }
-                } catch { /* 工具执行异常 */ }
-                pushQueue({ done: true, toolCallId: tc.id, result: resultBlock })
-              })()
-            } else if (chunk.type === 'usage' && chunk.usage) {
-              this.costs.add({
-                inputTokens: chunk.usage.inputTokens,
-                outputTokens: chunk.usage.outputTokens,
-                cacheReadTokens: chunk.usage.cacheReadTokens ?? 0,
-                cacheWriteTokens: chunk.usage.cacheWriteTokens ?? 0,
-              })
-              const costUsd = this.costs.getCostUsd()
-              yield {
-                type: 'usage',
-                inputTokens: chunk.usage.inputTokens,
-                outputTokens: chunk.usage.outputTokens,
-                costUsd,
-              }
-              if (maxBudgetUsd !== undefined && costUsd >= maxBudgetUsd) {
-                this.store.appendEvents(createBudgetExceededEvent(costUsd, maxBudgetUsd))
-                yield { type: 'budget_exceeded', costUsd, limitUsd: maxBudgetUsd }
-                exitStatus = 'budget_exceeded'
-                break
-              }
-            } else if (chunk.type === 'stop_reason' && chunk.stopReason === 'max_tokens') {
-              hitMaxOutputTokens = true
-            }
-
-            // 交错：有工具事件就先 yield
-            for (const item of drainQueue()) {
-              if ('event' in item) yield item.event
-              if ('done' in item) {
-                inFlight.get(item.toolCallId)?.resolve(item.result)
-                inFlight.delete(item.toolCallId)
-              }
+          for await (const ev of this.streamOneTurn(turns, maxBudgetUsd, events)) {
+            if ('type' in ev && ev.type === '__llm_result__') {
+              fullText = ev.fullText
+              thinkingText = ev.thinkingText
+              toolCalls.push(...ev.toolCalls)
+              hitMaxOutputTokens = ev.hitMaxOutputTokens
+            } else if (ev.type === 'error') {
+              yield ev
+              exitStatus = 'error'
+              llmError = true
+            } else if (ev.type === 'interrupted') {
+              yield ev
+              exitStatus = 'error'
+              llmError = true
+            } else if (ev.type === 'usage') {
+              if (ev.inputTokens > 0) lastKnownInputTokens = ev.inputTokens
+              yield ev
+            } else if (ev.type === 'budget_exceeded') {
+              exitStatus = 'budget_exceeded'
+              yield ev
+              break
             }
           }
-          const llmUsage = this.costs.getUsage()
-          this.store.appendEvents(createLlmEndEvent(
-            this.currentRequestId ?? undefined, Date.now() - llmStartTime,
-            llmUsage.inputTokens, llmUsage.outputTokens,
-          ))
+
+          // drain RuntimeBuffer
+          for (const ev of drainRuntimeBuffer()) yield ev
+
+          // ★ 关键：对流式期间收到的 tool_call 立即启动工具执行
+          for (const tc of toolCalls) {
+            if (inFlight.has(tc.id)) continue
+            let resolveRef: (block?: ContentBlock) => void = () => {}
+            inFlight.set(tc.id, { resolve: (block) => resolveRef(block) })
+            void (async () => {
+              let resultBlock: ContentBlock | undefined
+              try {
+                const result = await this.toolExecutor.execute(tc)
+                resultBlock = result.block
+                // 立即持久化工具结果到 messages.jsonl，防止崩溃/中止导致数据丢失
+                if (resultBlock?.type === 'tool_result') {
+                  this.store.appendMessage({
+                    role: 'tool',
+                    tool_call_id: tc.id,
+                    name: tc.name,
+                    content: resultBlock.content,
+                    is_error: resultBlock.is_error === true,
+                    timestamp: Date.now(),
+                    requestId,
+                  })
+                }
+              } catch { /* 工具执行异常 */ }
+              pushQueue({ done: true, toolCallId: tc.id, result: resultBlock })
+            })()
+          }
+
+          // 交错 yield：有工具事件就先 yield
+          for (const item of drainQueue()) {
+            if ('event' in item) yield item.event
+            if ('done' in item) {
+              inFlight.get(item.toolCallId)?.resolve(item.result)
+              inFlight.delete(item.toolCallId)
+            }
+          }
+
+          // drain RuntimeBuffer（工具执行产生的事件）
+          for (const ev of drainRuntimeBuffer()) yield ev
+
         } catch (err) {
           const errMsg = String(err)
           log.error('LLM 请求失败', { turn: turns, error: errMsg })
-          this.store.appendEvents(createErrorEvent(`LLM 请求失败: ${errMsg}`, !this.abortController.signal.aborted, this.currentRequestId ?? undefined))
-          yield { type: 'interrupted', reason: 'error', message: `LLM 请求失败: ${errMsg}` }
-          yield { type: 'error', message: errMsg }
+          events.error(`LLM 请求失败: ${errMsg}`, !this.abortController.signal.aborted)
+          events.interrupted('error', `LLM 请求失败: ${errMsg}`)
+          for (const ev of drainRuntimeBuffer()) yield ev
           if (!this.abortController.signal.aborted) {
             const recoveryMsg = `[系统提示] 上次执行因错误中断: ${errMsg}。请从中断处继续完成任务。`
             this.store.appendMessage({
               role: 'user', content: recoveryMsg,
-              timestamp: Date.now(), requestId: this.currentRequestId ?? undefined,
+              timestamp: Date.now(), requestId,
             })
-            this.store.appendEvents(createUserEvent(recoveryMsg, this.currentRequestId ?? undefined))
+            events.userMessage(recoveryMsg, 'user')
           }
           llmError = true
         }
         if (llmError || exitStatus === 'budget_exceeded') break
 
-        // LLM 流结束后，立即写入 assistant_message（确保 tool_result 之前有 assistant_message）
+        // LLM 流结束后，写入 assistant_message
         const cleanText = fullText
           .replace(HEARTBEAT_DONE, '')
           .replace(HEARTBEAT_CONTINUE, '')
           .trim()
 
-        // 写入 assistant ChatMessage 到主存储（文本 + 工具调用合并为一条消息）
         if (cleanText || thinkingText || toolCalls.length > 0) {
           const assistantMsg: ChatMessage = {
             role: 'assistant',
@@ -1612,24 +740,22 @@ ${contentToSummarize}
               ? toolCalls.map(tc => ({ id: tc.id, name: tc.name, input: tc.input }))
               : undefined,
             timestamp: Date.now(),
-            requestId: this.currentRequestId ?? undefined,
+            requestId,
           }
           this.store.appendMessage(assistantMsg)
-          modelLog.write('[sendStreaming-v2] 写入 assistant ChatMessage', {
+          modelLog.write('[run] 写入 assistant ChatMessage', {
             textLen: cleanText.length, thinkingLen: thinkingText.length, toolCount: toolCalls.length,
           })
         }
 
-        // 写入 assistant 事件到旁路日志（仅可观测性用）
-        this.store.appendEvents(createAssistantEvent(
+        events.assistantMessage(
           cleanText,
-          this.currentRequestId ?? undefined,
           thinkingText || undefined,
           toolCalls.length > 0 ? toolCalls.length : undefined,
-        ))
+        )
 
         if (!cleanText && !thinkingText && toolCalls.length === 0) {
-          modelLog.write('[sendStreaming-v2] 跳过写入（无内容）', { fullTextLen: fullText.length, cleanTextLen: cleanText.length, thinkingLen: thinkingText.length })
+          modelLog.write('[run] 跳过写入（无内容）', { fullTextLen: fullText.length, cleanTextLen: cleanText.length, thinkingLen: thinkingText.length })
         }
 
         if (hasImageBlocks && turns === 1) {
@@ -1638,89 +764,87 @@ ${contentToSummarize}
 
         // 无工具调用：心跳判定
         if (toolCalls.length === 0) {
-          const heartbeat = this.resolveHeartbeat(fullText, hitMaxOutputTokens, maxOutputTokensRecoveryCount, turns, maxTurns)
+          const heartbeat = this.resolveHeartbeat(fullText, hitMaxOutputTokens, maxOutputTokensRecoveryCount, turns, maxTurns, events)
           maxOutputTokensRecoveryCount = heartbeat.newRecoveryCount
+          // drain remaining events
+          for (const ev of drainRuntimeBuffer()) yield ev
           if (heartbeat.action === 'continue') continue
           break
         }
 
         // ★ 等待所有后台工具完成，yield 剩余事件
         while (inFlight.size > 0) {
-          await waitQueue()
+          // 竞态保护：队列中可能已有结果（pushQueue 在 waitQueue 之前被调用）
+          if (eventQueue.length === 0) await waitQueue()
           for (const item of drainQueue()) {
             if ('event' in item) yield item.event
             if ('done' in item) {
-              // 写入 tool_result 到 store
-              if (item.result) {
-                const resultContent = item.result.type === 'tool_result' ? (item.result as { content: string }).content : ''
-                const isError = item.result.type === 'tool_result' ? ((item.result as { is_error?: boolean }).is_error === true) : false
-                this.store.appendMessage({
-                  role: 'tool',
-                  tool_call_id: item.toolCallId,
-                  name: toolCalls.find(tc => tc.id === item.toolCallId)?.name ?? 'unknown',
-                  content: resultContent,
-                  is_error: isError,
-                  timestamp: Date.now(),
-                  requestId: this.currentRequestId ?? undefined,
-                })
-              }
+              // 工具结果已在回调中立即持久化（appendMessage），此处仅清理 inFlight
               inFlight.delete(item.toolCallId)
             }
           }
+          // drain RuntimeBuffer
+          for (const ev of drainRuntimeBuffer()) yield ev
         }
         if (this.abortController.signal.aborted) break
       }
 
+      // 达到最大轮次
       if (turns >= maxTurns) {
         exitStatus = 'turn_limit'
-        this.store.appendEvents(createTurnLimitEvent(turns, maxTurns))
-        yield { type: 'interrupted', reason: 'turn_limit', message: `已达到最大执行轮次 ${maxTurns}，任务可能未完成。发送"继续"可恢复执行。` }
-        yield { type: 'turn_limit', turns }
+        events.turnLimit(turns, maxTurns)
+        events.interrupted('turn_limit', `已达到最大执行轮次 ${maxTurns}，任务可能未完成。发送"继续"可恢复执行。`)
+        for (const ev of drainRuntimeBuffer()) yield ev
         const turnLimitMsg = `[系统提示] 任务因达到最大轮次限制（${maxTurns} 轮）而中断，尚未完成。请继续执行剩余工作。`
-        this.store.appendMessage({ role: 'user', content: turnLimitMsg, timestamp: Date.now(), requestId: this.currentRequestId ?? undefined })
-        this.store.appendEvents(createUserEvent(turnLimitMsg, this.currentRequestId ?? undefined))
+        this.store.appendMessage({ role: 'user', content: turnLimitMsg, timestamp: Date.now(), requestId })
+        events.userMessage(turnLimitMsg, 'user')
       }
+
+      // 被用户中止
       if (this.abortController.signal.aborted) {
         exitStatus = 'aborted'
-        yield { type: 'interrupted', reason: 'aborted', message: '任务已被中止。发送"继续"可恢复执行。' }
+        events.interrupted('user_abort', '任务已被中止。发送"继续"可恢复执行。')
+        for (const ev of drainRuntimeBuffer()) yield ev
         const abortMsg = '[系统提示] 任务被用户中止。如需继续，请发送指令。'
-        this.store.appendMessage({ role: 'user', content: abortMsg, timestamp: Date.now(), requestId: this.currentRequestId ?? undefined })
-        this.store.appendEvents(createUserEvent(abortMsg, this.currentRequestId ?? undefined))
+        this.store.appendMessage({ role: 'user', content: abortMsg, timestamp: Date.now(), requestId })
+        events.userMessage(abortMsg, 'user')
       }
     } catch (err) {
       exitStatus = 'error'
       errorMessage = String(err)
-      this.store.appendEvents(createErrorEvent(errorMessage, true, this.currentRequestId ?? undefined))
-      yield { type: 'error', message: `消息处理失败: ${errorMessage}` }
+      events.error(`消息处理失败: ${errorMessage}`)
+      for (const ev of drainRuntimeBuffer()) yield ev
     } finally {
+      // 写入请求完成事件
       const usageAfter = this.costs.getUsage()
-      const statusMap: Record<string, 'ok' | 'err' | 'turn' | 'budget' | 'abort'> = {
+      const statusMap: Record<string, string> = {
         completed: 'ok', permission_denied: 'err', turn_limit: 'turn',
         budget_exceeded: 'budget', aborted: 'abort', error: 'err',
       }
-      this.store.appendEvents(createReqEndEvent(
-        this.currentRequestId ?? undefined,
+      events.requestEnded(
         statusMap[exitStatus] ?? 'err',
         turns,
-        this.totalToolCalls,
+        this.toolExecutor.getTotalToolCalls(),
         Date.now() - requestStartTime,
         usageAfter.inputTokens - usageBefore.inputTokens,
         usageAfter.outputTokens - usageBefore.outputTokens,
         this.costs.getCostUsd() - costBefore,
-      ))
+      )
 
       this.running = false
       if (this.onAfterSend) {
         try { this.onAfterSend() } catch { /* 钩子失败不阻断 */ }
       }
-      modelLog.write('[sendStreaming-v2] yield done', { exitStatus, totalToolCalls: this.totalToolCalls })
-      yield { type: 'done' }
+      modelLog.write('[run] yield done', { exitStatus, totalToolCalls: this.toolExecutor.getTotalToolCalls() })
+      events.done()
+      for (const ev of drainRuntimeBuffer()) yield ev
     }
   }
 
+  // ── 公共方法 ─────────────────────────────────────────────────────
+
   abort() {
     this.abortController.abort()
-    // 强制释放锁，防止 generator 未被消费时 running 永久为 true
     this.running = false
   }
 
@@ -1728,24 +852,17 @@ ${contentToSummarize}
     return this.running
   }
 
-  /**
-   * 会话内批准权限（用于 CLI UI 的"始终允许"选项）
-   */
   approveSessionPermission(toolName: string, ruleContent?: string) {
     this.config.permissions.approveSession(toolName, ruleContent)
   }
 
   clearHistory() {
     this.store.clear()
-    // 清空历史时同步重置任务快照，确保新会话不会继承旧任务状态
     this.activeTodoSnapshot = null
-    // 重置压缩摘要，避免下次 autocompact 引用已不存在的历史
     this.previousSummary = null
-    // 清除文件读取缓存，防止跨会话脏读
     clearFileCache()
   }
 
-  /** 返回消息历史（仅 user/assistant 消息，供测试和外部查询） */
   getHistory(): Message[] {
     const messages = this.store.getMessages()
     const msgs: Message[] = []
@@ -1764,10 +881,8 @@ ${contentToSummarize}
     return msgs
   }
 
-  /** 替换消息历史（清空后写入新消息） */
   setHistory(messages: Message[]) {
     this.store.clear()
-    // 重置任务快照和压缩摘要，避免新会话继承旧状态
     this.activeTodoSnapshot = null
     this.previousSummary = null
     for (const msg of messages) {
@@ -1782,32 +897,28 @@ ${contentToSummarize}
     }
   }
 
-  /** 返回前端展示用的 DisplayMessage[]（从 ChatMessage 投影，含工具卡片） */
   getDisplayMessages(): import('./ConversationStore.js').DisplayMessage[] {
     return projectForDisplay(this.store.getMessages())
   }
 
-  private chatMode = false
   setChatMode(on: boolean) { this.chatMode = on }
   setSystemPrompt(prompt: string[]) { this.config.systemPrompt = prompt }
   setProvider(provider: LLMProvider) { this.config.provider = provider }
   getTools(): readonly ToolDef[] { return this.config.registry.getAll() }
 
-  compactHistory(summary: string) {
-    // 替换主存储为压缩摘要（一条 user 消息 + 空 assistant 消息保持对话流）
+  compactHistory(summary: string, events?: EventBridge) {
     this.store.replaceMessages([
       { role: 'user', content: `[上下文压缩摘要]\n${summary}`, timestamp: Date.now(), requestId: this.currentRequestId ?? undefined },
       { role: 'assistant', content: '', timestamp: Date.now(), requestId: this.currentRequestId ?? undefined },
     ])
-    // 写入旁路日志事件
-    const compactEv = createCompactEvent(summary, this.currentRequestId ?? undefined)
-    const assistantEv = createAssistantEvent('', this.currentRequestId ?? undefined)
-    this.store.replaceEvents([compactEv, assistantEv])
-    // 压缩后重新从文件读取快照确保状态同步
+    if (events) {
+      events.sessionCompacted(summary)
+      events.assistantMessage('')
+    }
     try {
       this.activeTodoSnapshot = loadTodos()
     } catch {
-      // 读取失败保持原快照，不重置为 null，避免压缩后丢失任务状态
+      // 读取失败保持原快照
     }
   }
 

@@ -256,6 +256,8 @@ export class PermissionManager {
         const contentKey = req.ruleContent ? `${req.toolName}::${req.ruleContent}` : null
         if (contentKey && this.sessionApproved.has(contentKey)) return true
         if (this.sessionApproved.has(req.toolName)) return true
+        // planSafe 工具（todo/plan 等管理类工具）自动允许，无需用户确认
+        if (req.planSafe) return true
         return this.onAsk(req)
       }
     }

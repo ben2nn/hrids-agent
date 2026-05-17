@@ -148,7 +148,7 @@ export function createAgentTool(): ToolDef<typeof agentSchema> {
         const subSessionId = `ephemeral-${input.profile ?? 'sub'}-${Date.now()}-${randomBytes(4).toString('hex')}`
         await runWithCwd(subCwd, () =>
           runWithSession(subSessionId, async () => {
-            for await (const event of subEngine.send(input.prompt)) {
+            for await (const event of subEngine.run(input.prompt)) {
               if (event.type === 'text_delta') result += event.delta
               else if (event.type === 'error') { hasError = true; result += `\n错误: ${event.message}` }
             }

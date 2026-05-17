@@ -15,7 +15,8 @@ import { TeamManager } from '../core/coordinator/TeamManager.js'
 import { buildSystemContext, getSessionWorkDirPath } from '../core/ContextBuilder.js'
 import { getCoordinatorSystemPrompt, classifyTask } from '../core/coordinator/coordinatorPrompt.js'
 import { loadSessionMeta, saveSessionMeta, generateSessionId, archiveSession } from '../core/SessionStore.js'
-import { ConversationStore, createUserEvent, createAssistantEvent } from '../core/ConversationStore.js'
+import { ConversationStore } from '../core/ConversationStore.js'
+import { createUserMessageEvent } from '../core/KernelEvent.js'
 import { loadConfig, getConfigDir } from '../core/Config.js'
 import { runWithCwd } from '../core/cwd.js'
 import { runWithSession } from '../core/sessionContext.js'
@@ -458,7 +459,7 @@ export class SessionManager {
         timestamp: Date.now(), requestId, trigger: 'cron', cronDescription: cronJob.description,
       })
       session.engine.store.appendEvents(
-        createUserEvent(cronContent, requestId, 'cron', cronJob.description),
+        createUserMessageEvent(cronContent, requestId, 'cron', cronJob.description),
       )
       saveSessionMeta(sessionId, { model: session.info.model, workDir: session.info.cwd, messageCount: session.engine.store.getMessageCount() })
 
@@ -788,7 +789,7 @@ ${writeTools.join('、')}
     const msgWithCtx = userMsg
 
     // 保存 generator 引用，以便在异常时显式关闭，确保 QueryEngine 内部 finally 执行
-    const gen = session.engine.send(msgWithCtx)
+    const gen = session.engine.run(msgWithCtx)
     let hitTurnLimit = false
     try {
       for await (const ev of gen) {
@@ -815,7 +816,7 @@ ${writeTools.join('、')}
       }
     } catch (err) {
       log.error('runMessage 事件循环异常', { sessionId, error: String(err) })
-      // 显式关闭 generator，触发 QueryEngine.send() 的 finally 块，释放 running 锁
+      // 显式关闭 generator，触发 QueryEngine.run() 的 finally 块，释放 running 锁
       await gen.return(undefined)
       throw err
     } finally {
@@ -1006,9 +1007,9 @@ ${writeTools.join('、')}
 
 // ── QueryEngine StreamEvent → 前端 WebSocket 协议转换 ──────────────────────
 // QueryEngine 使用内部字段名（id/name/line/costUsd），前端期望不同的字段名
-import type { StreamEvent } from '../core/QueryEngine.js'
+import type { RuntimeEvent } from '../core/RuntimeEvent.js'
 
-function toClientMessage(ev: StreamEvent, requestId: string, model = ''): object | null {
+function toClientMessage(ev: RuntimeEvent, requestId: string, model = ''): object | null {
   switch (ev.type) {
     case 'text_delta':
       return { type: 'text_delta', requestId, delta: ev.delta }

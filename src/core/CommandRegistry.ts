@@ -23,8 +23,8 @@ export interface CommandContext {
   getMode(): string
   sessionId: string
   // 会话管理
-  listSessions(): import('../core/SessionStore.js').SessionMeta[]
-  listArchives(): import('../core/SessionStore.js').CompactArchive[]  // 当前会话的归档段列表
+  listSessions(): import('./SessionStore.js').SessionMeta[]
+  listArchives(): import('./SessionStore.js').CompactArchive[]  // 当前会话的归档段列表
   newSession(): void        // 强制创建新会话
   switchSession(id: string): boolean  // 切换到指定会话，返回是否成功
   // 配置信息

@@ -260,7 +260,7 @@ export class AgentPool {
       await runWithCwd(parentCwd, () =>
         runWithAgentName(task.name, () =>
           runWithSession(subSessionId, async () => {
-            for await (const ev of engine.send(task.prompt)) {
+            for await (const ev of engine.run(task.prompt)) {
               if (ev.type === 'text_delta') result += ev.delta
               else if (ev.type === 'error') {
                 task.status = 'failed'

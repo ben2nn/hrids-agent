@@ -42,9 +42,16 @@ function toOAIMessages(messages: ChatMessage[], systemPrompt: string[]): OAIMess
   const result: OAIMessage[] = [{ role: 'system', content: systemContent }]
 
   for (const msg of messages) {
-    if (msg.role === 'user' || msg.role === 'assistant') {
-      if (typeof msg.content === 'string') {
-        result.push({ role: msg.role, content: msg.content })
+    if (msg.role === 'tool') {
+      // 处理独立的 tool 结果消息（QueryEngine 存储的格式）
+      result.push({
+        role: 'tool',
+        content: typeof msg.content === 'string' ? msg.content : '',
+        tool_call_id: msg.tool_call_id ?? '',
+      })
+    } else if (msg.role === 'user' || msg.role === 'assistant') {
+      if (typeof msg.content === 'string' || msg.content == null) {
+        result.push({ role: msg.role, content: msg.content ?? '' })
       } else {
         // 处理包含工具调用的 assistant 消息
         const textParts = (msg.content as Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>)
@@ -151,15 +158,15 @@ export class OpenAIProvider implements LLMProvider {
 
     // 原生联网搜索配置
     const webSearchMode = this.config.webSearchMode
-    if (this.config.nativeWebSearch && webSearchMode) {
-      if (webSearchMode.type === 'tool') {
-        // 通过工具方式：添加指定类型的工具
-        oaiTools.push({ type: webSearchMode.toolType } as unknown as OAITool)
+    if (this.config.nativeWebSearch && !tools.some(t => t.name === 'web_search')) {
+      if (webSearchMode) {
+        if (webSearchMode.type === 'tool') {
+          oaiTools.push({ type: webSearchMode.toolType } as unknown as OAITool)
+        }
+        // 'param' 类型在 body 构建后处理
+      } else {
+        oaiTools.push({ type: 'web_search' } as unknown as OAITool)
       }
-      // 'param' 类型在 body 构建后处理
-    } else if (this.config.nativeWebSearch) {
-      // 默认使用 web_search 工具
-      oaiTools.push({ type: 'web_search' } as unknown as OAITool)
     }
 
     const body: Record<string, unknown> = {

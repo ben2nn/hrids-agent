@@ -9,6 +9,101 @@ import { STATIC_SECTION_COUNT } from '../coordinator/coordinatorPrompt.js'
 
 const log = logger.child({ component: 'anthropic-provider' })
 
+/**
+ * 将内部 ChatMessage[]（OpenAI 风格）转换为 Anthropic API 格式。
+ *
+ * 内部格式：
+ * - 工具调用：assistant 消息的 tool_calls 数组
+ * - 工具结果：独立的 role: 'tool' 消息
+ *
+ * Anthropic 格式：
+ * - 工具调用：assistant 消息中的 tool_use content blocks
+ * - 工具结果：user 消息中的 tool_result content blocks
+ */
+function toAnthropicMessages(messages: ChatMessage[]): Anthropic.MessageParam[] {
+  const result: Anthropic.MessageParam[] = []
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]
+
+    if (msg.role === 'user' || msg.role === 'system') {
+      result.push({
+        role: 'user',
+        content: msg.content as Anthropic.MessageParam['content'],
+      })
+    } else if (msg.role === 'assistant') {
+      // 构建 assistant 消息的 content blocks
+      const contentBlocks: Anthropic.ContentBlockParam[] = []
+
+      // 处理文本内容
+      if (typeof msg.content === 'string') {
+        if (msg.content) {
+          contentBlocks.push({ type: 'text', text: msg.content })
+        }
+      } else if (Array.isArray(msg.content)) {
+        // 已经是 content blocks 数组
+        for (const block of msg.content) {
+          if (block.type === 'text' && (block as { text?: string }).text) {
+            contentBlocks.push({ type: 'text', text: (block as { text: string }).text })
+          } else if (block.type === 'thinking' && (block as { thinking?: string }).thinking) {
+            contentBlocks.push({ type: 'thinking', thinking: (block as { thinking: string }).thinking } as Anthropic.ContentBlockParam)
+          }
+        }
+      }
+
+      // 将 tool_calls 转换为 tool_use content blocks
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        for (const tc of msg.tool_calls) {
+          contentBlocks.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.name,
+            input: tc.input,
+          })
+        }
+      }
+
+      // 如果没有任何内容，添加空文本块
+      if (contentBlocks.length === 0) {
+        contentBlocks.push({ type: 'text', text: '' })
+      }
+
+      result.push({
+        role: 'assistant',
+        content: contentBlocks,
+      })
+    } else if (msg.role === 'tool') {
+      // 将 tool 结果转换为 user 消息中的 tool_result content block
+      // 收集连续的 tool 消息
+      const toolResults: Anthropic.ToolResultBlockParam[] = [{
+        type: 'tool_result',
+        tool_use_id: msg.tool_call_id ?? '',
+        content: typeof msg.content === 'string' ? msg.content : '',
+        is_error: (msg as { is_error?: boolean }).is_error,
+      }]
+
+      // 继续收集后续的 tool 消息
+      while (i + 1 < messages.length && messages[i + 1].role === 'tool') {
+        i++
+        const nextTool = messages[i]
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: nextTool.tool_call_id ?? '',
+          content: typeof nextTool.content === 'string' ? nextTool.content : '',
+          is_error: (nextTool as { is_error?: boolean }).is_error,
+        })
+      }
+
+      result.push({
+        role: 'user',
+        content: toolResults,
+      })
+    }
+  }
+
+  return result
+}
+
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
   readonly model: string
@@ -36,10 +131,7 @@ export class AnthropicProvider implements LLMProvider {
     maxTokens: number,
     signal?: AbortSignal,
   ): AsyncGenerator<StreamChunk> {
-    const anthropicMessages = messages.map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content as Anthropic.MessageParam['content'],
-    }))
+    const anthropicMessages = toAnthropicMessages(messages)
 
     // 将 string[] 转为 Anthropic system blocks，精确控制缓存边界：
     //
@@ -60,7 +152,7 @@ export class AnthropicProvider implements LLMProvider {
       ? tools.map(toAnthropicTool) as Anthropic.Tool[]
       : []
     // 原生联网搜索：Claude 内部搜索并返回结果
-    if (this.nativeWebSearch) {
+    if (this.nativeWebSearch && !tools.some(t => t.name === 'web_search')) {
       const toolType = this.webSearchMode?.type === 'tool'
         ? this.webSearchMode.toolType
         : 'web_search_20250305'

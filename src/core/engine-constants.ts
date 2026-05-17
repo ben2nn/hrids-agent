@@ -1,0 +1,11 @@
+export const DEFAULT_MAX_TOKENS = 8096
+export const DEFAULT_MAX_TURNS = 50
+export const DEFAULT_AUTO_COMPACT_THRESHOLD = 100000
+export const ABSOLUTE_MAX_MULTIPLIER = 3
+export const DEFAULT_TOOL_TIMEOUT_MS = 60 * 60 * 1000
+export const TOOL_TIMEOUT_MARGIN_MS = 5000
+export const TOOL_LOG_POLL_MS = 30
+export const BUDGET_WARN_RATIO = 0.8
+export const STORM_WINDOW_SIZE = 10
+export const TODO_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset', 'todo_read'])
+export const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3

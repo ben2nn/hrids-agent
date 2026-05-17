@@ -9,6 +9,7 @@
 import { randomUUID } from 'crypto'
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from 'fs'
 import { join } from 'path'
+import type { KernelEvent } from './KernelEvent.js'
 
 // ══════════════════════════════════════════════════════════════════
 // 主存储类型：ChatMessage（与 LLM API 格式一致）
@@ -596,7 +597,7 @@ export interface DisplayMessage {
 // ══════════════════════════════════════════════════════════════════
 
 const MSG_SCHEMA = 'hrids-messages/v1'
-const EVT_SCHEMA = 'hrids-events/v2'
+const EVT_SCHEMA = 'hrids-events/v1'
 const MSG_MARKER = JSON.stringify({ $schema: MSG_SCHEMA }) + '\n'
 const EVT_MARKER = JSON.stringify({ $schema: EVT_SCHEMA }) + '\n'
 
@@ -673,7 +674,7 @@ class JsonlEventStorage {
     if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true })
   }
 
-  append(events: ConversationEvent[]): void {
+  append(events: KernelEvent[]): void {
     this.ensureDir()
     const lines = events.map(e => JSON.stringify(e)).join('\n') + '\n'
     if (!existsSync(this.path)) {
@@ -683,12 +684,12 @@ class JsonlEventStorage {
     appendFileSync(this.path, lines, 'utf-8')
   }
 
-  load(): ConversationEvent[] {
+  load(): KernelEvent[] {
     if (!existsSync(this.path)) return []
     const content = readFileSync(this.path, 'utf-8')
     if (!content.trim()) return []
     const lines = content.split('\n')
-    const events: ConversationEvent[] = []
+    const events: KernelEvent[] = []
     let startIdx = 0
     const firstLine = lines[0]?.trim()
     if (firstLine) {
@@ -701,7 +702,7 @@ class JsonlEventStorage {
       const line = lines[i].trim()
       if (!line) continue
       try {
-        events.push(JSON.parse(line) as ConversationEvent)
+        events.push(JSON.parse(line) as KernelEvent)
       } catch {
         process.stderr.write(`[events.jsonl] 第 ${i + 1} 行解析失败，已跳过\n`)
       }
@@ -709,7 +710,7 @@ class JsonlEventStorage {
     return events
   }
 
-  rewrite(events: ConversationEvent[]): void {
+  rewrite(events: KernelEvent[]): void {
     this.ensureDir()
     const tmp = this.path + '.tmp'
     const body = events.map(e => JSON.stringify(e)).join('\n') + '\n'
@@ -728,8 +729,8 @@ export class ConversationStore {
   private msgStorage: JsonlMessageStorage | null = null
   private savedMsgCount = 0
 
-  // 旁路日志：ConversationEvent[]（审计 + Gateway）
-  private events: ConversationEvent[] = []
+  // 旁路日志：KernelEvent[]（审计 + Gateway）
+  private events: KernelEvent[] = []
   private evtStorage: JsonlEventStorage | null = null
   private savedEvtCount = 0
 
@@ -765,14 +766,14 @@ export class ConversationStore {
   // ── 事件追加（旁路日志）────────────────────────────────────────
 
   /** 追加事件到旁路日志 */
-  appendEvents(...events: ConversationEvent[]): void {
+  appendEvents(...events: KernelEvent[]): void {
     if (events.length === 0) return
     this.events.push(...events)
     this.saveEvents()
   }
 
   /** 追加事件但不持久化 */
-  appendEventsNoSave(...events: ConversationEvent[]): void {
+  appendEventsNoSave(...events: KernelEvent[]): void {
     if (events.length === 0) return
     const BATCH = 5000
     for (let i = 0; i < events.length; i += BATCH) {
@@ -796,7 +797,7 @@ export class ConversationStore {
   }
 
   /** 替换整个事件日志 */
-  replaceEvents(events: ConversationEvent[]): void {
+  replaceEvents(events: KernelEvent[]): void {
     if (!Array.isArray(events)) {
       process.stderr.write('[ConversationStore] replaceEvents 收到非数组参数，已忽略\n')
       return
@@ -814,7 +815,7 @@ export class ConversationStore {
   }
 
   /** 获取完整事件日志（只读） */
-  getEventLog(): readonly ConversationEvent[] {
+  getEventLog(): readonly KernelEvent[] {
     return this.events
   }
 

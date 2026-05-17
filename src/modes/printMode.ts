@@ -24,7 +24,7 @@ export async function runPrintMode(
   let totalChars = 0
   let truncated = false
 
-  for await (const ev of engine.send(opts.message)) {
+  for await (const ev of engine.run(opts.message)) {
     if (ev.type === 'text_delta') {
       if (truncated) continue
       const remaining = maxChars - totalChars

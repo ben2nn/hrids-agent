@@ -8,7 +8,7 @@ import { logger } from './logger.js'
 import { getConfigDir } from './Config.js'
 import type { QueryEngine } from './QueryEngine.js'
 import { projectForDisplay } from './projections.js'
-import { createMemoryWrittenEvent } from './ConversationStore.js'
+import { createMemoryWrittenEvent } from './KernelEvent.js'
 import type { LLMProvider } from './providers/types.js'
 
 const log = logger.child({ component: 'post-run-hooks' })
@@ -46,7 +46,7 @@ export async function autoExtractMemories(
       provider: condense ? provider : undefined,
       sessionId,
     })
-    engine.store.appendEvents(createMemoryWrittenEvent(undefined, 'project', `session:${sessionId}`))
+    engine.store.appendEvents(createMemoryWrittenEvent('project', `session:${sessionId}`))
     if (condense) log.info('记忆总结：LLM 提炼完成', { sessionId, caller: 'memory-pipeline' })
   } catch {
     // 静默失败，不影响主流程

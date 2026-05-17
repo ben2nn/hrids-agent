@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React from 'react'
 import { Box, Text } from 'ink'
 import { TONE, FG, STRIPE_BORDER } from '../terminal/theme.js'
 
@@ -12,7 +12,6 @@ interface ToolUseCardProps {
   output?: string
   status: ToolStatus
   elapsed?: number  // 毫秒
-  expanded?: boolean
 }
 
 // ─── 状态图标 ──────────────────────────────────────────────────────────────
@@ -35,8 +34,7 @@ const STATUS_COLOR: Record<ToolStatus, string> = {
 
 // ─── 组件 ─────────────────────────────────────────────────────────────────
 
-function ToolUseCardImpl({ name, input, output, status, elapsed, expanded = false }: ToolUseCardProps) {
-  const [isExpanded, setIsExpanded] = useState(expanded)
+function ToolUseCardImpl({ name, input, output, status, elapsed }: ToolUseCardProps) {
   const glyph = STATUS_GLYPH[status]
   const color = STATUS_COLOR[status]
   const isRunning = status === 'running'
@@ -71,39 +69,20 @@ function ToolUseCardImpl({ name, input, output, status, elapsed, expanded = fals
         )}
       </Box>
 
-      {/* 输入摘要（折叠时只显示一行） */}
+      {/* 输入 */}
       {input && (
         <Box paddingLeft={2}>
-          <Text color={FG.sub} dimColor>
-            {isExpanded
-              ? input
-              : input.length > 80
-                ? input.slice(0, 80) + '...'
-                : input
-            }
-          </Text>
+          <Text color={FG.sub} dimColor>{input}</Text>
         </Box>
       )}
 
-      {/* 输出（展开时显示） */}
-      {isExpanded && output && (
+      {/* 输出 */}
+      {output && (
         <Box paddingLeft={2} flexDirection="column" marginTop={1}>
           <Text color={FG.faint}>─── 输出 ───</Text>
-          {output.split('\n').slice(0, 20).map((line, i) => (
+          {output.split('\n').map((line, i) => (
             <Text key={i} color={FG.body}>{line}</Text>
           ))}
-          {output.split('\n').length > 20 && (
-            <Text color={FG.faint}>... ({output.split('\n').length} 行)</Text>
-          )}
-        </Box>
-      )}
-
-      {/* 展开/折叠提示 */}
-      {(input || output) && (
-        <Box paddingLeft={2}>
-          <Text color={FG.faint} dimColor>
-            {isExpanded ? '[-] 折叠' : '[+] 展开'}
-          </Text>
         </Box>
       )}
     </Box>

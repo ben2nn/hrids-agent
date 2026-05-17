@@ -20,7 +20,7 @@ export async function runRunCommand(message: string, opts: RunCommandOpts): Prom
 
   await ctx.buildPromptForMessage(message)
 
-  for await (const ev of ctx.engine.send(message)) {
+  for await (const ev of ctx.engine.run(message)) {
     if (ev.type === 'text_delta') {
       if (truncated) continue
       const remaining = maxChars - totalChars

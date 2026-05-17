@@ -157,7 +157,7 @@ export async function runServerMode(
         if (result.type === 'inject') {
           try {
             await buildPromptForMessage(result.prompt)
-            for await (const ev of engine.send(result.prompt)) {
+            for await (const ev of engine.run(result.prompt)) {
               emit(ev)
             }
             const { title, lastUserMessage } = extractSessionTitle(engine.store.getMessages())
@@ -176,7 +176,7 @@ export async function runServerMode(
       const msgWithCtx = msg
       try {
         await buildPromptForMessage(msg)
-        for await (const ev of engine.send(msgWithCtx)) {
+        for await (const ev of engine.run(msgWithCtx)) {
           emit(ev)
         }
         saveSessionMeta(sessionId, { model, workDir: initialCwd, messageCount: engine.store.getMessageCount() })
