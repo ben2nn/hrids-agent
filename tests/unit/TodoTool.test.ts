@@ -11,7 +11,7 @@ import * as fc from 'fast-check'
 import { mkdirSync, rmSync, existsSync, writeFileSync, renameSync, readFileSync } from 'fs'
 import { resolve } from 'path'
 import { tmpdir } from 'os'
-import { assignIds, loadTodos } from '../../src/tools/TodoTool.js'
+import { assignIds, loadTodos, TodoUpdateTool } from '../../src/tools/TodoTool.js'
 import type { Todo } from '../../src/tools/TodoTool.js'
 
 // ─── 测试辅助：临时目录管理 ───────────────────────────────────────────────────
@@ -512,5 +512,99 @@ describe('TodoReadTool (todo_read)', () => {
     const output = await callRead()
 
     expect(output).toContain('[依赖: 1]')
+  })
+})
+
+// ─── todo_update 工具测试 ─────────────────────────────────────────────────
+
+describe('TodoUpdateTool', () => {
+  // 辅助：构建 Todo 对象
+  function makeTodo(overrides: Partial<Todo> & Pick<Todo, 'id' | 'content' | 'status' | 'priority'>): Todo {
+    return {
+      createdAt: Date.now(),
+      ...overrides,
+    }
+  }
+
+  // 辅助：调用 todo_update
+  async function callUpdate(input: { id: string; status: 'in_progress' | 'completed'; confirmations?: (boolean | string)[] }) {
+    return await TodoUpdateTool.execute(input as any)
+  }
+
+  // 使用临时目录隔离测试
+  let testCwd: string
+  let todosJsonPath: string
+
+  beforeEach(() => {
+    testCwd = resolve(tmpdir(), `todo-update-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(resolve(testCwd, 'tasks'), { recursive: true })
+    todosJsonPath = resolve(testCwd, 'tasks', 'todos.json')
+    globalThis.__testConfigDir = testCwd
+  })
+
+  afterEach(() => {
+    if (existsSync(testCwd)) {
+      rmSync(testCwd, { recursive: true, force: true })
+    }
+    delete (globalThis as any).__testConfigDir
+  })
+
+  function writeTodos(todos: Todo[]): void {
+    writeFileSync(todosJsonPath, JSON.stringify(todos, null, 2), 'utf-8')
+  }
+
+  function readTodos(): Todo[] {
+    return JSON.parse(readFileSync(todosJsonPath, 'utf-8')) as Todo[]
+  }
+
+  // ── 测试：布尔值 confirmations 正常工作 ──────────────────────────────────────
+
+  it('布尔值 confirmations 正常完成任务', async () => {
+    const todos: Todo[] = [
+      makeTodo({ id: '1', content: '任务 1', status: 'in_progress', priority: 'high', acceptance: ['标准 A', '标准 B'] }),
+      makeTodo({ id: '2', content: '任务 2', status: 'pending', priority: 'medium' }),
+    ]
+    writeTodos(todos)
+
+    const result = await callUpdate({ id: '1', status: 'completed', confirmations: [true, true] })
+
+    expect(result.type).toBe('success')
+    const after = readTodos()
+    expect(after[0]!.status).toBe('completed')
+    expect(after[1]!.status).toBe('in_progress')
+  })
+
+  // ── 测试：字符串 'true' confirmations 也能正常工作（LLM 常见行为）────────────
+
+  it("字符串 'true' confirmations 也能正常完成任务", async () => {
+    const todos: Todo[] = [
+      makeTodo({ id: '1', content: '任务 1', status: 'in_progress', priority: 'high', acceptance: ['标准 A', '标准 B'] }),
+      makeTodo({ id: '2', content: '任务 2', status: 'pending', priority: 'medium' }),
+    ]
+    writeTodos(todos)
+
+    // LLM 可能传入字符串 'true' 而非布尔值 true
+    const result = await callUpdate({ id: '1', status: 'completed', confirmations: ['true', 'true'] as any })
+
+    expect(result.type).toBe('success')
+    const after = readTodos()
+    expect(after[0]!.status).toBe('completed')
+    expect(after[1]!.status).toBe('in_progress')
+  })
+
+  // ── 测试：混合布尔值和字符串的 confirmations ─────────────────────────────────
+
+  it('混合布尔值和字符串的 confirmations 也能正常工作', async () => {
+    const todos: Todo[] = [
+      makeTodo({ id: '1', content: '任务 1', status: 'in_progress', priority: 'high', acceptance: ['标准 A', '标准 B', '标准 C'] }),
+      makeTodo({ id: '2', content: '任务 2', status: 'pending', priority: 'medium' }),
+    ]
+    writeTodos(todos)
+
+    const result = await callUpdate({ id: '1', status: 'completed', confirmations: [true, 'true', true] as any })
+
+    expect(result.type).toBe('success')
+    const after = readTodos()
+    expect(after[0]!.status).toBe('completed')
   })
 })

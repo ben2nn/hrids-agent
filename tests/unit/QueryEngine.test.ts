@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { z } from 'zod'
 import { QueryEngine } from '../../src/core/QueryEngine.js'
-import type { QueryEngineConfig, StreamEvent } from '../../src/core/QueryEngine.js'
+import type { QueryEngineConfig } from '../../src/core/QueryEngine.js'
+import type { RuntimeEvent } from '../../src/core/RuntimeEvent.js'
 import type { LLMProvider } from '../../src/core/providers/index.js'
 import type { ToolDef } from '../../src/core/Tool.js'
 import { PermissionManager } from '../../src/core/PermissionManager.js'
@@ -22,9 +23,9 @@ vi.mock('fs', async (importOriginal) => {
 // mock audit 日志
 vi.mock('../../src/core/audit.js', () => ({ auditLog: vi.fn() }))
 
-// 辅助：收集所有 StreamEvent
-async function collectEvents(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
-  const events: StreamEvent[] = []
+// 辅助：收集所有 RuntimeEvent
+async function collectEvents(gen: AsyncGenerator<RuntimeEvent>): Promise<RuntimeEvent[]> {
+  const events: RuntimeEvent[] = []
   for await (const e of gen) events.push(e)
   return events
 }
@@ -75,7 +76,7 @@ describe('QueryEngine', () => {
   describe('基础文本响应', () => {
     it('发送消息后收到 text_delta 和 done 事件', async () => {
       const engine = new QueryEngine(makeConfig(makeTextProvider('你好！')))
-      const events = await collectEvents(engine.send('hi'))
+      const events = await collectEvents(engine.run('hi'))
 
       const textEvents = events.filter(e => e.type === 'text_delta')
       expect(textEvents.length).toBeGreaterThan(0)
@@ -87,7 +88,7 @@ describe('QueryEngine', () => {
 
     it('收到 usage 事件并记录成本', async () => {
       const engine = new QueryEngine(makeConfig(makeTextProvider('ok')))
-      const events = await collectEvents(engine.send('test'))
+      const events = await collectEvents(engine.run('test'))
 
       const usageEvent = events.find(e => e.type === 'usage')
       expect(usageEvent).toBeDefined()
@@ -97,7 +98,7 @@ describe('QueryEngine', () => {
   describe('历史管理', () => {
     it('发送消息后历史中包含用户和助手消息', async () => {
       const engine = new QueryEngine(makeConfig(makeTextProvider('回复内容')))
-      await collectEvents(engine.send('用户消息'))
+      await collectEvents(engine.run('用户消息'))
 
       const history = engine.getHistory()
       expect(history.some(m => m.role === 'user')).toBe(true)
@@ -106,7 +107,7 @@ describe('QueryEngine', () => {
 
     it('clearHistory 清空历史', async () => {
       const engine = new QueryEngine(makeConfig(makeTextProvider('ok')))
-      await collectEvents(engine.send('test'))
+      await collectEvents(engine.run('test'))
       engine.clearHistory()
       expect(engine.getHistory()).toHaveLength(0)
     })
@@ -129,34 +130,35 @@ describe('QueryEngine', () => {
   })
 
   describe('并发保护', () => {
-    it('运行中再次 send 返回错误', async () => {
-      // 创建一个可控的 provider：用 deferred promise 控制何时结束
-      let finishStream!: () => void
-      const streamFinished = new Promise<void>(resolve => { finishStream = resolve })
-
+    it('运行中再次 run 返回错误', async () => {
+      // 创建一个慢速 provider，保持 running 状态
       const provider = {
         model: 'mock',
         async *stream() {
-          yield { type: 'text_delta', delta: 'start' }
-          await streamFinished
-          yield { type: 'text_delta', delta: 'end' }
+          await new Promise(r => setTimeout(r, 500))
+          yield { type: 'text_delta', delta: 'done' }
         },
       } as unknown as LLMProvider
 
       const engine = new QueryEngine(makeConfig(provider))
-      const gen1 = engine.send('task1')
+      const gen1 = engine.run('task1')
 
-      // 触发第一个 send 进入 running 状态（yield 'start' 后暂停在 await streamFinished）
-      await gen1.next()
+      // 不 await gen1.next()，让 generator 开始执行但不阻塞
+      // run() 会同步设置 this.running = true
+      const p = gen1.next()
+
+      // 等待 generator 进入 running 状态
+      await new Promise(r => setTimeout(r, 50))
       expect(engine.isRunning()).toBe(true)
 
       // 立即发第二个，应返回错误
-      const events = await collectEvents(engine.send('task2'))
+      const events = await collectEvents(engine.run('task2'))
       const errorEvent = events.find(e => e.type === 'error')
       expect(errorEvent).toBeDefined()
 
-      // 清理：让第一个生成器正常结束
-      finishStream()
+      // 清理
+      engine.abort()
+      await p.catch(() => {})
     })
   })
 
@@ -175,7 +177,7 @@ describe('QueryEngine', () => {
       } as unknown as LLMProvider
 
       const engine = new QueryEngine(makeConfig(provider))
-      const gen = engine.send('task')
+      const gen = engine.run('task')
 
       // 启动执行
       gen.next()
@@ -211,7 +213,7 @@ describe('QueryEngine', () => {
 
       const provider = makeToolProvider('echo_tool', { text: 'hello' }, '工具调用完成')
       const engine = new QueryEngine(makeConfig(provider, [mockTool as never]))
-      const events = await collectEvents(engine.send('调用工具'))
+      const events = await collectEvents(engine.run('调用工具'))
 
       expect(events.some(e => e.type === 'tool_start')).toBe(true)
       expect(events.some(e => e.type === 'tool_end')).toBe(true)
@@ -220,7 +222,7 @@ describe('QueryEngine', () => {
     it('工具不存在时 tool_end 包含错误', async () => {
       const provider = makeToolProvider('nonexistent_tool', {}, '完成')
       const engine = new QueryEngine(makeConfig(provider, []))
-      const events = await collectEvents(engine.send('调用不存在的工具'))
+      const events = await collectEvents(engine.run('调用不存在的工具'))
 
       const toolEnd = events.find(e => e.type === 'tool_end') as { type: 'tool_end'; result: { type: string } } | undefined
       expect(toolEnd?.result.type).toBe('error')
@@ -243,7 +245,7 @@ describe('QueryEngine', () => {
         ...makeConfig(provider, [writeTool as never]),
         permissions,
       })
-      const events = await collectEvents(engine.send('写文件'))
+      const events = await collectEvents(engine.run('写文件'))
 
       expect(events.some(e => e.type === 'permission_denied')).toBe(true)
     })
@@ -265,7 +267,7 @@ describe('QueryEngine', () => {
         ...makeConfig(expensiveProvider),
         maxBudgetUsd: 0.001, // 极低预算
       })
-      const events = await collectEvents(engine.send('test'))
+      const events = await collectEvents(engine.run('test'))
 
       expect(events.some(e => e.type === 'budget_exceeded')).toBe(true)
     })
@@ -279,7 +281,7 @@ describe('QueryEngine', () => {
 
     it('有历史时 token 估算大于 0', async () => {
       const engine = new QueryEngine(makeConfig(makeTextProvider('这是一段较长的回复内容')))
-      await collectEvents(engine.send('这是一条用户消息'))
+      await collectEvents(engine.run('这是一条用户消息'))
       expect(engine.getEstimatedTokens()).toBeGreaterThan(0)
     })
   })

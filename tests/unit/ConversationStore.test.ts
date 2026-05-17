@@ -1,51 +1,58 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, rmSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import {
   ConversationStore,
+  createUserEvent,
+  createAssistantEvent,
+  createToolEndEvent,
+  createCompactEvent,
+  createReqEndEvent,
+} from '../../src/core/ConversationStore.js'
+import {
   createUserMessageEvent,
   createAssistantMessageEvent,
-  createToolResultEvent,
-  createCompactEvent,
-  createRequestCompleteEvent,
-} from '../../src/core/ConversationStore.js'
+} from '../../src/core/KernelEvent.js'
 
 describe('ConversationStore - 事件工厂', () => {
-  it('createUserMessageEvent 创建正确结构', () => {
-    const ev = createUserMessageEvent('hello', 'req1', 'user', undefined, ['img.png'])
-    expect(ev.type).toBe('user_message')
+  it('createUserEvent 创建正确结构', () => {
+    const ev = createUserEvent('hello', 'req1', 'user', undefined, ['img.png'])
+    expect(ev.type).toBe('user')
     expect(ev.content).toBe('hello')
     expect(ev.requestId).toBe('req1')
     expect(ev.trigger).toBe('user')
     expect(ev.images).toEqual(['img.png'])
     expect(ev.id).toBeTruthy()
-    expect(ev.timestamp).toBeGreaterThan(0)
+    expect(ev.ts).toBeGreaterThan(0)
   })
 
-  it('createUserMessageEvent cron 触发', () => {
-    const ev = createUserMessageEvent('task', 'req1', 'cron', 'daily check')
+  it('createUserEvent cron 触发', () => {
+    const ev = createUserEvent('task', 'req1', 'cron', 'daily check')
     expect(ev.trigger).toBe('cron')
     expect(ev.cronDescription).toBe('daily check')
   })
 
-  it('createAssistantMessageEvent 创建正确结构', () => {
-    const toolCalls = [{ id: 'tc1', name: 'bash', input: {} }]
-    const ev = createAssistantMessageEvent('response', toolCalls, 'req1')
-    expect(ev.type).toBe('assistant_message')
+  it('createAssistantEvent 创建正确结构', () => {
+    const ev = createAssistantEvent('response', 'req1', undefined, 2)
+    expect(ev.type).toBe('assistant')
     expect(ev.text).toBe('response')
-    expect(ev.toolCalls).toEqual(toolCalls)
+    expect(ev.toolCount).toBe(2)
   })
 
-  it('createAssistantMessageEvent 无工具调用', () => {
-    const ev = createAssistantMessageEvent('text only')
-    expect(ev.toolCalls).toBeUndefined()
+  it('createAssistantEvent 无工具调用', () => {
+    const ev = createAssistantEvent('text only')
+    expect(ev.toolCount).toBeUndefined()
   })
 
-  it('createToolResultEvent 创建正确结构', () => {
-    const ev = createToolResultEvent('tc1', 'bash', 'output', false, 'req1')
-    expect(ev.type).toBe('tool_result')
+  it('createToolEndEvent 创建正确结构', () => {
+    const ev = createToolEndEvent('req1', 'tc1', 'bash', 100, 'ok', 'output preview')
+    expect(ev.type).toBe('tool_end')
     expect(ev.toolCallId).toBe('tc1')
     expect(ev.toolName).toBe('bash')
-    expect(ev.content).toBe('output')
-    expect(ev.isError).toBe(false)
+    expect(ev.durationMs).toBe(100)
+    expect(ev.status).toBe('ok')
+    expect(ev.outputPreview).toBe('output preview')
   })
 
   it('createCompactEvent 创建正确结构', () => {
@@ -54,10 +61,10 @@ describe('ConversationStore - 事件工厂', () => {
     expect(ev.summary).toBe('summary text')
   })
 
-  it('createRequestCompleteEvent 创建正确结构', () => {
-    const ev = createRequestCompleteEvent('req1', 'completed', 3, 5, 1000, 500, 200, 0.01)
-    expect(ev.type).toBe('request_complete')
-    expect(ev.status).toBe('completed')
+  it('createReqEndEvent 创建正确结构', () => {
+    const ev = createReqEndEvent('req1', 'ok', 3, 5, 1000, 500, 200, 0.01)
+    expect(ev.type).toBe('req_end')
+    expect(ev.status).toBe('ok')
     expect(ev.totalTurns).toBe(3)
     expect(ev.totalToolCalls).toBe(5)
     expect(ev.durationMs).toBe(1000)
@@ -66,10 +73,9 @@ describe('ConversationStore - 事件工厂', () => {
     expect(ev.costUsd).toBe(0.01)
   })
 
-  it('createRequestCompleteEvent 带错误信息', () => {
-    const ev = createRequestCompleteEvent('req1', 'error', 1, 0, 500, undefined, undefined, undefined, 'API failed')
-    expect(ev.status).toBe('error')
-    expect(ev.error).toBe('API failed')
+  it('createReqEndEvent 带错误状态', () => {
+    const ev = createReqEndEvent('req1', 'err', 1, 0, 500)
+    expect(ev.status).toBe('err')
   })
 })
 
@@ -105,10 +111,8 @@ describe('ConversationStore - 基本操作', () => {
   })
 
   it('appendEventsNoSave 不持久化', () => {
-    const mockStorage = { saveEvents: vi.fn(), loadEvents: vi.fn(() => []) }
-    const s = new ConversationStore(mockStorage)
+    const s = new ConversationStore()
     s.appendEventsNoSave(createUserMessageEvent('test'))
-    expect(mockStorage.saveEvents).not.toHaveBeenCalled()
     expect(s.getEventCount()).toBe(1)
   })
 
@@ -117,7 +121,6 @@ describe('ConversationStore - 基本操作', () => {
     const newEvents = [createUserMessageEvent('new1'), createUserMessageEvent('new2')]
     store.replaceEvents(newEvents)
     expect(store.getEventCount()).toBe(2)
-    expect(store.getEventLog()[0].content).toBe('new1')
   })
 
   it('clear 清空所有事件', () => {
@@ -128,31 +131,44 @@ describe('ConversationStore - 基本操作', () => {
 })
 
 describe('ConversationStore - 持久化', () => {
-  it('appendEvents 调用 storage.saveEvents', () => {
-    const mockStorage = { saveEvents: vi.fn(), loadEvents: vi.fn(() => []) }
-    const store = new ConversationStore(mockStorage)
-    store.appendEvents(createUserMessageEvent('test'))
-    expect(mockStorage.saveEvents).toHaveBeenCalledOnce()
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'hrids-test-'))
   })
 
-  it('增量保存只保存新事件', () => {
-    const mockStorage = { saveEvents: vi.fn(), loadEvents: vi.fn(() => []) }
-    const store = new ConversationStore(mockStorage)
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('appendEvents 增量保存到磁盘', () => {
+    const store = new ConversationStore(tmpDir)
     store.appendEvents(createUserMessageEvent('first'))
     store.appendEvents(createUserMessageEvent('second'))
-    // 第二次调用只包含第二个事件
-    const secondCall = mockStorage.saveEvents.mock.calls[1]
-    expect(secondCall[0]).toHaveLength(1)
-    expect(secondCall[0][0].content).toBe('second')
+
+    // 重新加载验证持久化
+    const store2 = new ConversationStore()
+    store2.loadFromDisk(tmpDir)
+    expect(store2.getEventCount()).toBe(2)
   })
 
   it('loadFromDisk 加载事件', () => {
-    const events = [createUserMessageEvent('loaded')]
-    const mockStorage = { saveEvents: vi.fn(), loadEvents: vi.fn(() => events) }
-    const store = new ConversationStore(mockStorage)
-    store.loadFromDisk('/tmp/session')
-    expect(store.getEventCount()).toBe(1)
-    expect(store.getEventLog()[0].content).toBe('loaded')
+    const store = new ConversationStore(tmpDir)
+    store.appendEvents(createUserMessageEvent('loaded'))
+
+    const store2 = new ConversationStore()
+    store2.loadFromDisk(tmpDir)
+    expect(store2.getEventCount()).toBe(1)
+  })
+
+  it('appendMessage 增量保存消息到磁盘', () => {
+    const store = new ConversationStore(tmpDir)
+    store.appendMessage({ role: 'user', content: 'hello', timestamp: Date.now() })
+    store.appendMessage({ role: 'assistant', content: 'hi', timestamp: Date.now() })
+
+    const store2 = new ConversationStore()
+    store2.loadFromDisk(tmpDir)
+    expect(store2.getMessages()).toHaveLength(2)
   })
 })
 

@@ -227,7 +227,7 @@ describe('BUG-6: CostTracker 跨请求累积', () => {
     expect(tracker.getCostUsd()).toBe(0)
     expect(tracker.getCostUsd() >= maxBudgetUsd).toBe(false)
 
-    // 但 QueryEngine.send() 中从未调用 reset()，所以累计值持续增长
+    // 但 QueryEngine.run() 中从未调用 reset()，所以累计值持续增长
   })
 
   it('预算检查使用累计值导致误触', () => {
