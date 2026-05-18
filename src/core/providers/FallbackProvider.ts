@@ -137,16 +137,22 @@ export class FallbackProvider implements LLMProvider {
             modelLog.write(`[chunk] ${provider.model}`, { type: chunk.type, delta: chunk.delta?.slice(0, 30), hasContent })
             if (!hasContent && (chunk.type === 'text_delta' || chunk.type === 'tool_call' || chunk.type === 'thinking_delta')) {
               hasContent = true
-              this.currentModelIdx = cursor
             }
             if (chunk.type === 'done' && !hasContent) {
               lastErr = new LlmError('unknown', '模型返回空响应', true)
               break
             }
             yield chunk
-            if (chunk.type === 'done') return
+            if (chunk.type === 'done') {
+              // 流成功结束后才更新共享索引，避免并发竞态
+              this.currentModelIdx = cursor
+              return
+            }
           }
-          if (hasContent) return
+          if (hasContent) {
+            this.currentModelIdx = cursor
+            return
+          }
           log.warn(`模型 ${provider.name}/${provider.model} 返回空响应`)
           lastErr = new LlmError('unknown', '模型返回空响应', true)
         } catch (err) {
@@ -155,12 +161,32 @@ export class FallbackProvider implements LLMProvider {
           lastErrCode = llmErr.code
           lastErrMsg = llmErr.message
           if (hasContent) throw err
+          if (llmErr.code === 'rate_limited') {
+            this.onStatus?.({
+              type: 'rate_limited',
+              provider: provider.name,
+              model: provider.model,
+              attempt,
+              maxAttempts: MAX_RETRIES,
+              delayMs: llmErr.retryAfterMs,
+              reason: llmErr.message,
+            })
+          }
           if (!llmErr.retryable) {
             log.warn(`模型 ${provider.name}/${provider.model} 不可恢复错误: ${llmErr.message}`)
             break
           }
           if (attempt < MAX_RETRIES) {
             const delay = calcBackoff(attempt, llmErr.retryAfterMs)
+            this.onStatus?.({
+              type: 'retrying',
+              provider: provider.name,
+              model: provider.model,
+              attempt: attempt + 1,
+              maxAttempts: MAX_RETRIES,
+              delayMs: delay,
+              reason: llmErr.message,
+            })
             log.warn(`模型 ${provider.name}/${provider.model} 第 ${attempt} 次失败（${llmErr.code}: ${llmErr.message}），${Math.round(delay / 1000)}s 后重试`)
             try { await sleep(delay, signal) } catch { return }
           }

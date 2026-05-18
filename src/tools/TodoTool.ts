@@ -228,14 +228,18 @@ function detectCycle(allTodos: Todo[]): { hasCycle: boolean; cyclePath: string |
 
 // ─── todo_write 工具 ──────────────────────────────────────────────────────────
 
+const newTodoInputSchema = z.strictObject({
+  id:         z.string().optional().describe('兼容字段：系统会忽略并自动分配 id'),
+  content:    z.string().describe('任务内容'),
+  status:     z.enum(['pending', 'in_progress', 'completed']).optional().describe('兼容字段：系统会忽略并自动设置状态'),
+  priority:   z.enum(['high', 'medium', 'low']).describe('优先级'),
+  acceptance: z.array(z.string()).optional().describe('验收标准列表'),
+  dependsOn:  z.array(z.string()).optional().describe('依赖的任务 id 列表'),
+  context:    z.string().optional().describe('任务背景/来源'),
+})
+
 const todoWriteInputSchema = z.strictObject({
-  todos: z.array(z.strictObject({
-    content:    z.string().describe('任务内容'),
-    priority:   z.enum(['high', 'medium', 'low']).describe('优先级'),
-    acceptance: z.array(z.string()).optional().describe('验收标准列表'),
-    dependsOn:  z.array(z.string()).optional().describe('依赖的任务 id 列表'),
-    context:    z.string().optional().describe('任务背景/来源'),
-  })).min(1).describe('任务列表，至少包含一项'),
+  todos: z.array(newTodoInputSchema).min(1).describe('任务列表，至少包含一项'),
 })
 
 /**
@@ -730,13 +734,7 @@ export const TodoUpdateTool: ToolDef<typeof todoUpdateInputSchema> = {
 // ─── todo_append 工具 ─────────────────────────────────────────────────────────
 
 const todoAppendInputSchema = z.strictObject({
-  todos: z.array(z.strictObject({
-    content:    z.string().describe('任务内容'),
-    priority:   z.enum(['high', 'medium', 'low']).describe('优先级'),
-    acceptance: z.array(z.string()).optional().describe('验收标准列表'),
-    dependsOn:  z.array(z.string()).optional().describe('依赖的任务 id 列表'),
-    context:    z.string().optional().describe('任务背景/来源'),
-  })).min(1).describe('要追加的任务列表，至少包含一项'),
+  todos: z.array(newTodoInputSchema).min(1).describe('要追加的任务列表，至少包含一项'),
 })
 
 /**

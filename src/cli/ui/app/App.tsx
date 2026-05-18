@@ -1,5 +1,5 @@
 ﻿import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { Box, Text, useApp, useInput } from 'ink'
+import { Box, Text, useApp } from 'ink'
 // SplashScreen 由 CardStream 内部根据 role='splash' 渲染
 import { CommandSuggestions } from '../input/CommandSuggestions.js'
 import { FileHint } from '../input/FileHint.js'
@@ -81,10 +81,11 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [loading, setLoading] = useState(false)
   // 统一活动节点流：工具和文字按时间顺序交错显示
   type ActivityNode =
-    | { type: 'tool-done'; name: string; description: string; ok: boolean }
-    | { type: 'tool-running'; name: string; description: string }
+    | { type: 'tool-done'; id: string; name: string; description: string; ok: boolean }
+    | { type: 'tool-running'; id: string; name: string; description: string }
     | { type: 'text'; content: string; isThinking: boolean }
   const [activityNodes, setActivityNodes] = useState<ActivityNode[]>([])
+  const activityNodesRef = useRef<ActivityNode[]>([])
   const [askUserPrompt, setAskUserPrompt] = useState<string | null>(null)  // ask_user 等待时的提示文字
   const [permissionRequest, setPermissionRequest] = useState<{
     key: string
@@ -105,7 +106,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const [statusBarContent, setStatusBarContent] = useState('')
   const [activeModal, setActiveModal] = useState<'help' | 'config' | null>(null)
   const [showSessionList, setShowSessionList] = useState(false)
-  const currentToolDescRef = useRef('')  // 当前执行中工具的描述
+  const toolDescriptionsRef = useRef(new Map<string, string>())
   const idCounterRef = useRef(0)
   const store = useScrollStore()
   const { cols: termCols, rows: termRows } = useTerminalSize()
@@ -124,6 +125,56 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     }
   }, [store])
 
+  const setActivity = useCallback((updater: ActivityNode[] | ((prev: ActivityNode[]) => ActivityNode[])) => {
+    const next = typeof updater === 'function'
+      ? (updater as (prev: ActivityNode[]) => ActivityNode[])(activityNodesRef.current)
+      : updater
+    activityNodesRef.current = next
+    setActivityNodes(next)
+  }, [])
+
+  const clearActivity = useCallback(() => {
+    toolDescriptionsRef.current.clear()
+    activityNodesRef.current = []
+    setActivityNodes([])
+  }, [])
+
+  const flushActivityToHistory = useCallback((nodes: ActivityNode[]) => {
+    let currentRole: 'assistant' | 'tool' | null = null
+    let buffer: string[] = []
+    let pushedAssistantText = false
+
+    const flush = () => {
+      const text = buffer.join('\n').trim()
+      if (!text || !currentRole) return
+      push({ role: currentRole, text })
+      if (currentRole === 'assistant') pushedAssistantText = true
+      buffer = []
+      currentRole = null
+    }
+
+    const append = (role: 'assistant' | 'tool', line: string) => {
+      if (currentRole !== role) flush()
+      currentRole = role
+      buffer.push(line)
+    }
+
+    for (const node of nodes) {
+      if (node.type === 'text') {
+        if (!node.isThinking && node.content.trim()) {
+          append('assistant', node.content.trim())
+        }
+        continue
+      }
+
+      const marker = node.type === 'tool-running' ? '...' : node.ok ? 'ok' : 'error'
+      append('tool', `${marker} ${getToolDisplayName(node.name)} ${node.description}`)
+    }
+
+    flush()
+    return pushedAssistantText
+  }, [push])
+
   const cronQueueRef = useRef<CronJob[]>([])
   const loadingRef = useRef(false)
   const msgsLengthRef = useRef(0)
@@ -133,7 +184,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     if (displayAs !== undefined) push({ role: 'system', text: displayAs, color: displayAs.startsWith('⏰') ? 'yellow' : undefined })
     setLoading(true)
     loadingRef.current = true
-    setActivityNodes([])
+    clearActivity()
     let assistantText = ''
     let thinkingText = ''
     let eventCount = 0
@@ -145,17 +196,17 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           switch (ev.type) {
             case 'text_delta':
               assistantText += ev.delta
-              setActivityNodes(prev => {
+              setActivity(prev => {
                 const last = prev[prev.length - 1]
                 if (last?.type === 'text' && !last.isThinking) {
-                  return [...prev.slice(0, -1), { ...last, content: assistantText }]
+                  return [...prev.slice(0, -1), { ...last, content: last.content + ev.delta }]
                 }
-                return [...prev, { type: 'text', content: assistantText, isThinking: false }]
+                return [...prev, { type: 'text', content: ev.delta, isThinking: false }]
               })
               break
             case 'thinking_delta':
               thinkingText += ev.delta
-              setActivityNodes(prev => {
+              setActivity(prev => {
                 const last = prev[prev.length - 1]
                 if (last?.type === 'text' && last.isThinking && !assistantText) {
                   return [...prev.slice(0, -1), { ...last, content: thinkingText.slice(-200) }]
@@ -165,8 +216,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
               })
               break
             case 'tool_start':
-              currentToolDescRef.current = ev.description
-              setActivityNodes(prev => [...prev, { type: 'tool-running', name: ev.name, description: ev.description }])
+              toolDescriptionsRef.current.set(ev.id, ev.description)
+              setActivity(prev => [...prev, { type: 'tool-running', id: ev.id, name: ev.name, description: ev.description }])
               // ask_user 工具：切换输入框为回答模式
               if (ev.name === 'ask_user') {
                 const askInput = ev.input as { question?: string; options?: string[] }
@@ -183,25 +234,28 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             case 'tool_log': break  // 隐藏工具日志
             case 'tool_end': {
               const ok = ev.result.type !== 'error'
-              setActivityNodes(prev => {
-                let idx = -1
-                for (let i = prev.length - 1; i >= 0; i--) { if (prev[i].type === 'tool-running') { idx = i; break } }
+              const description = toolDescriptionsRef.current.get(ev.id) ?? ev.name
+              setActivity(prev => {
+                const idx = prev.findIndex(node => node.type === 'tool-running' && node.id === ev.id)
                 if (idx >= 0) {
                   const updated = [...prev]
-                  updated[idx] = { type: 'tool-done', name: ev.name, description: currentToolDescRef.current, ok }
+                  updated[idx] = { type: 'tool-done', id: ev.id, name: ev.name, description, ok }
                   return updated
                 }
-                return [...prev, { type: 'tool-done', name: ev.name, description: currentToolDescRef.current, ok }]
+                return [...prev, { type: 'tool-done', id: ev.id, name: ev.name, description, ok }]
               })
+              toolDescriptionsRef.current.delete(ev.id)
               setAskUserPrompt(null)
               if (ev.name === 'ask_user') {
                 setLoading(true)
                 loadingRef.current = true
               }
               const result = ev.result
-              // 只显示工具错误，隐藏成功详情
+              // 文件写入/编辑成功时展示最终路径，便于确认写到了哪个 cwd。
               if (result.type === 'error') {
-                push({ role: 'error', text: `✗ ${getToolDisplayName(ev.name)} (${currentToolDescRef.current}): ${result.message}` })
+                push({ role: 'error', text: `✗ ${getToolDisplayName(ev.name)} (${description}): ${result.message}` })
+              } else if ((ev.name === 'file_write' || ev.name === 'file_edit') && result.output) {
+                push({ role: 'tool', text: result.output })
               }
               break
             }
@@ -232,12 +286,13 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
             case 'done': {
               const finalText = assistantText || thinkingText
               modelLog.write('[App] done 事件', { eventCount, textLen: assistantText.length, thinkLen: thinkingText.length, finalLen: finalText.length })
-              if (finalText) {
-                setActivityNodes([])
+              const pushedAssistantText = flushActivityToHistory(activityNodesRef.current)
+              if (finalText && !pushedAssistantText) {
                 push({ role: 'assistant', text: finalText })
                 modelLog.write('[App] push assistant', { textLen: finalText.length, preview: finalText.slice(0, 50) })
-                assistantText = ''; thinkingText = ''
               }
+              assistantText = ''; thinkingText = ''
+              clearActivity()
               }
               // 刷新 provider/model 显示（fallback 切换后同步更新）
               if (getProviderName) {
@@ -256,11 +311,14 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     // 兜底：确保 assistant 消息一定被 push（sendStreaming 多轮时 done 事件可能不被消费）
     const fallbackText = assistantText || thinkingText
     if (fallbackText) {
-      push({ role: 'assistant', text: fallbackText })
+      const pushedAssistantText = flushActivityToHistory(activityNodesRef.current)
+      if (!pushedAssistantText) {
+        push({ role: 'assistant', text: fallbackText })
+      }
       assistantText = ''
       thinkingText = ''
     }
-    setActivityNodes([])
+    clearActivity()
     setLoading(false)
     loadingRef.current = false
 
@@ -510,7 +568,13 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
       }
 
       recordCommandUse(parsed.name)
-      const result = await cmd.execute(parsed.args, cmdCtx)
+      let result: Awaited<ReturnType<typeof cmd.execute>>
+      try {
+        result = await cmd.execute(parsed.args, cmdCtx)
+      } catch (err) {
+        push({ role: 'error', text: `命令执行失败: ${err instanceof Error ? err.message : String(err)}` })
+        return
+      }
       if (result.type === 'exit') { exit(); return }
       if (result.type === 'message') { push({ role: 'system', text: result.text }); return }
       if (result.type === 'status') { setStatusBarContent(result.text); return }
@@ -544,7 +608,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
         engine.abort()
         setLoading(false)
         loadingRef.current = false
-        setActivityNodes([])
+        clearActivity()
         push({ role: 'system', text: '⚠ 任务已中断（Ctrl+C）' })
       } else {
         exit()
@@ -552,28 +616,28 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
     }
   })
 
-  // 滚动通过 Ink 的 useInput 处理（与 Ink 渲染管线原生集成）
-  useInput((input, key) => {
+  // 滚动和权限快捷键统一走 StdinReader，避免 Ink useInput 与自定义 raw stdin 监听分叉。
+  useKeystroke((key) => {
     // 权限请求模式：导航和选择处理
     if (permissionRequest) {
-      if (key.upArrow) {
+      if (key.name === 'up') {
         setPermissionRequest(prev => prev ? { ...prev, selectedIndex: Math.max(0, prev.selectedIndex - 1) } : null)
-      } else if (key.downArrow) {
+      } else if (key.name === 'down') {
         setPermissionRequest(prev => prev ? { ...prev, selectedIndex: Math.min(2, prev.selectedIndex + 1) } : null)
-      } else if (input === 'a' || input === 'A') {
+      } else if (key.name === 'a' || key.name === 'A') {
         permissionRequest.resolve(true)
         setPermissionRequest(null)
         return
-      } else if (input === 'd' || input === 'D') {
+      } else if (key.name === 'd' || key.name === 'D') {
         permissionRequest.resolve(false)
         setPermissionRequest(null)
         return
-      } else if (input === 'l' || input === 'L') {
+      } else if (key.name === 'l' || key.name === 'L') {
         engine.approveSessionPermission(permissionRequest.toolName, permissionRequest.ruleContent)
         permissionRequest.resolve(true)
         setPermissionRequest(null)
         return
-      } else if (key.return) {
+      } else if (key.name === 'enter') {
         const { selectedIndex, toolName, ruleContent, resolve } = permissionRequest
         if (selectedIndex === 0) {
           // Allow
@@ -587,29 +651,28 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
           resolve(true)
         }
         setPermissionRequest(null)
-      } else if (key.escape) {
+      } else if (key.name === 'escape') {
         permissionRequest.resolve(false)
         setPermissionRequest(null)
       }
       return
     }
 
-    if (key.pageUp) {
+    if (key.name === 'pageup') {
       store.setPinned(false)
       store.scroll(10)
     }
-    if (key.pageDown) {
+    if (key.name === 'pagedown') {
       store.scroll(-10)
     }
-    if (key.upArrow && !loadingRef.current) {
+    if (key.name === 'up') {
       store.setPinned(false)
       store.scroll(3)
     }
-    if (key.downArrow && !loadingRef.current) {
+    if (key.name === 'down') {
       store.scroll(-3)
     }
-    // End 键回到底部（Ink 的 useInput 不直接提供 end，用 Ctrl+End 代替）
-    if (input === '\x1b[F' || (key.ctrl && input === '>')) {
+    if (key.name === 'end' || (key.ctrl && key.name === '>')) {
       store.scrollToBottom()
     }
   })
@@ -629,7 +692,7 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
   const bottomContent = (
     <Box flexDirection="column" paddingX={1}>
       {/* 流式执行节点 */}
-      {loading && activityNodes.length > 0 && (
+      {loading && !permissionRequest && activityNodes.length > 0 && (
         <Box
           borderStyle={STRIPE_BORDER}
           borderColor={TONE.brand}
@@ -710,6 +773,8 @@ export function App({ engine, commands, sessionId: initialSessionId, onModelChan
               </Box>
             </Box>
           )
+          : permissionRequest
+          ? <Text color={TONE.warn}>等待权限确认...</Text>
           : loading
           ? <Box><Spinner variant="circle" color={TONE.warn} /><Text color={TONE.warn}> 思考中...</Text></Box>
           : (

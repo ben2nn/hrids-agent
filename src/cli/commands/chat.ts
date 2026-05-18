@@ -5,7 +5,6 @@ import { resetEmbeddingProvider } from '../../memory/index.js'
 import { restoreScheduledJobs } from '../../tools/ScheduleCronTool.js'
 import { saveSessionMeta, extractSessionTitle, archiveSession } from '../../core/SessionStore.js'
 import { CommandRegistry, createBuiltinCommands } from '../../core/CommandRegistry.js'
-import { createWorkdirCommands } from './WorkdirCommands.js'
 import { disconnectAllMcp } from '../../tools/McpTool.js'
 import { autoExtractMemories, autoDistillSkill } from '../../core/postRunHooks.js'
 import { registerAllBundledSkills, buildSkillRegistry } from '../../skills/index.js'
@@ -17,6 +16,7 @@ import { KeystrokeProvider } from '../ui/terminal/KeystrokeContext.js'
 import { ScrollProvider } from '../ui/terminal/ScrollProvider.js'
 import { getStdinReader } from '../ui/terminal/StdinReader.js'
 import type { QueryEngine } from '../../core/QueryEngine.js'
+import type { ContentBlock } from '../../core/ConversationStore.js'
 import type { LLMProvider } from '../../core/providers/index.js'
 import { FallbackProvider } from '../../core/providers/FallbackProvider.js'
 import { initCli, type BaseCliOpts } from './shared.js'
@@ -98,6 +98,41 @@ function restoreStderr() {
   process.stderr.write = originalStderrWrite
 }
 
+// ── 退出时将对话内容输出到主屏幕 ──────────────────────────────────────────
+function extractText(content: string | ContentBlock[] | null): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map(b => b.text)
+    .join('')
+}
+
+function dumpConversation(engine: QueryEngine): void {
+  const messages = engine.store.getMessages()
+  if (messages.length === 0) return
+
+  const ROLE_LABEL: Record<string, string> = {
+    user: '你',
+    assistant: '助手',
+    tool: '工具',
+    system: '系统',
+  }
+
+  const lines: string[] = ['\n── 对话记录 ──']
+  for (const msg of messages) {
+    if (msg.role === 'tool') continue
+    const label = ROLE_LABEL[msg.role] ?? msg.role
+    const text = extractText(msg.content)
+    if (!text.trim()) continue
+    lines.push(`\n【${label}】`)
+    lines.push(text)
+  }
+  lines.push('\n── 对话结束 ──\n')
+
+  process.stdout.write(lines.join('\n'))
+}
+
 export async function runInteractiveMode(
   engine: QueryEngine,
   provider: LLMProvider,
@@ -109,7 +144,6 @@ export async function runInteractiveMode(
   // 注册斜杠命令
   const registry = new CommandRegistry()
   createBuiltinCommands('', model).forEach(c => registry.register(c))
-  createWorkdirCommands().forEach(c => registry.register(c))
 
   // 初始化 skills 系统
   registerAllBundledSkills()
@@ -190,7 +224,12 @@ export async function runInteractiveMode(
   } finally {
     // ── 清理：恢复 stderr + 退出 alternate screen ──
     restoreStderr()
+
+    // 先退出备用屏幕，再将对话内容输出到主屏幕（保留历史可回滚）
     process.stdout.write('\x1b[?1049l')
+    if (process.env.HRIDS_DUMP_CONVERSATION === '1') {
+      dumpConversation(engine)
+    }
     // 销毁 StdinReader（恢复 raw mode + pause stdin）并移除所有残留监听器
     getStdinReader().destroy()
     process.stdin.removeAllListeners('data')

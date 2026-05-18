@@ -30,36 +30,58 @@ import {
 
 const log = logger.child({ component: 'query-engine' })
 
+type TurnResultEvent =
+  | {
+      type: '__llm_result__'
+      fullText: string
+      thinkingText: string
+      thinkingSignature?: string
+      toolCalls: Array<{ id: string; name: string; input: unknown }>
+      hitMaxOutputTokens: boolean
+    }
+  | { type: '__llm_error__' }
+  | { type: '__budget_exceeded__' }
+
 /**
  * 检测 LLM 输出是否为"意图声明"——说了要做某事但没实际执行。
  * 典型模式：短文本 + 包含意图动词 + 无实质内容。
  */
-function isIntentDeclaration(text: string): boolean {
+export function isIntentDeclaration(text: string): boolean {
   const trimmed = text.trim()
-  // 文本过长说明有实质内容，不是纯意图声明
-  if (trimmed.length > 200) return false
   // 空文本不算
   if (trimmed.length === 0) return false
+  // 文本过长说明有实质内容，不是纯意图声明
+  if (trimmed.length > 100) return false
 
-  // 意图声明模式：主语 + 意图动词
+  // 排除模式：包含这些标记说明有实质内容，不是纯意图声明
+  const exclusionPatterns = [
+    /[:：]/,                              // 冒号后通常跟解释内容
+    /因为|所以|因此|原因是|理由是/,          // 因果解释
+    /这是|该|其|它们?的是/,                 // 指代说明
+    /```/,                                // 代码块
+    /如下|例如|比如|具体来说|举例/,          // 展开说明
+    /可以通过|方法是|步骤是|做法是/,          // 方法描述
+    /\d+\.\s/,                            // 有序列表
+    /[-•]\s/,                             // 无序列表
+  ]
+  if (exclusionPatterns.some(p => p.test(trimmed))) return false
+
+  // 意图声明模式：主语 + 意图动词（仅匹配短而无实质内容的文本）
   const intentPatterns = [
-    /我来[^\n]*[，。\n]/,          // 我来扫描...，/。/\n
-    /^我来[^\n]{2,30}$/,           // 我来扫描项目
-    /让我[^\n]*[，。\n]/,          // 让我看看...，
-    /^让我[^\n]{2,30}$/,           // 让我检查一下
-    /我需要[^\n]*(查看|分析|了解|检查|扫描|读取|确认|探索|研究)/,
-    /需要[^\n]*(查看|分析|了解|检查|扫描|读取|确认|探索|研究)/,
-    /接下来[^\n]*(分析|查看|检查|扫描|探索)/,
-    /首先[^\n]*(了解|查看|分析|探索|扫描)/,
-    /先[^\n]*(探索|了解|查看|分析|扫描)[^\n]*[，。]/,
-    /我先[^\n]*然后/,              // 我先X，然后Y
-    /并行[^\n]*(扫描|分析|查看|检查)/, // 并行扫描...
+    /^我来[^\n]{2,20}$/,                  // 我来扫描项目
+    /^让我[^\n]{2,20}$/,                  // 让我检查一下
+    /我需要(查看|分析|了解|检查|扫描|读取|确认|探索|研究)[^\n]{0,10}$/,
+    /接下来(分析|查看|检查|扫描|探索)$/,
+    /^首先(了解|查看|分析|探索|扫描)[^\n]{0,10}$/,
+    /^先(探索|了解|查看|分析|扫描)[^\n]{0,10}$/,
+    /我先[^\n]{2,15}然后[^\n]{2,15}$/,   // 我先X，然后Y
+    /^并行(扫描|分析|查看|检查)[^\n]{0,15}$/,
   ]
 
   const matchCount = intentPatterns.filter(p => p.test(trimmed)).length
-  // 短文本（<100字符）只要有 1 个意图模式就判定为意图声明
-  // 较长文本（100-200字符）需要 2+ 个模式匹配
-  return trimmed.length < 100 ? matchCount >= 1 : matchCount >= 2
+  // 短文本（<50字符）只要有 1 个意图模式就判定为意图声明
+  // 50-100 字符需要 2+ 个模式匹配
+  return trimmed.length < 50 ? matchCount >= 1 : matchCount >= 2
 }
 
 /**
@@ -321,7 +343,7 @@ ${contentToSummarize}
     turns: number,
     maxBudgetUsd: number | undefined,
     events: EventBridge,
-  ): AsyncGenerator<RuntimeEvent | { type: '__llm_result__'; fullText: string; thinkingText: string; thinkingSignature?: string; toolCalls: Array<{ id: string; name: string; input: unknown }>; hitMaxOutputTokens: boolean }> {
+  ): AsyncGenerator<RuntimeEvent | TurnResultEvent> {
     let fullText = ''
     let thinkingText = ''
     let thinkingSignature: string | undefined
@@ -387,6 +409,7 @@ ${contentToSummarize}
           events.usage(chunk.usage.inputTokens, chunk.usage.outputTokens, costUsd)
           if (maxBudgetUsd !== undefined && costUsd >= maxBudgetUsd) {
             events.budgetExceeded(costUsd, maxBudgetUsd)
+            yield { type: '__budget_exceeded__' }
             return
           }
         } else if (chunk.type === 'stop_reason' && chunk.stopReason === 'max_tokens') {
@@ -409,6 +432,7 @@ ${contentToSummarize}
         })
         events.userMessage(recoveryMsg, 'user')
       }
+      yield { type: '__llm_error__' }
       return
     }
 
@@ -462,7 +486,7 @@ ${contentToSummarize}
     }
 
     // 意图声明检测：LLM 说了"要做X"但没实际执行
-    if (intentRecoveryCount < MAX_INTENT_RECOVERY_LIMIT && turns < maxTurns && isIntentDeclaration(fullText)) {
+    if (!this.chatMode && intentRecoveryCount < MAX_INTENT_RECOVERY_LIMIT && turns < maxTurns && isIntentDeclaration(fullText)) {
       const newCount = intentRecoveryCount + 1
       log.info('检测到意图声明，注入继续指令', { turn: turns, recovery: newCount, textLen: fullText.length })
       const recoveryMsg = '[系统内部] 你刚才只表达了意图但没有实际执行。请立即调用工具完成任务，不要输出计划或意图声明，直接开始执行。'
@@ -699,6 +723,12 @@ ${contentToSummarize}
               thinkingSignature = ev.thinkingSignature
               toolCalls.push(...ev.toolCalls)
               hitMaxOutputTokens = ev.hitMaxOutputTokens
+            } else if ('type' in ev && ev.type === '__llm_error__') {
+              exitStatus = 'error'
+              llmError = true
+            } else if ('type' in ev && ev.type === '__budget_exceeded__') {
+              exitStatus = 'budget_exceeded'
+              break
             } else if (ev.type === 'error') {
               yield ev
               exitStatus = 'error'
@@ -720,44 +750,6 @@ ${contentToSummarize}
           // drain RuntimeBuffer
           for (const ev of drainRuntimeBuffer()) yield ev
 
-          // ★ 关键：对流式期间收到的 tool_call 立即启动工具执行
-          for (const tc of toolCalls) {
-            if (inFlight.has(tc.id)) continue
-            let resolveRef: (block?: ContentBlock) => void = () => {}
-            inFlight.set(tc.id, { resolve: (block) => resolveRef(block) })
-            void (async () => {
-              let resultBlock: ContentBlock | undefined
-              try {
-                const result = await this.toolExecutor.execute(tc)
-                resultBlock = result.block
-                // 立即持久化工具结果到 messages.jsonl，防止崩溃/中止导致数据丢失
-                if (resultBlock?.type === 'tool_result') {
-                  this.store.appendMessage({
-                    role: 'tool',
-                    tool_call_id: tc.id,
-                    name: tc.name,
-                    content: resultBlock.content,
-                    is_error: resultBlock.is_error === true,
-                    timestamp: Date.now(),
-                    requestId,
-                  })
-                }
-              } catch { /* 工具执行异常 */ }
-              pushQueue({ done: true, toolCallId: tc.id, result: resultBlock })
-            })()
-          }
-
-          // 交错 yield：有工具事件就先 yield
-          for (const item of drainQueue()) {
-            if ('event' in item) yield item.event
-            if ('done' in item) {
-              inFlight.get(item.toolCallId)?.resolve(item.result)
-              inFlight.delete(item.toolCallId)
-            }
-          }
-
-          // drain RuntimeBuffer（工具执行产生的事件）
-          for (const ev of drainRuntimeBuffer()) yield ev
 
         } catch (err) {
           const errMsg = String(err)
@@ -827,6 +819,59 @@ ${contentToSummarize}
         }
 
         // ★ 等待所有后台工具完成，yield 剩余事件
+        // Persist assistant tool_calls before tool results. Both OpenAI and
+        // Anthropic require tool results to follow the assistant tool call turn.
+        for (const tc of toolCalls) {
+          if (inFlight.has(tc.id)) continue
+          const resolveRef: (block?: ContentBlock) => void = () => {}
+          inFlight.set(tc.id, { resolve: (block) => resolveRef(block) })
+          void (async () => {
+            let resultBlock: ContentBlock | undefined
+            try {
+              const result = await this.toolExecutor.execute(tc)
+              resultBlock = result.block
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err)
+              resultBlock = {
+                type: 'tool_result',
+                tool_use_id: tc.id,
+                content: `Tool execution failed [${tc.name}]: ${message}`,
+                is_error: true,
+              }
+              events.error(`Tool execution failed [${tc.name}]: ${message}`, true)
+            }
+
+            if (resultBlock?.type === 'tool_result') {
+              try {
+                this.store.appendMessage({
+                  role: 'tool',
+                  tool_call_id: tc.id,
+                  name: tc.name,
+                  content: resultBlock.content,
+                  is_error: resultBlock.is_error === true,
+                  timestamp: Date.now(),
+                  requestId,
+                })
+              } catch (err) {
+                const message = err instanceof Error ? err.message : String(err)
+                events.error(`Tool result persistence failed [${tc.name}]: ${message}`, true)
+              }
+            }
+
+            pushQueue({ done: true, toolCallId: tc.id, result: resultBlock })
+          })()
+        }
+
+        for (const item of drainQueue()) {
+          if ('event' in item) yield item.event
+          if ('done' in item) {
+            inFlight.get(item.toolCallId)?.resolve(item.result)
+            inFlight.delete(item.toolCallId)
+          }
+        }
+
+        for (const ev of drainRuntimeBuffer()) yield ev
+
         while (inFlight.size > 0) {
           // 竞态保护：队列中可能已有结果（pushQueue 在 waitQueue 之前被调用）
           if (eventQueue.length === 0) await waitQueue()
@@ -875,15 +920,21 @@ ${contentToSummarize}
         completed: 'ok', permission_denied: 'err', turn_limit: 'turn',
         budget_exceeded: 'budget', aborted: 'abort', error: 'err',
       }
-      events.requestEnded(
-        statusMap[exitStatus] ?? 'err',
-        turns,
-        this.toolExecutor.getTotalToolCalls(),
-        Date.now() - requestStartTime,
-        usageAfter.inputTokens - usageBefore.inputTokens,
-        usageAfter.outputTokens - usageBefore.outputTokens,
-        this.costs.getCostUsd() - costBefore,
-      )
+      try {
+        events.requestEnded(
+          statusMap[exitStatus] ?? 'err',
+          turns,
+          this.toolExecutor.getTotalToolCalls(),
+          Date.now() - requestStartTime,
+          usageAfter.inputTokens - usageBefore.inputTokens,
+          usageAfter.outputTokens - usageBefore.outputTokens,
+          this.costs.getCostUsd() - costBefore,
+        )
+      } catch (err) {
+        const message = `请求完成事件写入失败: ${err instanceof Error ? err.message : String(err)}`
+        log.error(message)
+        runtimeBuffer.push({ type: 'error', message })
+      }
 
       this.running = false
       if (this.onAfterSend) {

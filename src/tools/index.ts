@@ -14,7 +14,6 @@ import { SkillTool, SkillListTool, SkillSaveTool } from './SkillTool.js'
 import { SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool, SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool } from './SkillHubTool.js'
 import { TEAM_TOOLS } from './TeamTools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
-import { WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListTool } from './WorkdirTools.js'
 import { PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool } from './PlanTool.js'
 import type { ToolDef } from '../core/Tool.js'
 import { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
@@ -28,7 +27,6 @@ export {
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
   SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool,
   SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
-  WorkdirInitTool, WorkdirDeliverTool, WorkdirCleanupTool, WorkdirListTool,
   PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool,
 }
 export { TEAM_TOOLS } from './TeamTools.js'
@@ -60,10 +58,6 @@ export const ALL_TOOLS: ToolDef[] = [
   SkillHubInstallTool,
   SkillHubRecommendTool,
   SkillHubSetupTool,
-  WorkdirInitTool,
-  WorkdirDeliverTool,
-  WorkdirCleanupTool,
-  WorkdirListTool,
   PlanCreateTool,
   PlanUpdateTool,
   PlanListTool,
@@ -187,10 +181,6 @@ export const registerAllCoreTools = createBatchRegistrar((registry: ToolRegistry
   registry.register(SkillHubInstallTool)
   registry.register(SkillHubRecommendTool)
   registry.register(SkillHubSetupTool)
-  registry.register(WorkdirInitTool)
-  registry.register(WorkdirDeliverTool)
-  registry.register(WorkdirCleanupTool)
-  registry.register(WorkdirListTool)
   // 团队工具
   registry.registerAll(TEAM_TOOLS)
   // 记忆工具

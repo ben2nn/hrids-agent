@@ -10,6 +10,7 @@ import type { PermissionManager, PermissionRequest } from './PermissionManager.j
 import type { EventBridge } from './EventBridge.js'
 import type { StormBreaker } from './StormBreaker.js'
 import type { Todo } from '../tools/TodoTool.js'
+import { loadTodos } from '../tools/TodoTool.js'
 import { logger } from './logger.js'
 import { auditLog } from './audit.js'
 import { truncateToolResult } from './projections.js'
@@ -101,19 +102,14 @@ export class ToolExecutor {
       isDestructive: tool.isDestructive, planSafe: tool.planSafe, filePath, ruleContent,
     }
 
-    let allowed: boolean
-    let sessionApproved = false
     const onPermissionRequest = this.deps.getOnPermissionRequest?.()
-    if (onPermissionRequest && !permReq.isReadonly && !permReq.planSafe) {
-      this.events.permissionRequest(tc.name, description, permReq.isReadonly, tc.id, permReq.isDestructive, permReq.ruleContent)
-      allowed = await onPermissionRequest(permReq)
-      if (allowed) {
-        this.permissions.approveSession(tc.name, ruleContent)
-        sessionApproved = true
-      }
-    } else {
-      allowed = await this.permissions.check(permReq)
+    if (onPermissionRequest) {
+      this.permissions.setOnAsk(async (req) => {
+        this.events.permissionRequest(req.toolName, req.description, req.isReadonly, tc.id, req.isDestructive, req.ruleContent)
+        return onPermissionRequest(req)
+      })
     }
+    const allowed = await this.permissions.check(permReq)
 
     if (!allowed) {
       log.info('权限拒绝', { toolName: tc.name, description })
@@ -134,7 +130,7 @@ export class ToolExecutor {
     }
 
     // 权限已授予
-    const decision = sessionApproved ? 'session_allow' : 'allow'
+    const decision = 'allow'
     this.events.toolConfirm(tc.id, tc.name, decision, this.permissions.getMode(), permReq.isReadonly, permReq.isDestructive ?? false)
 
     if (!tool.readonly) {
@@ -286,7 +282,6 @@ export class ToolExecutor {
       // todo 工具后刷新快照
       if (TODO_TOOLS.has(tc.name) && this.deps.onTodoSnapshotRefresh) {
         try {
-          const { loadTodos } = require('../tools/TodoTool.js')
           this.deps.onTodoSnapshotRefresh(loadTodos())
         } catch {
           // 读取失败不影响主流程

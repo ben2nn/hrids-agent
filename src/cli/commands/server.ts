@@ -3,7 +3,6 @@ import { saveSessionMeta, extractSessionTitle, generateSessionId, loadSessionMes
 import { getSessionWorkDirPath } from '../../core/ContextBuilder.js'
 import { setGlobalCwd, getGlobalCwd } from '../../core/cwd.js'
 import { CommandRegistry, createBuiltinCommands } from '../../core/CommandRegistry.js'
-import { createWorkdirCommands } from './WorkdirCommands.js'
 import { resolveAskUser } from '../../tools/AskUserTool.js'
 import { resolveDecision } from '../../tools/DecisionTool.js'
 import { disconnectAllMcp } from '../../tools/McpTool.js'
@@ -90,14 +89,15 @@ export async function runServerMode(
   registerAllBundledSkills()
   const serverRegistry = new CommandRegistry()
   createBuiltinCommands('', model).forEach(c => serverRegistry.register(c))
-  createWorkdirCommands().forEach(c => serverRegistry.register(c))
   serverRegistry.registerSkills(buildSkillRegistry(getGlobalCwd()))
 
   // 用 Promise 链实现严格串行执行，彻底避免锁竞争
   let taskChain: Promise<void> = Promise.resolve()
 
   const enqueueMessage = (msg: string) => {
-    taskChain = taskChain.then(async () => {
+    taskChain = taskChain.catch((err) => {
+      process.stderr.write(`[server] 上一个任务异常: ${String(err)}\n`)
+    }).then(async () => {
       // 处理斜杠命令
       const parsed = serverRegistry.parse(msg)
       if (parsed) {
@@ -211,6 +211,10 @@ export async function runServerMode(
         emit({ type: 'error', message: `消息处理失败: ${String(err)}` })
         emit({ type: 'done' })
       }
+    }).catch((err) => {
+      process.stderr.write(`[server] 任务处理异常: ${String(err)}\n`)
+      emit({ type: 'error', message: `任务处理失败: ${String(err)}` })
+      emit({ type: 'done' })
     })
   }
 

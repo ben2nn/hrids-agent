@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { z } from 'zod'
-import { QueryEngine } from '../../src/core/QueryEngine.js'
+import { QueryEngine, isIntentDeclaration } from '../../src/core/QueryEngine.js'
 import type { QueryEngineConfig } from '../../src/core/QueryEngine.js'
 import type { RuntimeEvent } from '../../src/core/RuntimeEvent.js'
 import type { LLMProvider } from '../../src/core/providers/index.js'
@@ -92,6 +92,21 @@ describe('QueryEngine', () => {
 
       const usageEvent = events.find(e => e.type === 'usage')
       expect(usageEvent).toBeDefined()
+    })
+
+    it('LLM 请求失败时请求状态记录为错误', async () => {
+      const provider = {
+        model: 'mock-model',
+        async *stream() {
+          throw new Error('network down')
+        },
+      } as unknown as LLMProvider
+      const engine = new QueryEngine(makeConfig(provider))
+      const events = await collectEvents(engine.run('test'))
+
+      expect(events.some(e => e.type === 'error' && e.message.includes('network down'))).toBe(true)
+      const requestEnd = engine.store.getEventLog().find(e => e.type === 'request_ended')
+      expect(requestEnd?.status).toBe('err')
     })
   })
 
@@ -219,6 +234,39 @@ describe('QueryEngine', () => {
       expect(events.some(e => e.type === 'tool_end')).toBe(true)
     })
 
+    it('stores assistant tool_calls before tool results', async () => {
+      const mockTool: ToolDef<never> = {
+        name: 'echo_tool',
+        description: 'echo tool',
+        inputSchema: z.object({ text: z.string() }) as never,
+        readonly: true,
+        async execute(input: { text: string }) {
+          return { type: 'success', output: `echo: ${input.text}` }
+        },
+      }
+
+      const provider = makeToolProvider('echo_tool', { text: 'hello' }, 'done')
+      const engine = new QueryEngine(makeConfig(provider, [mockTool as never]))
+      await collectEvents(engine.run('call tool'))
+
+      const messages = engine.store.getMessages()
+      const assistantIdx = messages.findIndex(m => m.role === 'assistant' && m.tool_calls?.some(tc => tc.id === 'tc-1'))
+      const toolIdx = messages.findIndex(m => m.role === 'tool' && m.tool_call_id === 'tc-1')
+
+      expect(assistantIdx).toBeGreaterThanOrEqual(0)
+      expect(toolIdx).toBeGreaterThan(assistantIdx)
+    })
+
+    it('does not inject tool recovery in chat mode', async () => {
+      const engine = new QueryEngine(makeConfig(makeTextProvider('我来扫描项目')))
+      engine.setChatMode(true)
+      await collectEvents(engine.run('chat only'))
+
+      const messages = engine.store.getMessages()
+      expect(messages.filter(m => m.role === 'user')).toHaveLength(1)
+      expect(messages.filter(m => m.role === 'assistant')).toHaveLength(1)
+    })
+
     it('工具不存在时 tool_end 包含错误', async () => {
       const provider = makeToolProvider('nonexistent_tool', {}, '完成')
       const engine = new QueryEngine(makeConfig(provider, []))
@@ -283,6 +331,60 @@ describe('QueryEngine', () => {
       const engine = new QueryEngine(makeConfig(makeTextProvider('这是一段较长的回复内容')))
       await collectEvents(engine.run('这是一条用户消息'))
       expect(engine.getEstimatedTokens()).toBeGreaterThan(0)
+    })
+  })
+})
+
+describe('isIntentDeclaration', () => {
+  describe('应检测为意图声明', () => {
+    it('纯意图短句', () => {
+      expect(isIntentDeclaration('我来扫描项目')).toBe(true)
+      expect(isIntentDeclaration('让我检查一下')).toBe(true)
+    })
+
+    it('我先X然后Y模式', () => {
+      expect(isIntentDeclaration('我先看看代码然后分析')).toBe(true)
+    })
+  })
+
+  describe('不应误判为意图声明', () => {
+    it('带冒号的解释内容', () => {
+      expect(isIntentDeclaration('我来解释一下：这个函数的作用是处理请求')).toBe(false)
+      expect(isIntentDeclaration('让我看看代码：它的实现原理是')).toBe(false)
+    })
+
+    it('带因果解释的内容', () => {
+      expect(isIntentDeclaration('我需要先了解背景因为这涉及到多个模块')).toBe(false)
+      expect(isIntentDeclaration('首先我们需要了解需求所以请提供更多信息')).toBe(false)
+    })
+
+    it('带代码块的内容', () => {
+      expect(isIntentDeclaration('我来看看代码\n```ts\nconst x = 1\n```')).toBe(false)
+    })
+
+    it('带列表的内容', () => {
+      expect(isIntentDeclaration('我来列出步骤\n1. 第一步\n2. 第二步')).toBe(false)
+      expect(isIntentDeclaration('让我说明要点\n- 要点一\n- 要点二')).toBe(false)
+    })
+
+    it('带展开说明的内容', () => {
+      expect(isIntentDeclaration('我来举例说明这个概念')).toBe(false)
+      expect(isIntentDeclaration('让我具体来说一下实现方案')).toBe(false)
+    })
+
+    it('超过100字符的文本', () => {
+      const longText = '我来' + '这是一段很长的说明文字'.repeat(10)
+      expect(isIntentDeclaration(longText)).toBe(false)
+    })
+
+    it('空文本', () => {
+      expect(isIntentDeclaration('')).toBe(false)
+      expect(isIntentDeclaration('   ')).toBe(false)
+    })
+
+    it('不含意图动词的普通回复', () => {
+      expect(isIntentDeclaration('这是一个很好的问题')).toBe(false)
+      expect(isIntentDeclaration('根据分析结果，代码没有问题')).toBe(false)
     })
   })
 })

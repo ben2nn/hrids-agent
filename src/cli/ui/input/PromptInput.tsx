@@ -5,7 +5,7 @@ import { useKeystroke } from '../terminal/KeystrokeContext.js'
 import { FG } from '../terminal/theme.js'
 
 interface PromptInputProps {
-  onSubmit: (text: string) => void
+  onSubmit: (text: string) => void | Promise<void>
   onChange?: (text: string) => void
   disabled?: boolean
   placeholder?: string
@@ -36,8 +36,11 @@ export function PromptInput({ onSubmit, onChange, disabled, placeholder, value }
     if (disabled) return
     if (key.name === 'enter' && !key.shift) {
       if (text.trim()) {
-        onSubmit(text.trim())
-        setHistory(prev => [...prev, text.trim()].slice(-100))
+        const submitted = text.trim()
+        void Promise.resolve(onSubmit(submitted)).catch((err: unknown) => {
+          process.stderr.write(`[PromptInput] 提交失败: ${err instanceof Error ? err.message : String(err)}\n`)
+        })
+        setHistory(prev => [...prev, submitted].slice(-100))
         updateText('')
         setCursorPos(0)
         setHistoryIndex(-1)

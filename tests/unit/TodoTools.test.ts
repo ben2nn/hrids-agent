@@ -62,6 +62,23 @@ describe('TodoWriteTool', () => {
     expect(output).toContain('▸')
   })
 
+  it('兼容 LLM 传入的 id/status 字段，并由系统重置状态', async () => {
+    const parsed = TodoWriteTool.inputSchema!.safeParse({
+      todos: [
+        { id: 'custom-1', content: '任务 A', status: 'pending', priority: 'high' },
+        { id: 'custom-2', content: '任务 B', status: 'completed', priority: 'medium' },
+      ],
+    })
+    expect(parsed.success).toBe(true)
+
+    const result = await TodoWriteTool.execute(parsed.data)
+    expect(result.type).toBe('success')
+    const output = (result as { type: 'success'; output: string }).output
+    expect(output).toContain('▸ [1] [high] 任务 A')
+    expect(output).toContain('○ [2] [medium] 任务 B')
+    expect(output).not.toContain('custom-1')
+  })
+
   it('列表非空时拒绝写入（保护现有计划）', async () => {
     // 先建立计划
     await TodoWriteTool.execute({ todos: sampleNewTodos })
