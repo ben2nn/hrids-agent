@@ -5,6 +5,8 @@ import {
   createPlan,
   getPlan,
   updatePlan,
+  updatePlanStatus,
+  archivePlan,
   listPlans,
   formatPlan,
   formatPlanList,
@@ -228,6 +230,119 @@ export const PlanReadTool: ToolDef<typeof planReadInputSchema> = {
   },
 }
 
+// ─── plan_status 工具 ────────────────────────────────────────────────────────
+
+const planStatusInputSchema = z.strictObject({
+  id:     z.string().describe('计划 ID'),
+  status: z.enum(['draft', 'active', 'completed', 'archived']).describe('目标状态'),
+})
+
+/**
+ * plan_status — 变更计划状态
+ *
+ * 支持状态流转：draft → active → completed → archived
+ * plan 模式下可用（planSafe: true）
+ */
+export const PlanStatusTool: ToolDef<typeof planStatusInputSchema> = {
+  name: 'plan_status',
+  description: `变更计划状态。
+
+状态流转：
+- draft（草稿）→ active（进行中）→ completed（已完成）→ archived（已归档）
+
+适用场景：
+- 开始执行计划时设为 active
+- 完成计划后设为 completed
+- 归档旧计划`,
+  inputSchema: planStatusInputSchema,
+  readonly: false,
+  planSafe: true,
+  capabilities: { parallelSafe: false },
+
+  describe(input) {
+    return `变更计划 ${input.id} 状态为 ${input.status}`
+  },
+
+  async execute(input) {
+    try {
+      const plan = updatePlanStatus(input.id, input.status)
+      if (!plan) {
+        return {
+          type: 'error',
+          message: `计划 ${input.id} 不存在。请先调用 plan_list 查看可用计划。`,
+        }
+      }
+
+      return {
+        type: 'success',
+        output: [
+          `计划 ${plan.id} 状态已变更为：${plan.status}`,
+          '',
+          formatPlan(plan),
+        ].join('\n'),
+      }
+    } catch (err) {
+      return {
+        type: 'error',
+        message: `变更状态失败：${(err as Error).message}`,
+      }
+    }
+  },
+}
+
+// ─── plan_archive 工具 ───────────────────────────────────────────────────────
+
+const planArchiveInputSchema = z.strictObject({
+  id: z.string().describe('计划 ID'),
+})
+
+/**
+ * plan_archive — 归档计划
+ *
+ * 将计划状态设为 archived，plan 模式下可用（planSafe: true）
+ */
+export const PlanArchiveTool: ToolDef<typeof planArchiveInputSchema> = {
+  name: 'plan_archive',
+  description: `归档计划，将其状态设为 archived。
+
+适用场景：
+- 计划已完成或不再需要，归档以保持列表整洁`,
+  inputSchema: planArchiveInputSchema,
+  readonly: false,
+  planSafe: true,
+  capabilities: { parallelSafe: false },
+
+  describe(input) {
+    return `归档计划：${input.id}`
+  },
+
+  async execute(input) {
+    try {
+      const plan = archivePlan(input.id)
+      if (!plan) {
+        return {
+          type: 'error',
+          message: `计划 ${input.id} 不存在。请先调用 plan_list 查看可用计划。`,
+        }
+      }
+
+      return {
+        type: 'success',
+        output: [
+          `计划已归档：${plan.id}`,
+          '',
+          formatPlan(plan),
+        ].join('\n'),
+      }
+    } catch (err) {
+      return {
+        type: 'error',
+        message: `归档失败：${(err as Error).message}`,
+      }
+    }
+  },
+}
+
 // ─── 批量注册 ────────────────────────────────────────────────────────────────
 
 export const ALL_PLAN_TOOLS = [
@@ -235,4 +350,6 @@ export const ALL_PLAN_TOOLS = [
   PlanUpdateTool,
   PlanListTool,
   PlanReadTool,
+  PlanStatusTool,
+  PlanArchiveTool,
 ]

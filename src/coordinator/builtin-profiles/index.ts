@@ -8,10 +8,12 @@ import { EXPLORE_AGENT } from './exploreAgent.js'
 import { CODE_REVIEWER_AGENT } from './codeReviewerAgent.js'
 import { DATA_ANALYST_AGENT } from './dataAnalystAgent.js'
 import { SECURITY_AUDITOR_AGENT } from './securityAuditorAgent.js'
+import { PLAN_AGENT } from './planAgent.js'
 
 export const BUILTIN_PROFILES: AgentProfile[] = [
   EXPLORE_AGENT,
   CODE_REVIEWER_AGENT,
   DATA_ANALYST_AGENT,
   SECURITY_AUDITOR_AGENT,
+  PLAN_AGENT,
 ]

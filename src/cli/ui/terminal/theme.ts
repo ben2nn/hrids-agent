@@ -69,6 +69,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   plan_update: '计划',
   plan_list:   '计划',
   plan_read:   '计划',
+  plan_status: '计划',
+  plan_archive:'计划',
   todo_write:  '任务',
   todo_update: '任务',
   todo_append: '任务',

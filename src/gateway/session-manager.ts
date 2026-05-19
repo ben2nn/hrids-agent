@@ -771,6 +771,8 @@ ${writeTools.join('、')}
 - plan_update：更新计划内容
 - plan_list：列出所有计划
 - plan_read：读取指定计划
+- plan_status：变更计划状态（draft → active → completed → archived）
+- plan_archive：归档计划
 
 ### 你的任务
 1. 使用只读工具充分了解现状：可以读文件、搜索代码、搜索网络信息、询问用户等

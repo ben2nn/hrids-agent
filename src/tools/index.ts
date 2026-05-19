@@ -14,7 +14,7 @@ import { SkillTool, SkillListTool, SkillSaveTool } from './skill-tool.js'
 import { SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool, SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool } from './skill-hub-tool.js'
 import { TEAM_TOOLS } from './team-tools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
-import { PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool } from './plan-tool.js'
+import { PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool, PlanStatusTool, PlanArchiveTool } from './plan-tool.js'
 import type { ToolDef } from '../core/tool.js'
 import { ToolRegistry, createBatchRegistrar } from '../core/tool-registry.js'
 
@@ -27,7 +27,7 @@ export {
   DecisionTool, ScheduleCronTool, SkillTool, SkillListTool, SkillSaveTool,
   SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool,
   SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
-  PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool,
+  PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool, PlanStatusTool, PlanArchiveTool,
 }
 export { TEAM_TOOLS } from './team-tools.js'
 export { MEMORY_TOOLS } from '../memory/index.js'
@@ -62,6 +62,8 @@ export const ALL_TOOLS: ToolDef[] = [
   PlanUpdateTool,
   PlanListTool,
   PlanReadTool,
+  PlanStatusTool,
+  PlanArchiveTool,
   // SkillHubListTool、SkillHubUninstallTool、SkillHubUpgradeTool 已从 ALL_TOOLS 移除，
   // 减少 LLM 工具列表膨胀。如需使用，可通过 bash 命令或直接 import 调用。
   ...TEAM_TOOLS,
@@ -145,6 +147,8 @@ export const registerPlanTools = createBatchRegistrar((registry: ToolRegistry) =
   registry.register(PlanUpdateTool)
   registry.register(PlanListTool)
   registry.register(PlanReadTool)
+  registry.register(PlanStatusTool)
+  registry.register(PlanArchiveTool)
 })
 
 /**
