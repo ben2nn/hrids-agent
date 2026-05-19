@@ -1,6 +1,8 @@
 // Agent Profile 加载器 —— 从多目录加载智能体角色模板
 // 支持 YAML 文件和 Markdown Frontmatter 两种格式
-// 优先级：项目级 .hrids/specialists/ > 全局 ~/.hrids/specialists/ > config.yaml 内联 profiles
+//
+// 优先级（后加载覆盖先加载）：
+//   内置专家（builtin-profiles/）→ 项目级 .hrids/roles/ → 全局 ~/.hrids/roles/ → config.yaml 内联
 
 import { existsSync, readFileSync, readdirSync } from 'fs'
 import { join, resolve as resolvePath } from 'path'
@@ -8,10 +10,10 @@ import type { AgentProfile } from '../core/config.js'
 import { getConfigDir } from '../core/config.js'
 import { tryLoadYamlFile, parseYamlString } from '../shared/yaml-loader.js'
 import { homedir } from 'os'
+import { BUILTIN_PROFILES } from './builtin-profiles/index.js'
 
 // ── 默认扫描目录 ──────────────────────────────────────────────
 
-const GLOBAL_AGENTS_DIR = join(getConfigDir(), 'specialists')
 const GLOBAL_ROLES_DIR = join(getConfigDir(), 'roles')
 
 // ── Markdown Frontmatter 解析 ─────────────────────────────────
@@ -76,7 +78,7 @@ function loadProfileFromMarkdown(filePath: string, defaults?: Partial<AgentProfi
 
 /**
  * 从 YAML 文件加载 AgentProfile。
- * systemPromptFile 会被解析为绝对路径。
+ * systemPromptFile 会被解析为绝对路径。兼容 role 字段作为 systemPromptFile 别名。
  */
 function loadProfileFromYaml(filePath: string): AgentProfile | null {
   try {
@@ -91,7 +93,8 @@ function loadProfileFromYaml(filePath: string): AgentProfile | null {
       apiKey: raw.apiKey,
       baseUrl: raw.baseUrl,
       systemPrompt: raw.systemPrompt,
-      systemPromptFile: raw.systemPromptFile,
+      systemPromptFile: raw.systemPromptFile ?? (raw.role as string | undefined),
+      tags: raw.tags,
       allowedTools: raw.allowedTools,
       maxTurns: raw.maxTurns,
       maxBudgetUsd: raw.maxBudgetUsd,
@@ -154,22 +157,22 @@ export function loadProfilesFromDir(dir: string): AgentProfile[] {
  * 应在 main.ts 启动时调用一次。
  *
  * @param extraDirs 额外扫描的目录（如 config.multiAgent.profileDirs）
- * @param projectRoot 项目根目录，用于查找项目级 .hrids/specialists/
+ * @param projectRoot 项目根目录，用于查找项目级 .hrids/roles/
  */
 export function initProfileLoader(extraDirs?: string[], projectRoot?: string) {
   const dirs: string[] = []
 
-  // 项目级 .hrids/specialists/（优先级最高）
+  // 项目级 .hrids/roles/（优先级最高）
   if (projectRoot) {
-    const projectDir = resolvePath(projectRoot, '.hrids', 'specialists')
+    const projectDir = resolvePath(projectRoot, '.hrids', 'roles')
     if (existsSync(projectDir)) {
       dirs.push(projectDir)
     }
   }
 
-  // 全局 ~/.hrids/specialists/
-  if (existsSync(GLOBAL_AGENTS_DIR)) {
-    dirs.push(GLOBAL_AGENTS_DIR)
+  // 全局 ~/.hrids/roles/
+  if (existsSync(GLOBAL_ROLES_DIR)) {
+    dirs.push(GLOBAL_ROLES_DIR)
   }
 
   // 额外指定的目录
@@ -188,7 +191,7 @@ export function initProfileLoader(extraDirs?: string[], projectRoot?: string) {
 
 /**
  * 列出所有可用的 AgentProfile。
- * 合并顺序：config 内联 profiles → 各目录 profiles（后覆盖前）
+ * 合并顺序：内置专家 → config 内联 profiles → 各目录 profiles（后覆盖前）
  *
  * @param inlineProfiles 配置文件中内联定义的 profiles
  */
@@ -198,30 +201,29 @@ export function listProfiles(inlineProfiles?: AgentProfile[]): AgentProfile[] {
     if (_cachedProfiles) return _cachedProfiles
   }
 
-  const profiles: AgentProfile[] = [...(inlineProfiles ?? [])]
+  // 1. 内置专家作为基础
+  const profiles: AgentProfile[] = [...BUILTIN_PROFILES]
 
-  // 从各目录加载
-  if (_profileLoaderDirs) {
-    for (const dir of _profileLoaderDirs) {
-      const loaded = loadProfilesFromDir(dir)
-      for (const p of loaded) {
-        const existingIdx = profiles.findIndex(ep => ep.name === p.name)
-        if (existingIdx >= 0) {
-          profiles[existingIdx] = p // 目录中的覆盖内联
-        } else {
-          profiles.push(p)
-        }
+  // 2. 合并 config 内联 profiles（覆盖同名内置专家）
+  if (inlineProfiles) {
+    for (const p of inlineProfiles) {
+      const existingIdx = profiles.findIndex(ep => ep.name === p.name)
+      if (existingIdx >= 0) {
+        profiles[existingIdx] = p
+      } else {
+        profiles.push(p)
       }
     }
   }
 
-  // 如果未初始化，至少尝试全局目录
-  if (!_profileLoaderDirs) {
-    const loaded = loadProfilesFromDir(GLOBAL_AGENTS_DIR)
+  // 3. 从各目录加载（覆盖同名）
+  const dirsToScan = _profileLoaderDirs ?? (existsSync(GLOBAL_ROLES_DIR) ? [GLOBAL_ROLES_DIR] : [])
+  for (const dir of dirsToScan) {
+    const loaded = loadProfilesFromDir(dir)
     for (const p of loaded) {
       const existingIdx = profiles.findIndex(ep => ep.name === p.name)
       if (existingIdx >= 0) {
-        profiles[existingIdx] = p
+        profiles[existingIdx] = p // 目录中的覆盖内置/内联
       } else {
         profiles.push(p)
       }
@@ -278,13 +280,6 @@ export function resolveSystemPrompt(profile: AgentProfile): string {
  */
 export function applyTemplateVars(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? `{{${key}}}`)
-}
-
-/**
- * 获取全局 roles 目录路径。
- */
-export function getRolesDir(): string {
-  return GLOBAL_ROLES_DIR
 }
 
 /**

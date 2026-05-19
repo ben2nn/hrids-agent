@@ -212,6 +212,11 @@ const BUILTIN_TOOL_GROUPS: Record<string, string> = {
   ask_user: '人机交互',
   request_decision: '人机交互',
   agent: '协作',
+  agent_spawn: '协作',
+  agent_wait: '协作',
+  agent_cancel: '协作',
+  agent_list: '协作',
+  explore: '协作',
   schedule_cron: '协作',
   skill: '技能管理',
   skill_list: '技能管理',
@@ -391,6 +396,13 @@ const EXT_AGENT: PromptExtension = {
  - 单个子任务预计需要 5+ 次工具调用，或会产生大量中间输出
 
 派生规范：isolated=true 用于子任务需要独立工作目录时。allowed_tools 只传子任务需要的工具。不要重复子智能体已在做的工作。等待所有子任务完成后，汇总结果再回复用户。
+
+explore 专家使用指南：
+ - 适合：快速搜索代码库、定位函数/类/模式、追踪依赖关系、理解项目结构
+ - 不适合：需要修改文件、执行命令、做复杂分析的任务
+ - 调用方式：agent({ profile: 'explore', prompt: '查找所有使用了 X 的文件' })
+ - explore 是只读的，不要期望它修改任何文件
+ - 适合在需要深入了解代码库后再做决策时使用
 
 定时任务操作规范（严格遵守，不得多余调用）：
 - **创建**：直接调用 schedule_cron action=create，工具内部自动去重，无需提前 list 检查。create 返回结果即为最终状态，立即停止回复用户，禁止再调用 list 或 create。expression 格式：'分 时 日 月 周'，例如每天 11:15 → "15 11 * * *"。
