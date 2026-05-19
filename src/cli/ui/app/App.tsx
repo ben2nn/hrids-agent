@@ -27,7 +27,7 @@ import { getSessionWorkDirPath } from '../../../core/ContextBuilder.js'
 import { setGlobalCwd } from '../../../tools/BashTool.js'
 import { resolveAskUser, getPendingAskUser } from '../../../tools/AskUserTool.js'
 import { loadConfig } from '../../../core/Config.js'
-import { modelLog } from '../../../core/logger.js'
+import { modelLog } from '../../../shared/logger.js'
 import { recordCommandUse } from '../input/command-stats.js'
 import { runWithSession } from '../../../core/sessionContext.js'
 

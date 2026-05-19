@@ -4,8 +4,8 @@
 
 import { existsSync, readFileSync, readdirSync } from 'fs'
 import { join, resolve as resolvePath } from 'path'
-import type { AgentProfile } from '../Config.js'
-import { getConfigDir } from '../Config.js'
+import type { AgentProfile } from '../core/Config.js'
+import { getConfigDir } from '../core/Config.js'
 import { tryLoadYamlFile, parseYamlString } from '../YamlLoader.js'
 import { homedir } from 'os'
 

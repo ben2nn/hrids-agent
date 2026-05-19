@@ -1,7 +1,7 @@
 // 斜杠命令注册系统
 import type { SkillRegistry } from '../skills/registry.js'
 import type { Command as UICommand, CommandContext as UICommandContext } from './command-types.js'
-import { formatDateTime, formatIsoDisplay } from './time.js'
+import { formatDateTime, formatIsoDisplay } from '../shared/time.js'
 
 export interface SlashCommand {
   name: string

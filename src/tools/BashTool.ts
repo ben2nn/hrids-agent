@@ -18,9 +18,9 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { z } from 'zod'
 import type { ToolDef, ToolContext } from '../core/Tool.js'
-import { auditLog } from '../core/audit.js'
-import { logger } from '../core/logger.js'
-import { getGlobalCwd, setGlobalCwd } from '../core/cwd.js'
+import { auditLog } from '../shared/audit.js'
+import { logger } from '../shared/logger.js'
+import { getGlobalCwd, setGlobalCwd } from '../shared/cwd.js'
 import { isDangerousRemovalPath } from '../core/pathSafety.js'
 import { checkCommandSafetyPermission } from '../core/CommandSafety.js'
 import { clearFileCache } from './FileReadTool.js'
@@ -28,7 +28,7 @@ import { isCommandAllowed, isAllowed } from './shell/parse.js'
 import { runCommand } from './shell/exec.js'
 
 // 重新导出 cwd 管理（App.tsx 等模块依赖）
-export { getGlobalCwd, setGlobalCwd, runWithCwd } from '../core/cwd.js'
+export { getGlobalCwd, setGlobalCwd, runWithCwd } from '../shared/cwd.js'
 
 const log = logger.child({ component: 'bash-tool' })
 

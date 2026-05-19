@@ -5,7 +5,7 @@
 import { existsSync, readdirSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve } from 'path'
-import { loadYamlFile } from '../YamlLoader.js'
+import { loadYamlFile } from '../../shared/YamlLoader.js'
 import type { CustomProviderConfig } from './registry.js'
 
 const USER_PROVIDERS_DIR = join(homedir(), '.hrids', 'providers')

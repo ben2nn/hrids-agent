@@ -1,7 +1,7 @@
 // 记忆工具集 —— 供 agent 主动读写记忆
 import { z } from 'zod'
 import type { ToolDef, ToolContext } from '../core/Tool.js'
-import { logger } from '../core/logger.js'
+import { logger } from '../shared/logger.js'
 import { getMemoryStack } from './layers.js'
 import { getMemoryStore } from './store.js'
 

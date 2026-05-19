@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { TONE, FG } from '../terminal/theme.js'
-import { formatDate as formatConfiguredDate } from '../../../core/time.js'
+import { formatDate as formatConfiguredDate } from '../../../shared/time.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 

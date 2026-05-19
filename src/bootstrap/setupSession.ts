@@ -3,7 +3,7 @@ import { join } from 'path'
 import { generateSessionId } from '../core/SessionStore.js'
 import { getConfigDir } from '../core/Config.js'
 import { getSessionWorkDirPath } from '../core/ContextBuilder.js'
-import { setGlobalCwd } from '../core/cwd.js'
+import { setGlobalCwd } from '../shared/cwd.js'
 import { ConversationStore } from '../core/ConversationStore.js'
 import type { QueryEngine } from '../core/QueryEngine.js'
 

@@ -186,7 +186,7 @@ export class MemoryStore {
       }
 
       if (dim !== this._dim) {
-        const { auditLog } = await import('../core/audit.js')
+        const { auditLog } = await import('../shared/audit.js')
         auditLog({ action: 'memory_dim_migration', resource: id, result: 'allowed', details: { from: this._dim, to: dim } })
         // 删除旧维度的向量表，用新维度重建
         this._dim = dim
@@ -197,7 +197,7 @@ export class MemoryStore {
       await this.vec.upsert(id, vec)
     } catch (err) {
       try {
-        const { auditLog } = await import('../core/audit.js')
+        const { auditLog } = await import('../shared/audit.js')
         auditLog({ action: 'memory_embed_error', resource: id, result: 'error', details: { error: String(err) } })
       } catch { /* 忽略 */ }
     }

@@ -3,11 +3,11 @@ import type { ToolDef } from './Tool.js'
 import type { ToolRegistry } from './ToolRegistry.js'
 import type { PermissionManager, PermissionRequest } from './PermissionManager.js'
 import { CostTracker } from './CostTracker.js'
-import { logger, modelLog } from './logger.js'
+import { logger, modelLog } from '../shared/logger.js'
 import { loadTodos, type Todo } from '../tools/TodoTool.js'
 import { clearFileCache } from '../tools/FileReadTool.js'
 import { extractMediaFromText } from './MediaProcessor.js'
-import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from './coordinator/coordinatorPrompt.js'
+import { HEARTBEAT_CONTINUE, HEARTBEAT_DONE } from '../coordinator/coordinatorPrompt.js'
 import {
   ConversationStore,
   type ChatMessage, type ContentBlock, type ImageSource,
@@ -632,7 +632,9 @@ ${contentToSummarize}
     }
 
     const isCraftMode = this.config.permissions.getMode() === 'craft'
-    const maxTurns = isCraftMode ? Infinity : (this.config.maxTurns ?? DEFAULT_MAX_TURNS)
+    const maxTurns = isCraftMode
+      ? (this.config.maxTurns ?? Infinity)  // craft 模式下尊重已设置的 maxTurns
+      : (this.config.maxTurns ?? DEFAULT_MAX_TURNS)
 
     log.debug('run 开始', { messageCount: this.store.getMessageCount(), estimatedTokens: this.getEstimatedTokens(), maxTurns: isCraftMode ? 'unlimited' : maxTurns })
 

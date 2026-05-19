@@ -7,9 +7,9 @@ import { createRequire } from 'module'
 import { readFileSync, existsSync, writeFileSync, mkdirSync, cpSync, rmSync } from 'fs'
 import { resolve, join } from 'path'
 import type { ToolDef, ToolResult } from '../core/Tool.js'
-import { auditLog } from '../core/audit.js'
+import { auditLog } from '../shared/audit.js'
 import { invalidateFileCache } from './FileReadTool.js'
-import { getGlobalCwd } from '../core/cwd.js'
+import { getGlobalCwd } from '../shared/cwd.js'
 import { getConfigDir } from '../core/Config.js'
 
 const _require = createRequire(import.meta.url)

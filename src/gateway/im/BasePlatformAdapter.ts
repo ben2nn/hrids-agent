@@ -16,7 +16,7 @@
  * 5. 在 PlatformManager.startPlatform() 中注册
  */
 
-import { logger } from '../../core/logger.js'
+import { logger } from '../../shared/logger.js'
 import type { IMPlatform, InboundMessage, MessageHandler, PlatformConfig, SendResult } from './types.js'
 
 const log = logger.child({ component: 'im-adapter' })

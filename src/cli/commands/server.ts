@@ -1,7 +1,7 @@
 // server 子命令 —— 持续从 stdin 读取消息（NDJSON）
 import { saveSessionMeta, extractSessionTitle, generateSessionId, loadSessionMessages, listSessions, listArchives, archiveSession } from '../../core/SessionStore.js'
 import { getSessionWorkDirPath } from '../../core/ContextBuilder.js'
-import { setGlobalCwd, getGlobalCwd } from '../../core/cwd.js'
+import { setGlobalCwd, getGlobalCwd } from '../../shared/cwd.js'
 import { CommandRegistry, createBuiltinCommands } from '../../core/CommandRegistry.js'
 import { resolveAskUser } from '../../tools/AskUserTool.js'
 import { resolveDecision } from '../../tools/DecisionTool.js'

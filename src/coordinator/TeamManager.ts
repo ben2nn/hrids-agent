@@ -3,8 +3,8 @@
 import { AgentPool, type AgentTask } from './AgentPool.js'
 import { MessageBus } from './MessageBus.js'
 import type { LLMProvider } from '../providers/index.js'
-import type { ToolDef } from '../Tool.js'
-import type { AgentProfile } from '../Config.js'
+import type { ToolDef } from '../core/Tool.js'
+import type { AgentProfile } from '../core/Config.js'
 
 export interface TeamConfig {
   name: string

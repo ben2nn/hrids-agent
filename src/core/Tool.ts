@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { zodToJsonSchema } from './schema.js'
+import { zodToJsonSchema } from '../shared/schema.js'
 
 // 工具执行结果
 export type ToolResult =

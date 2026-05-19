@@ -14,7 +14,7 @@ import {
   parseDateOnlyInConfiguredTimeZone,
   zonedDateTimeToTimestamp,
   type ZonedDateParts,
-} from '../core/time.js'
+} from '../shared/time.js'
 import { invalidateFileCache } from './FileReadTool.js'
 
 const CRON_FILE = join(getConfigDir(), 'crons.json')

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { TONE, FG, STRIPE_BORDER } from '../terminal/theme.js'
 import type { SessionMeta } from '../../../core/SessionStore.js'
-import { formatDate as formatConfiguredDate } from '../../../core/time.js'
+import { formatDate as formatConfiguredDate } from '../../../shared/time.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 

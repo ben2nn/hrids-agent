@@ -13,7 +13,7 @@
 import { readFileSync, existsSync, statSync } from 'fs'
 import { resolve, extname, basename, relative, isAbsolute } from 'path'
 import { createHash } from 'crypto'
-import { logger } from './logger.js'
+import { logger } from '../shared/logger.js'
 
 const log = logger.child({ component: 'media-processor' })
 

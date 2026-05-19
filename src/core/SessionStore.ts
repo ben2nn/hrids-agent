@@ -4,7 +4,7 @@ import { randomBytes } from 'crypto'
 import { join } from 'path'
 import type { ConversationEvent, ChatMessage } from './ConversationStore.js'
 import { getConfigDir } from './Config.js'
-import { formatCompactTimestamp } from './time.js'
+import { formatCompactTimestamp } from '../shared/time.js'
 
 /** 压缩归档段元数据 */
 export interface CompactArchive {

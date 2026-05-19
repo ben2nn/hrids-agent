@@ -3,7 +3,7 @@
 // 用户可在 ~/.hrids/providers/ 目录下创建同名文件覆盖配置
 
 import { existsSync, readdirSync } from 'fs'
-import { loadYamlFile } from '../YamlLoader.js'
+import { loadYamlFile } from '../../shared/YamlLoader.js'
 
 // ── 模型级能力配置 ──────────────────────────────────────────────
 

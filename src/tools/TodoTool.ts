@@ -4,7 +4,7 @@ import { resolve, join, dirname } from 'path'
 import { z } from 'zod'
 import type { ToolDef } from '../core/Tool.js'
 import { getConfigDir } from '../core/Config.js'
-import { auditLog } from '../core/audit.js'
+import { auditLog } from '../shared/audit.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 import { invalidateFileCache } from './FileReadTool.js'
 

@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { z } from 'zod'
 import { buildTool } from '../core/Tool.js'
-import { getGlobalCwd } from '../core/cwd.js'
+import { getGlobalCwd } from '../shared/cwd.js'
 
 const inputSchema = z.object({
   pattern: z.string().describe('正则表达式搜索模式'),

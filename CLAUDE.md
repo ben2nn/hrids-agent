@@ -92,7 +92,7 @@ YAML 驱动的 Provider 注册表 (`builtin/` 目录下 13 个 Provider YAML 文
 
 ### Multi-Agent Coordination (src/core/coordinator/)
 
-`AgentPool` 管理子 Agent 生命周期，`MessageBus` 处理 Agent 间通信，`TeamManager` 管理团队创建。Agent 配置从 `~/.hrids/agents/` 和 `~/.hrids/specialists/` 加载。
+`AgentPool` 管理子 Agent 生命周期，`MessageBus` 处理 Agent 间通信，`TeamManager` 管理团队创建。Agent 配置从 `~/.hrids/agents/` 和 `~/.hrids/roles/` 加载（内置专家在代码中定义，用户自定义专家放 `~/.hrids/roles/`）。
 
 ## Configuration
 

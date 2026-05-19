@@ -4,7 +4,7 @@
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, StreamChunk } from './types.js'
 import { LlmError } from '../LlmError.js'
-import { logger, modelLog } from '../logger.js'
+import { logger, modelLog } from '../../shared/logger.js'
 
 export interface FallbackStatusEvent {
   type: 'retrying' | 'switching' | 'rate_limited'

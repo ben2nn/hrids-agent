@@ -5,7 +5,7 @@ import { createGateway } from '../../gateway/server.js'
 import { loadConfig, getConfigDir } from '../../core/Config.js'
 import { migrateOldMemoryStore } from '../../memory/index.js'
 import { restoreScheduledJobs, setCronTriggerCallback } from '../../tools/ScheduleCronTool.js'
-import { logger } from '../../core/logger.js'
+import { logger } from '../../shared/logger.js'
 
 export interface GatewayCommandOpts {
   port?: string

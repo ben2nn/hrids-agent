@@ -16,7 +16,7 @@
 //   MEMORY.md     ← EXT_MEMORY（始终加载）
 //   HEARTBEAT.md  ← 新增（预留）
 
-import type { ToolDef } from '../Tool.js'
+import type { ToolDef } from '../core/Tool.js'
 import { loadPromptFile } from './PromptLoader.js'
 
 const SHELL_TOOL_NAME = process.platform === 'win32' ? 'powershell' : 'bash'

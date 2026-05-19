@@ -1,7 +1,7 @@
 import { glob } from 'glob'
 import { z } from 'zod'
 import { buildTool } from '../core/Tool.js'
-import { getGlobalCwd } from '../core/cwd.js'
+import { getGlobalCwd } from '../shared/cwd.js'
 
 const inputSchema = z.object({
   pattern: z.string().describe('glob 匹配模式，如 src/**/*.ts'),

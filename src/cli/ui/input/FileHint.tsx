@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { Box, Text } from 'ink'
 import { glob } from 'glob'
-import { getGlobalCwd } from '../../../core/cwd.js'
+import { getGlobalCwd } from '../../../shared/cwd.js'
 import { resolve, relative } from 'path'
 
 interface Props {

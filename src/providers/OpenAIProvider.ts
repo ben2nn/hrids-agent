@@ -3,8 +3,8 @@
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
 
-import { logger } from '../logger.js'
-import { zodToJsonSchema } from '../schema.js'
+import { logger } from '../../shared/logger.js'
+import { zodToJsonSchema } from '../../shared/schema.js'
 
 const log = logger.child({ component: 'openai-provider' })
 

@@ -25,7 +25,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { join, resolve } from 'path'
 import { getConfigDir } from '../../core/Config.js'
-import { logger } from '../../core/logger.js'
+import { logger } from '../../shared/logger.js'
 import type { SessionManager } from '../SessionManager.js'
 import { BasePlatformAdapter, buildIMSessionKey } from './BasePlatformAdapter.js'
 import { TelegramAdapter } from './platforms/telegram.js'

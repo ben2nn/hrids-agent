@@ -7,18 +7,18 @@ import { QueryEngine } from './core/QueryEngine.js'
 import { PermissionManager } from './core/PermissionManager.js'
 import { listSessions, pruneOldSessions } from './core/SessionStore.js'
 import { buildSystemContext } from './core/ContextBuilder.js'
-import { getCoordinatorSystemPrompt, classifyTask } from './core/coordinator/coordinatorPrompt.js'
-import { initProfileLoader, listProfiles } from './core/coordinator/ProfileLoader.js'
+import { getCoordinatorSystemPrompt, classifyTask } from './coordinator/coordinatorPrompt.js'
+import { initProfileLoader, listProfiles } from './coordinator/ProfileLoader.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { ToolRegistry } from './core/ToolRegistry.js'
-import { getGlobalCwd } from './core/cwd.js'
+import { getGlobalCwd } from './shared/cwd.js'
 import { restoreScheduledJobs } from './tools/ScheduleCronTool.js'
 import { createAgentTool, createAgentSpawnTool, createAgentWaitTool, createAgentCancelTool, createAgentListTool } from './tools/AgentTool.js'
 import { loadMcpTools } from './tools/McpTool.js'
-import { TeamManager } from './core/coordinator/TeamManager.js'
+import { TeamManager } from './coordinator/TeamManager.js'
 import { resetEmbeddingProvider, migrateOldMemoryStore } from './memory/index.js'
-import { logger } from './core/logger.js'
-import { formatIsoDisplay } from './core/time.js'
+import { logger } from './shared/logger.js'
+import { formatIsoDisplay } from './shared/time.js'
 
 import { setupProvider } from './bootstrap/setupProvider.js'
 import { prepareSession, initSessionStorage } from './bootstrap/setupSession.js'
@@ -158,7 +158,7 @@ async function main() {
         const profiles = listProfiles(config.multiAgent?.profiles)
         if (profiles.length === 0) {
           console.log('没有可用的 agent profiles。')
-          console.log('在 config.yaml 的 multiAgent.profiles 中定义，或将 .yaml 文件放入 ~/.hrids/specialists/')
+          console.log('在 config.yaml 的 multiAgent.profiles 中定义，或将 .yaml/.md 文件放入 ~/.hrids/roles/')
         } else {
           console.log('可用的 agent profiles:')
           profiles.forEach(p => {

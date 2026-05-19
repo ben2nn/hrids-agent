@@ -4,7 +4,7 @@ import { toAnthropicTool } from '../Tool.js'
 import type { ToolDef } from '../Tool.js'
 import type { ChatMessage, LLMProvider, ModelType, ProviderConfig, StreamChunk } from './types.js'
 
-import { logger } from '../logger.js'
+import { logger } from '../../shared/logger.js'
 import { STATIC_SECTION_COUNT } from '../coordinator/coordinatorPrompt.js'
 
 const log = logger.child({ component: 'anthropic-provider' })

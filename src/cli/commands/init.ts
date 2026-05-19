@@ -1,8 +1,8 @@
 import { existsSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getConfigDir } from '../../core/Config.js'
-import { saveYamlFile, loadYamlFile } from '../../core/YamlLoader.js'
-import { DEFAULT_MAIN_AGENT_FILES } from '../../core/coordinator/coordinatorPrompt.js'
+import { saveYamlFile, loadYamlFile } from '../../shared/YamlLoader.js'
+import { DEFAULT_MAIN_AGENT_FILES } from '../../coordinator/coordinatorPrompt.js'
 import { ensureUserProvidersDir } from '../../core/providers/ProviderProfileLoader.js'
 import { BUILTIN_PROVIDERS } from '../../core/providers/registry.js'
 
@@ -93,81 +93,6 @@ const AGENT_YAML_TEMPLATE = `# agents/main/agent.yaml
 # allowed_tools: []
 `
 
-const SECURITY_AUDITOR_YAML = `name: security-auditor
-description: 审查代码安全漏洞和合规性
-tags: [security, audit, compliance]
-allowedTools: [file_read, grep, glob, bash]
-maxTurns: 20
-autoSelectable: true
-`
-
-const SECURITY_AUDITOR_MD = `---
-name: security-auditor
-description: 审查代码安全漏洞和合规性
-tags: [security, audit, compliance]
-allowedTools: [file_read, grep, glob, bash]
-maxTurns: 20
-autoSelectable: true
----
-
-# 安全审计专家
-
-你是一个资深安全审计专家。审查代码时关注：
-
-## 审查重点
-1. **OWASP Top 10**：注入、失效认证、敏感数据暴露等
-2. **依赖安全**：已知漏洞的第三方库、过时的依赖版本
-3. **密钥管理**：硬编码密钥、不安全的密钥存储
-4. **权限控制**：越权访问、不安全的直接对象引用
-
-## 输出格式
-- 漏洞等级：严重/高危/中危/低危
-- 位置：文件:行号
-- 漏洞描述
-- 修复建议
-`
-
-const DATA_ANALYST_YAML = `name: data-analyst
-description: 分析数据、生成报告和可视化
-tags: [data, analysis, visualization]
-allowedTools: [file_read, file_write, bash, glob, grep]
-maxTurns: 20
-autoSelectable: true
-`
-
-const CODE_REVIEWER_YAML = `name: code-reviewer
-description: 审查代码质量、安全性和最佳实践
-role: roles/code-reviewer.md
-allowedTools: [file_read, grep, glob, bash]
-maxTurns: 15
-autoSelectable: true
-`
-
-const CODE_REVIEWER_MD = `---
-name: code-reviewer
-description: 审查代码质量、安全性和最佳实践
-tags: [code, review, quality]
-allowedTools: [file_read, grep, glob, bash]
-maxTurns: 15
-autoSelectable: true
----
-
-# 代码审查专家
-
-你是一个资深代码审查专家。审查代码时关注：
-
-## 审查重点
-1. **安全漏洞**：SQL 注入、XSS、命令注入、路径遍历
-2. **性能问题**：N+1 查询、不必要的循环、内存泄漏
-3. **可维护性**：命名规范、函数长度、模块耦合
-4. **最佳实践**：错误处理、类型安全、测试覆盖
-
-## 输出格式
-- 严重程度：致命/严重/建议
-- 位置：文件:行号
-- 问题描述
-- 修复建议
-`
 
 export async function runInitCommand(opts: InitOptions = {}) {
   console.log('\n🚀 hrids-agent 初始化向导\n')
@@ -206,38 +131,12 @@ export async function runInitCommand(opts: InitOptions = {}) {
   mkdirSync(sessionsDir, { recursive: true })
   console.log(`✓ 已创建会话目录: ${sessionsDir}/`)
 
-  // ── specialists/：专家 YAML ─────────────────────────────
-  const specialistsDir = join(CONFIG_DIR, 'specialists')
-  mkdirSync(specialistsDir, { recursive: true })
-
-  const specialistFiles = [
-    { name: 'code-reviewer.yaml', content: CODE_REVIEWER_YAML },
-    { name: 'security-auditor.yaml', content: SECURITY_AUDITOR_YAML },
-    { name: 'data-analyst.yaml', content: DATA_ANALYST_YAML },
-  ]
-  for (const f of specialistFiles) {
-    const p = join(specialistsDir, f.name)
-    if (!existsSync(p) || opts.force) {
-      writeFileSync(p, f.content, 'utf-8')
-    }
-  }
-  console.log(`✓ 已创建专家目录: ${specialistsDir}/（${specialistFiles.length} 个 specialist）`)
-
-  // ── roles/：角色模板 ────────────────────────────────────
+  // ── roles/：自定义专家目录 ──────────────────────────────
+  // 内置专家（explore、code-reviewer 等）已定义在代码中，始终可用。
+  // 用户可在此目录放置 .yaml 或 .md 文件定义自定义专家（同名覆盖内置）。
   const rolesDir = join(CONFIG_DIR, 'roles')
   mkdirSync(rolesDir, { recursive: true })
-
-  const roleFiles = [
-    { name: 'code-reviewer.md', content: CODE_REVIEWER_MD },
-    { name: 'security-auditor.md', content: SECURITY_AUDITOR_MD },
-  ]
-  for (const f of roleFiles) {
-    const p = join(rolesDir, f.name)
-    if (!existsSync(p) || opts.force) {
-      writeFileSync(p, f.content, 'utf-8')
-    }
-  }
-  console.log(`✓ 已创建角色模板目录: ${rolesDir}/（${roleFiles.length} 个 role）`)
+  console.log(`✓ 已创建角色目录: ${rolesDir}/（内置专家已内置，可在此添加自定义专家）`)
 
   // ── providers/：自定义提供商目录 ─────────────────────────
   const providersDir = ensureUserProvidersDir()

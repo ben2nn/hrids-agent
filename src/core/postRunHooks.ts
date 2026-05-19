@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync, renameSync, existsSync } from 'fs'
 import { join } from 'path'
 import { runMemoryPipeline } from '../memory/index.js'
-import { logger } from './logger.js'
+import { logger } from '../shared/logger.js'
 import { getConfigDir } from './Config.js'
 import type { QueryEngine } from './QueryEngine.js'
 import { projectForDisplay } from './projections.js'

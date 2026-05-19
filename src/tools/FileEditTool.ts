@@ -13,10 +13,10 @@ function isGitRepo(dir: string): boolean {
 import { execFileSync } from 'child_process'
 import { z } from 'zod'
 import { buildTool } from '../core/Tool.js'
-import { auditLog } from '../core/audit.js'
+import { auditLog } from '../shared/audit.js'
 import { checkWritePath } from '../core/pathSafety.js'
-import { getGlobalCwd } from '../core/cwd.js'
-import { getCurrentAgentName } from '../core/coordinator/agentContext.js'
+import { getGlobalCwd } from '../shared/cwd.js'
+import { getCurrentAgentName } from '../coordinator/agentContext.js'
 import { getFileLeaseManager } from '../core/FileLeaseManager.js'
 import { invalidateFileCache } from './FileReadTool.js'
 

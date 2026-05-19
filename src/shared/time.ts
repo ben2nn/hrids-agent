@@ -1,4 +1,4 @@
-import { loadConfig } from './Config.js'
+import { loadConfig } from '../core/Config.js'
 
 type DateInput = Date | number | string
 

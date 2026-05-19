@@ -1,7 +1,7 @@
 // 多智能体团队工具集
 import { z } from 'zod'
-import { TeamManager } from '../core/coordinator/TeamManager.js'
-import { getCurrentAgentName } from '../core/coordinator/agentContext.js'
+import { TeamManager } from '../coordinator/TeamManager.js'
+import { getCurrentAgentName } from '../coordinator/agentContext.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 import type { ToolDef } from '../core/Tool.js'
 
@@ -66,7 +66,7 @@ const agentSpawnSchema = z.object({
   description: z.string().describe('3-5 词描述任务'),
   prompt: z.string().describe('完整的任务指令'),
   profile: z.string().optional().describe(
-    '预定义的智能体角色名称（从 specialists/ 或 config.yaml 加载）'
+    '预定义的智能体角色名称（从 roles/ 或 config.yaml 加载）'
   ),
   run_in_background: z.boolean().optional().describe('是否后台运行，默认 false（等待完成）'),
   allowed_tools: z.array(z.string()).optional().describe('允许的工具列表'),
@@ -88,7 +88,7 @@ export const AgentSpawnTool: ToolDef<typeof agentSpawnSchema> = {
       let profile: import('../core/Config.js').AgentProfile | undefined
       let profilePrompt: string[] | undefined
       if (input.profile) {
-        const { resolveProfile: rp, resolveSystemPrompt: rsp } = await import('../core/coordinator/ProfileLoader.js')
+        const { resolveProfile: rp, resolveSystemPrompt: rsp } = await import('../coordinator/ProfileLoader.js')
         profile = rp(input.profile)
         if (profile) {
           const prompt = rsp(profile)

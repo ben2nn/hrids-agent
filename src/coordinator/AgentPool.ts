@@ -1,15 +1,15 @@
 // 智能体池 —— 管理并发运行的多个子智能体
-import { QueryEngine } from '../QueryEngine.js'
-import { ToolRegistry } from '../ToolRegistry.js'
-import { PermissionManager } from '../PermissionManager.js'
+import { QueryEngine } from '../core/QueryEngine.js'
+import { ToolRegistry } from '../core/ToolRegistry.js'
+import { PermissionManager } from '../core/PermissionManager.js'
 import { MessageBus } from './MessageBus.js'
 import { runWithAgentName } from './agentContext.js'
-import { runWithSession } from '../sessionContext.js'
-import { runWithCwd, getGlobalCwd } from '../cwd.js'
+import { runWithSession } from '../core/sessionContext.js'
+import { runWithCwd, getGlobalCwd } from '../shared/cwd.js'
 import type { LLMProvider } from '../providers/index.js'
-import type { ToolDef } from '../Tool.js'
-import type { AgentProfile } from '../Config.js'
-import { loadConfig } from '../Config.js'
+import type { ToolDef } from '../core/Tool.js'
+import type { AgentProfile } from '../core/Config.js'
+import { loadConfig } from '../core/Config.js'
 
 // 默认排除的子智能体工具（可被配置覆盖）
 const DEFAULT_SUB_AGENT_EXCLUDED_TOOLS = new Set(['todo_write', 'todo_update', 'todo_append', 'todo_reset'])
@@ -32,7 +32,7 @@ function filterToolsForAgent(
   deniedTools?: Set<string>,
 ): ToolDef[] {
   // 显式传入 allowedTools 时以它为准（最高优先级）
-  if (allowedTools) {
+  if (allowedTools?.length) {
     return baseTools.filter(t => allowedTools.includes(t.name))
   }
   const denied = deniedTools ?? getDeniedTools()
@@ -220,7 +220,7 @@ export class AgentPool {
     // 这样 Gateway 多会话场景下，子智能体继承的是正确的父会话记忆，而非其他用户的数据
     let finalSystemPrompt: string[] = [...systemPrompt]
     try {
-      const { getMemoryStackForSession, getMemoryStack } = await import('../../memory/index.js')
+      const { getMemoryStackForSession, getMemoryStack } = await import('../memory/index.js')
       const stack = parentSessionId
         ? getMemoryStackForSession(parentSessionId)
         : getMemoryStack()

@@ -14,8 +14,8 @@
 
 import type { ToolDef, ToolResult, ToolContext } from './Tool.js'
 import { isReadOnlyCall } from './Tool.js'
-import { zodToJsonSchema } from './schema.js'
-import { analyzeSchema, flattenSchema, nestArguments, hasDotKey, type JsonSchemaNode } from './flatten.js'
+import { zodToJsonSchema } from '../shared/schema.js'
+import { analyzeSchema, flattenSchema, nestArguments, hasDotKey, type JsonSchemaNode } from '../shared/flatten.js'
 
 /**
  * 工具调用上下文

@@ -4,9 +4,9 @@ setupSystemProxy()
 
 import { Command } from 'commander'
 import { loadConfig, getConfigDir, hasMainAgentConfig } from '../core/Config.js'
-import { listProfiles } from '../core/coordinator/ProfileLoader.js'
+import { listProfiles } from '../coordinator/ProfileLoader.js'
 import { migrateOldMemoryStore } from '../memory/index.js'
-import { logger } from '../core/logger.js'
+import { logger } from '../shared/logger.js'
 
 function validateStartupConfig(config: import('../core/Config.js').AgentConfig, cliApiKey?: string) {
   const isOllama = config.provider === 'ollama'

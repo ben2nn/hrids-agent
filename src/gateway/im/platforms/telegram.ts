@@ -7,7 +7,7 @@
  * 参考 hermes-agent gateway/platforms/telegram.py
  */
 
-import { logger } from '../../../core/logger.js'
+import { logger } from '../../../shared/logger.js'
 import { BasePlatformAdapter, type SendOptions } from '../BasePlatformAdapter.js'
 import type { InboundMessage, MessageSource, MessageType, SendResult, TelegramConfig } from '../types.js'
 

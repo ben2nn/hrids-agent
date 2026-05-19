@@ -6,7 +6,7 @@ import { join } from 'path'
 import type { McpServerConfig } from '../tools/McpTool.js'
 import type { CustomProviderConfig } from './providers/registry.js'
 import { normalizeProvider } from './providers/registry.js'
-import { loadYamlFile, saveYamlFile } from './YamlLoader.js'
+import { loadYamlFile, saveYamlFile } from '../shared/YamlLoader.js'
 import { loadProviderProfiles } from './providers/ProviderProfileLoader.js'
 
 const OLD_CONFIG_DIR = join(homedir(), '.hrids-agent')
@@ -162,6 +162,7 @@ export interface AgentProfile {
   baseUrl?: string
   systemPrompt?: string
   systemPromptFile?: string
+  tags?: string[]
   allowedTools?: string[]
   maxTurns?: number
   maxBudgetUsd?: number
