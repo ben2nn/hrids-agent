@@ -6,10 +6,10 @@ import Database from 'better-sqlite3'
 import { createHash, randomUUID } from 'crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, copyFileSync, renameSync } from 'fs'
 import { join } from 'path'
-import { getConfigDir } from '../core/Config.js'
+import { getConfigDir } from '../core/config.js'
 import type { Memory, MemoryType, Triple, MemorySearchResult } from './types.js'
 import { getEmbeddingProvider } from './embedding.js'
-import { createVectorStore, type VectorStore } from './vectorStore.js'
+import { createVectorStore, type VectorStore } from './vector-store.js'
 
 const AGENTS_DIR = join(getConfigDir(), 'agents')
 

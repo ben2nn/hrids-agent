@@ -2,7 +2,7 @@
 
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { join, dirname, resolve, relative, isAbsolute } from 'path'
-import { getConfigDir } from '../core/Config.js'
+import { getConfigDir } from '../core/config.js'
 import type { Skill, BundledSkillDefinition, SkillFrontmatter } from './types.js'
 
 // ---- Frontmatter 解析 ----

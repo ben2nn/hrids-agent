@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { existsSync, mkdirSync } from 'fs'
 import { execSync } from 'child_process'
 import { join } from 'path'
-import { getConfigDir } from '../core/Config.js'
+import { getConfigDir } from '../core/config'
 
 const DEFAULT_CWD = join(getConfigDir(), 'work')
 

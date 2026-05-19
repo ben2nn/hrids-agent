@@ -7,7 +7,7 @@ import type {
   ChatMessage,
   DisplayMessage,
   DisplayToolCard,
-} from './ConversationStore.js'
+} from './conversation-store.js'
 
 // ── 常量 ────────────────────────────────────────────────────────
 

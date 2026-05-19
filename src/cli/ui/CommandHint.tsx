@@ -1,6 +1,6 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import type { SlashCommand } from '../../core/CommandRegistry.js'
+import type { SlashCommand } from '../../core/command-registry.js'
 
 interface Props {
   commands: SlashCommand[]

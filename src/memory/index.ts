@@ -3,7 +3,7 @@ export { MemoryStore, getMemoryStore, getMemoryStoreForSession, destroyMemorySto
 export { MemoryStack, getMemoryStack, getMemoryStackForSession, destroyMemoryStackForSession } from './layers.js'
 export { extractMemories, extractFromConversation } from './extractor.js'
 export { runMemoryPipeline } from './pipeline.js'
-export { MEMORY_TOOLS } from './MemoryTool.js'
+export { MEMORY_TOOLS } from './memory-tool.js'
 export { EmbeddingProvider, EmbeddingFallbackProvider, getEmbeddingProvider, resetEmbeddingProvider } from './embedding.js'
 export type { Memory, MemoryType, Triple, WakeUpResult, MemorySearchResult } from './types.js'
 export type { EmbeddingConfig, AnyEmbeddingProvider } from './embedding.js'

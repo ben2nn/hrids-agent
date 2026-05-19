@@ -18,7 +18,7 @@
 
 import http from 'http'
 import { logger } from '../../../shared/logger.js'
-import { BasePlatformAdapter, type SendOptions } from '../BasePlatformAdapter.js'
+import { BasePlatformAdapter, type SendOptions } from '../base-platform-adapter.js'
 import type { InboundMessage, MessageSource, MessageType, SendResult, WebhookConfig } from '../types.js'
 
 const log = logger.child({ component: 'im-webhook' })

@@ -317,7 +317,7 @@ let _provider: AnyEmbeddingProvider | null = null
  */
 function createEmbeddingProviderFromEnv(): AnyEmbeddingProvider {
   // 从 config.yaml 读取
-  const { loadConfig } = _require('../core/Config.js') as { loadConfig: () => import('../core/Config.js').AgentConfig }
+  const { loadConfig } = _require('../core/config.js') as { loadConfig: () => import('../core/config.js').AgentConfig }
   const config = loadConfig()
   const embCfg = config.embedding
 

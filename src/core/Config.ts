@@ -3,11 +3,11 @@
 import { existsSync, mkdirSync, readFileSync, statSync, renameSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { McpServerConfig } from '../tools/McpTool.js'
-import type { CustomProviderConfig } from './providers/registry.js'
-import { normalizeProvider } from './providers/registry.js'
-import { loadYamlFile, saveYamlFile } from '../shared/YamlLoader.js'
-import { loadProviderProfiles } from './providers/ProviderProfileLoader.js'
+import type { McpServerConfig } from '../tools/mcp-tool.js'
+import type { CustomProviderConfig } from '../providers/registry.js'
+import { normalizeProvider } from '../providers/registry.js'
+import { loadYamlFile, saveYamlFile } from '../shared/yaml-loader.js'
+import { loadProviderProfiles } from '../providers/provider-profile-loader.js'
 
 const OLD_CONFIG_DIR = join(homedir(), '.hrids-agent')
 const CONFIG_DIR = join(homedir(), '.hrids')

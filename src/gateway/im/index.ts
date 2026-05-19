@@ -2,8 +2,8 @@
  * IM 平台接入层 — 公共导出
  */
 
-export { PlatformManager } from './PlatformManager.js'
-export { BasePlatformAdapter, buildIMSessionKey, splitText, markdownToPlainText } from './BasePlatformAdapter.js'
+export { PlatformManager } from './platform-manager.js'
+export { BasePlatformAdapter, buildIMSessionKey, splitText, markdownToPlainText } from './base-platform-adapter.js'
 export { TelegramAdapter } from './platforms/telegram.js'
 export { WeixinAdapter } from './platforms/weixin.js'
 export { WebhookAdapter } from './platforms/webhook.js'

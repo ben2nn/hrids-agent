@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Text } from 'ink'
 import { TONE, FG } from '../terminal/theme.js'
-import type { CostInfo } from '../app/AppState.js'
+import type { CostInfo } from '../app/app-state.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 

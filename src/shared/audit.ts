@@ -1,7 +1,7 @@
 // 审计日志 —— 记录所有写操作、权限检查、bash 命令执行
 import { existsSync, mkdirSync, appendFileSync, statSync, renameSync } from 'fs'
 import { join } from 'path'
-import { getConfigDir } from '../core/Config.js'
+import { getConfigDir } from '../core/config.js'
 
 const AUDIT_DIR = join(getConfigDir(), 'logs')
 const AUDIT_FILE = join(AUDIT_DIR, 'audit.log')

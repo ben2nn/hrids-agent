@@ -14,7 +14,7 @@
 | 模块类型 | ESM (`"type": "module"`) |
 | TypeScript | 5.7 |
 | Node.js | >=18 |
-| 入口文件 | `src/main.ts` |
+| 入口文件 | `src/cli/index.ts` |
 | 测试框架 | Vitest |
 | 前端构建 | Vite + React 18 |
 

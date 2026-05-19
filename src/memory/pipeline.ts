@@ -3,7 +3,7 @@
 import { extractFromConversation } from './extractor.js'
 import { getMemoryStore } from './store.js'
 import type { Memory } from './types.js'
-import type { LLMProvider } from '../core/providers/types.js'
+import type { LLMProvider } from '../providers/types.js'
 
 export interface PipelineOptions {
   /** 是否启用 LLM 提炼（压缩原文为精炼一句话），默认 false */

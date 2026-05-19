@@ -5,7 +5,7 @@ import { MessageRow } from './MessageRow.js'
 import { SplashScreen } from './SplashScreen.js'
 import { useScrollStore } from '../terminal/ScrollProvider.js'
 import { FG } from '../terminal/theme.js'
-import type { DisplayMsg } from '../app/AppState.js'
+import type { DisplayMsg } from '../app/app-state.js'
 
 interface CardStreamProps {
   msgs: DisplayMsg[]

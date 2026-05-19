@@ -1,22 +1,22 @@
-import { BashTool } from './BashTool.js'
-import { FileReadTool } from './FileReadTool.js'
-import { FileWriteTool } from './FileWriteTool.js'
-import { FileEditTool } from './FileEditTool.js'
-import { GlobTool } from './GlobTool.js'
-import { GrepTool } from './GrepTool.js'
-import { WebFetchTool } from './WebFetchTool.js'
-import { WebSearchTool } from './WebSearchTool.js'
-import { AskUserTool } from './AskUserTool.js'
-import { TodoWriteTool, TodoUpdateTool, TodoAppendTool, TodoResetTool, TodoReadTool } from './TodoTool.js'
-import { DecisionTool } from './DecisionTool.js'
-import { ScheduleCronTool } from './ScheduleCronTool.js'
-import { SkillTool, SkillListTool, SkillSaveTool } from './SkillTool.js'
-import { SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool, SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool } from './SkillHubTool.js'
-import { TEAM_TOOLS } from './TeamTools.js'
+import { BashTool } from './bash-tool.js'
+import { FileReadTool } from './file-read-tool.js'
+import { FileWriteTool } from './file-write-tool.js'
+import { FileEditTool } from './file-edit-tool.js'
+import { GlobTool } from './glob-tool.js'
+import { GrepTool } from './grep-tool.js'
+import { WebFetchTool } from './web-fetch-tool.js'
+import { WebSearchTool } from './web-search-tool.js'
+import { AskUserTool } from './ask-user-tool.js'
+import { TodoWriteTool, TodoUpdateTool, TodoAppendTool, TodoResetTool, TodoReadTool } from './todo-tool.js'
+import { DecisionTool } from './decision-tool.js'
+import { ScheduleCronTool } from './schedule-cron-tool.js'
+import { SkillTool, SkillListTool, SkillSaveTool } from './skill-tool.js'
+import { SkillHubConfigTool, SkillHubSearchTool, SkillHubInstallTool, SkillHubRecommendTool, SkillHubSetupTool, SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool } from './skill-hub-tool.js'
+import { TEAM_TOOLS } from './team-tools.js'
 import { MEMORY_TOOLS } from '../memory/index.js'
-import { PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool } from './PlanTool.js'
-import type { ToolDef } from '../core/Tool.js'
-import { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
+import { PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool } from './plan-tool.js'
+import type { ToolDef } from '../core/tool.js'
+import { ToolRegistry, createBatchRegistrar } from '../core/tool-registry.js'
 
 const shellTool = BashTool
 
@@ -29,9 +29,9 @@ export {
   SkillHubListTool, SkillHubUninstallTool, SkillHubUpgradeTool,
   PlanCreateTool, PlanUpdateTool, PlanListTool, PlanReadTool,
 }
-export { TEAM_TOOLS } from './TeamTools.js'
+export { TEAM_TOOLS } from './team-tools.js'
 export { MEMORY_TOOLS } from '../memory/index.js'
-export { ToolRegistry, createBatchRegistrar } from '../core/ToolRegistry.js'
+export { ToolRegistry, createBatchRegistrar } from '../core/tool-registry.js'
 
 export const ALL_TOOLS: ToolDef[] = [
   GlobTool,

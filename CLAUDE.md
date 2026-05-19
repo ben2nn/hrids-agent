@@ -37,9 +37,8 @@ npm run lint             # eslint .
 
 ### Entry Points
 
-- **src/cli/index.ts** — 新 CLI 入口 (Commander + 懒加载子命令)，`npm run dev` 使用此入口
-- **src/main.ts** — 旧版单文件入口，`bin/hrids-agent.mjs` 编译产物使用此入口
-- **bin/hrids-agent.mjs** — npm 二进制入口，指向 `dist/main.js`
+- **src/cli/index.ts** — CLI 入口 (Commander + 懒加载子命令)，`npm run dev` / `npm run start` / `bin/hrids-agent.mjs` 均使用此入口
+- **bin/hrids-agent.mjs** — npm 二进制入口，指向 `dist/cli/index.js`
 
 ### Core: Event-Sourced Agentic Loop
 

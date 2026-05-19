@@ -1,10 +1,10 @@
 import { existsSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { getConfigDir } from '../../core/Config.js'
-import { saveYamlFile, loadYamlFile } from '../../shared/YamlLoader.js'
-import { DEFAULT_MAIN_AGENT_FILES } from '../../coordinator/coordinatorPrompt.js'
-import { ensureUserProvidersDir } from '../../core/providers/ProviderProfileLoader.js'
-import { BUILTIN_PROVIDERS } from '../../core/providers/registry.js'
+import { getConfigDir } from '../../core/config.js'
+import { saveYamlFile, loadYamlFile } from '../../shared/yaml-loader.js'
+import { DEFAULT_MAIN_AGENT_FILES } from '../../coordinator/coordinator-prompt.js'
+import { ensureUserProvidersDir } from '../../providers/provider-profile-loader.js'
+import { BUILTIN_PROVIDERS } from '../../providers/registry.js'
 
 const CONFIG_DIR = getConfigDir()
 const CONFIG_YAML_FILE = join(CONFIG_DIR, 'config.yaml')

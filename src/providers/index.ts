@@ -1,9 +1,9 @@
 // 提供商工厂 —— 根据注册表和 config.yaml 自动选择正确的提供商
-import { AnthropicProvider } from './AnthropicProvider.js'
-import { OpenAIProvider } from './OpenAIProvider.js'
-import { FallbackProvider } from './FallbackProvider.js'
+import { AnthropicProvider } from './anthropic-provider.js'
+import { OpenAIProvider } from './openai-provider.js'
+import { FallbackProvider } from './fallback-provider.js'
 import type { LLMProvider, ModelType, ProviderConfig } from './types.js'
-import type { FallbackStatusEvent } from './FallbackProvider.js'
+import type { FallbackStatusEvent } from './fallback-provider.js'
 import {
   BUILTIN_PROVIDERS,
   getBuiltinProvider,
@@ -13,20 +13,20 @@ import {
   type CustomProviderConfig,
   type ProviderDef,
 } from './registry.js'
-import type { ModelTypeConfig } from '../Config.js'
+import type { ModelTypeConfig } from '../core/config.js'
 
 export type { LLMProvider, ModelType, ProviderConfig, StreamChunk, ChatMessage, EmbeddingProvider, SpeechProvider } from './types.js'
-export { AnthropicProvider } from './AnthropicProvider.js'
-export { OpenAIProvider } from './OpenAIProvider.js'
-export { FallbackProvider } from './FallbackProvider.js'
-export type { FallbackStatusEvent } from './FallbackProvider.js'
+export { AnthropicProvider } from './anthropic-provider.js'
+export { OpenAIProvider } from './openai-provider.js'
+export { FallbackProvider } from './fallback-provider.js'
+export type { FallbackStatusEvent } from './fallback-provider.js'
 export { BUILTIN_PROVIDERS, PROVIDER_ALIASES, normalizeProvider, getBuiltinProvider, getCustomProvider, inferProviderByModel, resolveModelProfile, listProviderModels } from './registry.js'
 export type { ProviderDef, CustomProviderConfig, ModelProfile, ModelCategory } from './registry.js'
-export { loadProviderProfiles } from './ProviderProfileLoader.js'
+export { loadProviderProfiles } from './provider-profile-loader.js'
 
 // ── ProviderOptions ───────────────────────────────────────────
 
-const DEFAULT_MODEL = 'qwen3.5-122b-a10b'
+const DEFAULT_MODEL = ''
 
 export interface ProviderOptions {
   model?: string
@@ -127,7 +127,7 @@ export function createGroupedFallbackProvider(groups: Array<{ platformName: stri
   if (groups.length === 0) throw new Error('至少需要一个平台配置')
 
   const allProviders: LLMProvider[] = []
-  const providerGroups: import('./FallbackProvider.js').ProviderGroup[] = []
+  const providerGroups: import('./fallback-provider.js').ProviderGroup[] = []
 
   for (const g of groups) {
     const providers = g.configs.map(c => createProvider(c))

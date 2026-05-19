@@ -5,18 +5,18 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { execFileSync } from 'child_process'
 import { randomBytes, timingSafeEqual, scryptSync } from 'crypto'
 import jwt from 'jsonwebtoken'
-import { SessionManager } from './SessionManager.js'
-import { listSessions as listDiskSessions, loadSessionMessages, loadArchive, loadSessionMeta, listArchives as listSessionArchives, deleteSessionFromDisk } from '../core/SessionStore.js'
-import { migrateEventsToMessages } from '../core/ConversationStore.js'
+import { SessionManager } from './session-manager.js'
+import { listSessions as listDiskSessions, loadSessionMessages, loadArchive, loadSessionMeta, listArchives as listSessionArchives, deleteSessionFromDisk } from '../core/session-store.js'
+import { migrateEventsToMessages } from '../core/conversation-store.js'
 import { logger } from '../shared/logger.js'
 import { load as parseYaml } from 'js-yaml'
 import type { CreateSessionRequest } from './types.js'
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, renameSync } from 'fs'
 import { resolve, join, basename, extname } from 'path'
-import { loadConfig, saveConfig, getConfigDir } from '../core/Config.js'
+import { loadConfig, saveConfig, getConfigDir } from '../core/config.js'
 import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
-import { PlatformManager } from './im/PlatformManager.js'
+import { PlatformManager } from './im/platform-manager.js'
 import type { IMGatewayConfig, IMPlatform, PlatformConfig } from './im/types.js'
 import { projectForDisplay } from '../core/projections.js'
 
@@ -1821,7 +1821,7 @@ export function createGateway(config: GatewayConfig = {}) {
       writeFileSync(tmp, content, 'utf-8')
       renameSync(tmp, configFile)
       // 清除配置缓存，下次读取时重新加载
-      const { _resetConfigCache } = await import('../core/Config.js')
+      const { _resetConfigCache } = await import('../core/config.js')
       _resetConfigCache()
       log.info('config.yaml 已通过 Web 界面更新')
       res.json({ ok: true })

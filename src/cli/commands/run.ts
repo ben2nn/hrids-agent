@@ -1,9 +1,9 @@
 // run 子命令 —— 非交互模式：执行一条消息后退出
-import { saveSessionMeta, extractSessionTitle } from '../../core/SessionStore.js'
-import { disconnectAllMcp } from '../../tools/McpTool.js'
-import { autoExtractMemories, autoDistillSkill } from '../../core/postRunHooks.js'
-import type { QueryEngine } from '../../core/QueryEngine.js'
-import type { LLMProvider } from '../../core/providers/index.js'
+import { saveSessionMeta, extractSessionTitle } from '../../core/session-store.js'
+import { disconnectAllMcp } from '../../tools/mcp-tool.js'
+import { autoExtractMemories, autoDistillSkill } from '../../core/post-run-hooks.js'
+import type { QueryEngine } from '../../core/query-engine.js'
+import type { LLMProvider } from '../../providers/index.js'
 import { initCli, type BaseCliOpts } from './shared.js'
 
 export interface RunCommandOpts extends BaseCliOpts {

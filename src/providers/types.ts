@@ -1,6 +1,6 @@
 // 提供商抽象层 —— 统一不同 LLM 服务的接口
 
-import type { ToolDef } from '../Tool.js'
+import type { ToolDef } from '../core/tool.js'
 
 // ── 模型类型 ──────────────────────────────────────────────────
 /**

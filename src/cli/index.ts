@@ -1,14 +1,14 @@
 // CLI 入口 —— Commander 定义 + 懒加载子命令
-import { setupSystemProxy } from '../core/proxySetup.js'
+import { setupSystemProxy } from '../bootstrap/setup-proxy.js'
 setupSystemProxy()
 
 import { Command } from 'commander'
-import { loadConfig, getConfigDir, hasMainAgentConfig } from '../core/Config.js'
-import { listProfiles } from '../coordinator/ProfileLoader.js'
+import { loadConfig, getConfigDir, hasMainAgentConfig } from '../core/config.js'
+import { listProfiles } from '../coordinator/profile-loader.js'
 import { migrateOldMemoryStore } from '../memory/index.js'
 import { logger } from '../shared/logger.js'
 
-function validateStartupConfig(config: import('../core/Config.js').AgentConfig, cliApiKey?: string) {
+function validateStartupConfig(config: import('../core/config.js').AgentConfig, cliApiKey?: string) {
   const isOllama = config.provider === 'ollama'
     || config.baseUrl?.includes('localhost')
     || config.baseUrl?.includes('127.0.0.1')

@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Text } from 'ink'
 import { ROLE_TONE, ROLE_GLYPH, FG, STRIPE_BORDER } from '../terminal/theme.js'
-import type { MsgRole, DisplayMsg } from '../app/AppState.js'
+import type { MsgRole, DisplayMsg } from '../app/app-state.js'
 
 // ─── 角色标签 ──────────────────────────────────────────────────────────────
 

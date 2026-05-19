@@ -52,5 +52,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "process.exit(0)" || exit 1
 
 # Default command
-ENTRYPOINT ["node", "dist/main.js"]
+ENTRYPOINT ["node", "dist/cli/index.js"]
 CMD ["--help"]

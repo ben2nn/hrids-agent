@@ -1,5 +1,5 @@
 // sessions 子命令 —— 列出历史会话
-import { listSessions } from '../../core/SessionStore.js'
+import { listSessions } from '../../core/session-store.js'
 import { formatIsoDisplay } from '../../shared/time.js'
 
 export interface SessionsCommandOpts {

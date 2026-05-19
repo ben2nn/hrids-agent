@@ -2,9 +2,9 @@
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createGateway } from '../../gateway/server.js'
-import { loadConfig, getConfigDir } from '../../core/Config.js'
+import { loadConfig, getConfigDir } from '../../core/config.js'
 import { migrateOldMemoryStore } from '../../memory/index.js'
-import { restoreScheduledJobs, setCronTriggerCallback } from '../../tools/ScheduleCronTool.js'
+import { restoreScheduledJobs, setCronTriggerCallback } from '../../tools/schedule-cron-tool.js'
 import { logger } from '../../shared/logger.js'
 
 export interface GatewayCommandOpts {

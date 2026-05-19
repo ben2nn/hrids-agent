@@ -54,7 +54,7 @@ class Logger {
     let level: LogLevel = 'info'
     try {
       // 延迟 import 避免循环依赖，且 logger 在 config 加载前就可能被使用
-      const { loadConfig } = _require('./Config.js') as { loadConfig: () => { logLevel?: LogLevel } }
+      const { loadConfig } = _require('./config.js') as { loadConfig: () => { logLevel?: LogLevel } }
       level = loadConfig().logLevel ?? 'info'
     } catch {
       const envLevel = process.env.LOG_LEVEL as LogLevel | undefined

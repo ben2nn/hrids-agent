@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useCallback } from 'react'
 import { useSyncExternalStore } from 'react'
 import { createStore } from './store.js'
-import type { AppState, AppStateStore } from './AppState.js'
+import type { AppState, AppStateStore } from './app-state.js'
 
 // ─── Context ──────────────────────────────────────────────────────────────
 

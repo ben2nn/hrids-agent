@@ -1,6 +1,6 @@
 // doctor 子命令 —— 健康检查
 import { existsSync } from 'fs'
-import { loadConfig, getConfigDir, hasMainAgentConfig } from '../../core/Config.js'
+import { loadConfig, getConfigDir, hasMainAgentConfig } from '../../core/config.js'
 
 export async function runDoctorCommand(): Promise<void> {
   console.log('hrids-agent 健康检查\n')

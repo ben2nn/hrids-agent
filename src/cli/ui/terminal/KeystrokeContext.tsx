@@ -1,6 +1,6 @@
 // KeystrokeContext —— ref + 回调模式，避免每次按键触发全树重渲染
 import React, { createContext, useContext, useEffect, useRef } from 'react'
-import { getStdinReader, type KeyEvent } from './StdinReader.js'
+import { getStdinReader, type KeyEvent } from './stdin-reader.js'
 
 type KeystrokeHandler = (key: KeyEvent) => void
 
