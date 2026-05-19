@@ -6,6 +6,7 @@ import { join } from 'path'
 import type { ToolDef } from '../core/Tool.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 import { getConfigDir } from '../core/Config.js'
+import { formatDateTime } from '../core/time.js'
 import { invalidateFileCache } from './FileReadTool.js'
 
 const CRON_FILE = join(getConfigDir(), 'crons.json')
@@ -452,8 +453,8 @@ cron 表达式格式（5位）：分 时 日 月 周
       const lines = crons.map(c => {
         const status = c.enabled ? '✅ 启用' : '⏸ 禁用'
         const onceTag = c.once ? ' 🔂一次性' : ''
-        const next = c.nextRunAt ? `下次: ${new Date(c.nextRunAt).toLocaleString('zh-CN')}` : '未调度'
-        const last = c.lastRunAt ? `上次: ${new Date(c.lastRunAt).toLocaleString('zh-CN')}` : '从未执行'
+        const next = c.nextRunAt ? `下次: ${formatDateTime(c.nextRunAt)}` : '未调度'
+        const last = c.lastRunAt ? `上次: ${formatDateTime(c.lastRunAt)}` : '从未执行'
         return `[${c.id}] ${status}${onceTag} | ${c.expression} | ${c.description}\n  ${next} | ${last}\n  任务: ${c.task.slice(0, 80)}${c.task.length > 80 ? '...' : ''}`
       })
       return { type: 'success', output: `共 ${crons.length} 个定时任务:\n\n${lines.join('\n\n')}` }
@@ -478,7 +479,7 @@ cron 表达式格式（5位）：分 时 日 月 周
       )
       if (duplicate) {
         const nextStr = duplicate.nextRunAt
-          ? `下次执行: ${new Date(duplicate.nextRunAt).toLocaleString('zh-CN')}`
+          ? `下次执行: ${formatDateTime(duplicate.nextRunAt)}`
           : '未调度'
         return {
           type: 'success',
@@ -509,7 +510,7 @@ cron 表达式格式（5位）：分 时 日 月 周
       scheduleJob(job)
 
       const nextStr = nextRunAt
-        ? `下次执行: ${new Date(nextRunAt).toLocaleString('zh-CN')}`
+        ? `下次执行: ${formatDateTime(nextRunAt)}`
         : '（无法解析下次执行时间，请检查 cron 表达式）'
       const onceStr = job.once ? '\n⚠️ 一次性任务：触发后将自动删除' : '\n🔁 周期性任务：将持续重复执行'
       const correctedStr = (isRecurring && input.once === true) ? '\n📌 注意：检测到周期性 cron 表达式，已自动将 once 修正为 false' : ''

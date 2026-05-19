@@ -64,6 +64,22 @@ describe('PermissionManager', () => {
     it('写操作拒绝', async () => {
       expect(await pm.check(makeReq())).toBe(false)
     })
+
+    it('允许 file_write 写入 plans 目录', async () => {
+      expect(await pm.check({
+        ...makeReq(),
+        toolName: 'file_write',
+        filePath: 'docs/plans/test-plan.md',
+      })).toBe(true)
+    })
+
+    it('允许 file_edit 写入 ~/.hrids/plans 目录', async () => {
+      expect(await pm.check({
+        ...makeReq(),
+        toolName: 'file_edit',
+        filePath: 'C:/Users/ben/.hrids/plans/test-plan.md',
+      })).toBe(true)
+    })
   })
 
   describe('plan 模式', () => {
@@ -74,6 +90,14 @@ describe('PermissionManager', () => {
 
     it('写操作拒绝（即使 callback 返回 true）', async () => {
       expect(await pm.check(makeReq())).toBe(false)
+    })
+
+    it('仍然拒绝写入非 plans 路径', async () => {
+      expect(await pm.check({
+        ...makeReq(),
+        toolName: 'file_write',
+        filePath: 'DESIGN_DEFECTS_REPORT.md',
+      })).toBe(false)
     })
   })
 

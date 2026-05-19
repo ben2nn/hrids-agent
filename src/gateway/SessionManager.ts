@@ -747,18 +747,18 @@ export class SessionManager {
     // 追加动态层（记忆、环境信息），确保每条消息都能看到最新的记忆和 Git 状态
     const fullPrompt = await buildSystemContext(coordinatorPrompt, session.info.cwd, sessionId)
 
-    // plan 模式：动态注入规划模式系统提示，让 LLM 知道文档类文件可写，代码文件不可写
+    // plan 模式：动态注入规划模式系统提示，让 LLM 知道仅 plans 目录下的计划文档可写
     if (session.permissions.getMode() === 'plan') {
       const readonlyTools = allTools.filter(t => t.readonly).map(t => t.name)
       const writeTools = allTools.filter(t => !t.readonly).map(t => t.name)
 
       const planModeAppendix = `## 当前模式：Plan（规划模式）
-你现在处于规划模式，所有写操作均被系统禁止。只读工具可以正常使用，包括 ask_user（询问用户）和 web_search（搜索信息）。
+你现在处于规划模式。默认情况下写操作会被系统禁止；唯一例外是将计划文档写入 plans 目录（如 ./plans/、./docs/plans/ 或 ~/.hrids/plans/）。只读工具可以正常使用，包括 ask_user（询问用户）和 web_search（搜索信息）。
 
 ### 可用工具（只读，可正常调用）
 ${readonlyTools.join('、')}
 
-### 不可用工具（写操作，调用将被拒绝）
+### 受限工具（绝大多数写操作会被拒绝）
 ${writeTools.join('、')}
 
 ### 特殊可用工具（规划相关，plan 模式下允许使用）
@@ -777,7 +777,7 @@ ${writeTools.join('、')}
 2. 制定详细的执行计划：列出每一步要做什么、修改哪些文件、执行什么命令
 3. 调用 todo_write 创建任务计划（plan 模式下可用）
 4. 调用 plan_create 将计划持久化到 ~/.hrids/plans/ 目录
-5. 不要尝试调用其他写操作工具，即使调用也会被系统拒绝
+5. 如需产出计划文档，可使用 file_write / file_edit 写入 plans 目录；不要写入代码文件或其他普通路径
 6. 计划完成后，告知用户"已完成规划，请输入 /plan 退出规划模式，开始按计划执行"
 
 用户确认计划后，会将模式切换为 ask 或 craft，届时写操作将可用。`
