@@ -23,11 +23,20 @@ vi.mock('fs', async (importOriginal) => {
   }
 })
 
+vi.mock('../../src/core/Config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/Config.js')>()
+  return {
+    ...actual,
+    getConfigDir: () => '/tmp/hrids-test',
+    loadConfig: () => ({ timeZone: 'Asia/Shanghai' }),
+  }
+})
+
 beforeEach(() => {
   mockStore.clear()
 })
 
-import { ScheduleCronTool } from '../../src/tools/ScheduleCronTool.js'
+import { ScheduleCronTool, parseCronNextRun } from '../../src/tools/ScheduleCronTool.js'
 
 describe('ScheduleCronTool', () => {
   it('create 创建定时任务', async () => {
@@ -97,5 +106,12 @@ describe('ScheduleCronTool', () => {
 
   it('readonly 为 false', () => {
     expect(ScheduleCronTool.readonly).toBe(false)
+  })
+
+  it('按配置时区计算下一次执行时间', () => {
+    const from = Date.parse('2026-05-19T00:00:00.000Z') // Asia/Shanghai 08:00
+    const next = parseCronNextRun('0 9 * * *', from)
+
+    expect(new Date(next!).toISOString()).toBe('2026-05-19T01:00:00.000Z')
   })
 })

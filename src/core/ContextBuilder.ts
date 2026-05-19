@@ -6,6 +6,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { getGlobalCwd } from './cwd.js'
 import { getConfigDir } from './Config.js'
+import { formatCompactTimestamp, formatDateTime, getConfiguredTimeZoneLabel } from './time.js'
 
 const execAsync = promisify(exec)
 
@@ -24,11 +25,7 @@ export function getDefaultAgentCwd(): string {
 
 // 为指定会话计算独立工作目录路径（不创建）：~/.hrids/work/<YYYYMMDD-HHmmss>-<sessionId>/
 export function getSessionWorkDirPath(sessionId: string): string {
-  const now = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
-  const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-  const dirName = `${datePart}-${timePart}-${sessionId}`
+  const dirName = `${formatCompactTimestamp()}-${sessionId}`
   return join(getConfigDir(), 'work', dirName)
 }
 
@@ -178,7 +175,7 @@ export async function buildSystemContext(basePrompt: string[], cwd?: string, ses
 
   const envInfo = [
     `操作系统: ${osName} (${platform})`,
-    `当前时间: ${new Date().toLocaleString('zh-CN')}`,
+    `当前时间: ${formatDateTime()} (${getConfiguredTimeZoneLabel()})`,
     `用户主目录: ${homedir()}`,
     `用户名: ${process.env.USERNAME ?? process.env.USER ?? process.env.LOGNAME ?? '未知'}`,
     // 注入实时工作目录（getGlobalCwd() 反映最新的 cd 状态，比 resolvedCwd 更准确）

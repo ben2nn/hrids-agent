@@ -181,6 +181,7 @@ export function createScrollStore(): ScrollStore {
       // 强制更新：即使 pinned 已经是 true，也要 bump scrollVersion 触发重渲染
       state = {
         ...state,
+        scrollOffset: state.maxScroll,
         pinned: true,
         scrollVersion: state.scrollVersion + 1,
       }
@@ -188,7 +189,10 @@ export function createScrollStore(): ScrollStore {
     },
 
     setPinned(pinned) {
-      set({ pinned })
+      set({
+        pinned,
+        ...(state.pinned && !pinned ? { scrollOffset: state.maxScroll } : {}),
+      })
     },
 
     setMaxScroll(rows) {
@@ -197,7 +201,7 @@ export function createScrollStore(): ScrollStore {
       // 非 pinned 时 clamp scrollOffset 防止超出范围
       set({
         maxScroll: ms,
-        ...(state.pinned ? {} : { scrollOffset: Math.min(state.scrollOffset, ms) }),
+        scrollOffset: state.pinned ? ms : Math.min(state.scrollOffset, ms),
       })
     },
 

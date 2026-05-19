@@ -89,8 +89,8 @@ export function CardStream({ msgs, cols }: CardStreamProps) {
   // 外层高度未测量到时，先渲染所有消息（避免空白）
   if (outerHeight === 0) {
     return (
-      <Box ref={outerRef} flexDirection="column" flexGrow={1} overflow="hidden" flexShrink={0}>
-        <Box flexDirection="column" flexShrink={0}>
+      <Box ref={outerRef} flexDirection="column" flexGrow={1} overflow="hidden" flexShrink={1} minHeight={0}>
+        <Box flexDirection="column" flexShrink={1}>
           {indexedMsgs.map(msg => (
             <MeasuredCard key={msg.id} msg={msg} cols={cols} />
           ))}
@@ -109,14 +109,14 @@ export function CardStream({ msgs, cols }: CardStreamProps) {
 
   // 参照 DeepSeek-Reasonix：外层 overflow=hidden 裁剪，内层 marginTop=-scrollOffset 定位
   return (
-    <Box ref={outerRef} flexDirection="column" flexGrow={1} overflow="hidden" flexShrink={0}>
+    <Box ref={outerRef} flexDirection="column" flexGrow={1} overflow="hidden" flexShrink={1} minHeight={0}>
       {/* 滚动位置指示器：仅在非自动滚动时显示 */}
       {!pinned && viewport.maxScroll > 0 && (
         <Box justifyContent="flex-end" flexShrink={0}>
           <Text color={FG.faint} dimColor>{scrollPct === 100 ? '▼' : scrollPct === 0 ? '▲' : '▌'} {scrollPct}%</Text>
         </Box>
       )}
-      <Box flexDirection="column" marginTop={-viewport.scrollOffset} flexShrink={0}>
+      <Box flexDirection="column" marginTop={-viewport.scrollOffset} flexShrink={1}>
         {viewport.items.map((item, i) => {
           if (item.type === 'spacer') {
             return <Box key={`spacer-${i}`} height={item.height} flexShrink={0} />

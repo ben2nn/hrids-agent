@@ -122,6 +122,25 @@ function matchesPathRule(filePath: string, rule: string): boolean {
   return false
 }
 
+function isPlanWritablePath(toolName: string, filePath?: string): boolean {
+  if (!filePath) return false
+  if (toolName !== 'file_write' && toolName !== 'file_edit') return false
+
+  const normalized = resolve(filePath).replace(/\\/g, '/')
+  const configPlansDir = join(getConfigDir(), 'plans').replace(/\\/g, '/')
+
+  if (normalized === configPlansDir || normalized.startsWith(configPlansDir + '/')) {
+    return true
+  }
+
+  const planDirSuffixes = [
+    '/plans/',
+    '/docs/plans/',
+  ]
+
+  return planDirSuffixes.some(suffix => normalized.includes(suffix))
+}
+
 // ── 持久化 ────────────────────────────────────────────────────────────────────
 
 function loadRules(): PersistedRules {
@@ -233,13 +252,13 @@ export class PermissionManager {
     }
 
     // 永久允许规则（在非 alwaysAsk 覆盖时生效）
-    // 注意：plan 模式下 alwaysAllow 无效，plan 模式是绝对只读的安全阀。
+    // 注意：plan 模式下 alwaysAllow 无效；仅允许受控的 plans 目录例外。
     const isAlwaysAllow = this.rules.alwaysAllow.some(rule => requestMatchesRule(req, rule))
     const isAlwaysAsk = this.rules.alwaysAsk.some(rule => requestMatchesRule(req, rule))
 
     if (isAlwaysAllow && !isAlwaysAsk && this.mode !== 'plan') return true
 
-    // alwaysAsk：无论模式如何，都强制询问（plan 模式下直接拒绝，不询问）
+    // alwaysAsk：无论模式如何，都强制询问（plan 模式下仅对白名单例外生效）
     if (isAlwaysAsk && this.mode !== 'plan') return this.onAsk(req)
 
     switch (this.mode) {
@@ -247,8 +266,9 @@ export class PermissionManager {
         return true
 
       case 'plan':
-        // plan 模式：planSafe 工具允许执行，其他写操作一律拒绝
+        // plan 模式：planSafe 工具允许执行；另外仅允许向 plans 目录写入计划文档。
         if (req.planSafe) return true
+        if (isPlanWritablePath(req.toolName, req.filePath)) return true
         return false
 
       case 'ask': {

@@ -6,7 +6,15 @@ import { join } from 'path'
 import type { ToolDef } from '../core/Tool.js'
 import { getCurrentSessionId } from '../core/sessionContext.js'
 import { getConfigDir } from '../core/Config.js'
-import { formatDateTime } from '../core/time.js'
+import {
+  formatDateTime,
+  getConfiguredTimeZone,
+  getZonedDateParts,
+  getZonedDayOfWeek,
+  parseDateOnlyInConfiguredTimeZone,
+  zonedDateTimeToTimestamp,
+  type ZonedDateParts,
+} from '../core/time.js'
 import { invalidateFileCache } from './FileReadTool.js'
 
 const CRON_FILE = join(getConfigDir(), 'crons.json')
@@ -102,6 +110,26 @@ function nextValueInField(field: string, current: number, min: number, max: numb
   return found ?? null
 }
 
+function daysInZonedMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
+
+function zonedPartsToDate(parts: ZonedDateParts): Date {
+  return new Date(zonedDateTimeToTimestamp(parts))
+}
+
+function addZonedDays(parts: ZonedDateParts, days: number): ZonedDateParts {
+  const d = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days))
+  return {
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    day: d.getUTCDate(),
+    hour: parts.hour,
+    minute: parts.minute,
+    second: parts.second,
+  }
+}
+
 function parseNextRun(expression: string, fromTime?: number): number | undefined {
   try {
     const parts = expression.trim().split(/\s+/)
@@ -110,84 +138,80 @@ function parseNextRun(expression: string, fromTime?: number): number | undefined
     const [minField, hourField, domField, monField, dowField] = parts as [string, string, string, string, string]
 
     // 从 fromTime（默认 now+1分钟）开始向前搜索，最多搜索 366 天
-    const start = new Date(fromTime ?? Date.now())
-    start.setSeconds(0, 0)
-    start.setMinutes(start.getMinutes() + 1)
-
-    const candidate = new Date(start)
-    const deadline = new Date(start)
-    deadline.setDate(deadline.getDate() + 366)
+    const timeZone = getConfiguredTimeZone()
+    const start = getZonedDateParts(fromTime ?? Date.now(), timeZone)
+    start.second = 0
+    start.minute += 1
+    let candidate = getZonedDateParts(zonedDateTimeToTimestamp(start, timeZone), timeZone)
+    const deadline = zonedPartsToDate(addZonedDays(candidate, 366))
 
     // 最多迭代 366*24*60 次（分钟级步进），实际上会快得多
     for (let iter = 0; iter < 366 * 24 * 60; iter++) {
-      if (candidate >= deadline) return undefined
+      if (zonedPartsToDate(candidate) >= deadline) return undefined
 
       // 检查月份（1-12）
-      const mon = nextValueInField(monField, candidate.getMonth() + 1, 1, 12)
+      const mon = nextValueInField(monField, candidate.month, 1, 12)
       if (mon === null) return undefined
-      if (mon !== candidate.getMonth() + 1) {
+      if (mon !== candidate.month) {
         // 跳到下个合法月份的第一天 00:00
-        candidate.setMonth(mon - 1, 1)
-        candidate.setHours(0, 0, 0, 0)
+        candidate = { year: candidate.year, month: mon, day: 1, hour: 0, minute: 0, second: 0 }
         continue
       }
 
       // 检查日期（1-31）
-      const daysInMonth = new Date(candidate.getFullYear(), candidate.getMonth() + 1, 0).getDate()
-      const dom = nextValueInField(domField, candidate.getDate(), 1, daysInMonth)
+      const daysInMonth = daysInZonedMonth(candidate.year, candidate.month)
+      const dom = nextValueInField(domField, candidate.day, 1, daysInMonth)
       if (dom === null || dom > daysInMonth) {
         // 跳到下个月
-        candidate.setMonth(candidate.getMonth() + 1, 1)
-        candidate.setHours(0, 0, 0, 0)
+        const nextMonth = candidate.month === 12 ? 1 : candidate.month + 1
+        const nextYear = candidate.month === 12 ? candidate.year + 1 : candidate.year
+        candidate = { year: nextYear, month: nextMonth, day: 1, hour: 0, minute: 0, second: 0 }
         continue
       }
-      if (dom !== candidate.getDate()) {
-        candidate.setDate(dom)
-        candidate.setHours(0, 0, 0, 0)
+      if (dom !== candidate.day) {
+        candidate = { ...candidate, day: dom, hour: 0, minute: 0, second: 0 }
         continue
       }
 
       // 检查星期（0=周日，1=周一，...，6=周六；cron 中 7 也表示周日）
       if (dowField !== '*') {
-        const dow = candidate.getDay() // 0=周日
+        const dow = getZonedDayOfWeek(zonedDateTimeToTimestamp(candidate, timeZone), timeZone) // 0=周日
         // 将 cron 的 7 映射为 0
         const normalizedField = dowField.replace(/\b7\b/g, '0')
         const validDow = nextValueInField(normalizedField, dow, 0, 6)
         if (validDow === null || validDow !== dow) {
           // 跳到明天
-          candidate.setDate(candidate.getDate() + 1)
-          candidate.setHours(0, 0, 0, 0)
+          candidate = { ...addZonedDays(candidate, 1), hour: 0, minute: 0, second: 0 }
           continue
         }
       }
 
       // 检查小时（0-23）
-      const hour = nextValueInField(hourField, candidate.getHours(), 0, 23)
+      const hour = nextValueInField(hourField, candidate.hour, 0, 23)
       if (hour === null) {
         // 跳到明天
-        candidate.setDate(candidate.getDate() + 1)
-        candidate.setHours(0, 0, 0, 0)
+        candidate = { ...addZonedDays(candidate, 1), hour: 0, minute: 0, second: 0 }
         continue
       }
-      if (hour !== candidate.getHours()) {
-        candidate.setHours(hour, 0, 0, 0)
+      if (hour !== candidate.hour) {
+        candidate = { ...candidate, hour, minute: 0, second: 0 }
         continue
       }
 
       // 检查分钟（0-59）
-      const min = nextValueInField(minField, candidate.getMinutes(), 0, 59)
+      const min = nextValueInField(minField, candidate.minute, 0, 59)
       if (min === null) {
         // 跳到下一小时
-        candidate.setHours(candidate.getHours() + 1, 0, 0, 0)
+        candidate = getZonedDateParts(zonedDateTimeToTimestamp({ ...candidate, hour: candidate.hour + 1, minute: 0, second: 0 }, timeZone), timeZone)
         continue
       }
-      if (min !== candidate.getMinutes()) {
-        candidate.setMinutes(min, 0, 0)
+      if (min !== candidate.minute) {
+        candidate = { ...candidate, minute: min, second: 0 }
         continue
       }
 
       // 所有字段都匹配，找到了
-      return candidate.getTime()
+      return zonedDateTimeToTimestamp(candidate, timeZone)
     }
 
     return undefined
@@ -265,9 +289,7 @@ function scheduleJob(job: CronJob) {
   if (job.endDate) {
     // 使用当天结束时间（23:59:59.999），确保 endDate 当天全天都有效
     // 避免 new Date('2026-05-01') 解析为 00:00:00 导致当天就失效的问题
-    const endDay = new Date(job.endDate)
-    endDay.setHours(23, 59, 59, 999)
-    const end = endDay.getTime()
+    const end = parseDateOnlyInConfiguredTimeZone(job.endDate, true)
     if (!isNaN(end) && now > end) {
       console.info(`[cron] 任务已过有效期，跳过调度: ${job.id} (endDate: ${job.endDate})`)
       return
@@ -278,9 +300,7 @@ function scheduleJob(job: CronJob) {
   let fromTime: number | undefined
   if (job.startDate) {
     // 使用当天开始时间（00:00:00.000），确保 startDate 当天就能触发
-    const startDay = new Date(job.startDate)
-    startDay.setHours(0, 0, 0, 0)
-    const start = startDay.getTime()
+    const start = parseDateOnlyInConfiguredTimeZone(job.startDate)
     if (!isNaN(start) && now < start) {
       fromTime = start  // parseNextRun 将从此时间点开始搜索
     }

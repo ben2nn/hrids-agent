@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { TONE, FG } from '../terminal/theme.js'
+import { formatDate as formatConfiguredDate } from '../../../core/time.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -34,7 +35,7 @@ function formatRelativeTime(dateStr: string): string {
   if (diffMins < 60) return `${diffMins} 分钟前`
   if (diffHours < 24) return `${diffHours} 小时前`
   if (diffDays < 7) return `${diffDays} 天前`
-  return date.toLocaleDateString()
+  return formatConfiguredDate(date)
 }
 
 // ─── 组件 ─────────────────────────────────────────────────────────────────

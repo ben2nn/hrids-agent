@@ -224,6 +224,8 @@ export interface AgentConfig {
   apiKey?: string
   /** 自定义 Base URL */
   baseUrl?: string
+  /** IANA 时区 ID，例如 Asia/Shanghai；未配置时使用系统时区 */
+  timeZone?: string
 
   // ── 模型配置 ───────────────────────────────────────────────
   /** 大语言模型（主对话引擎，必须配置） */
@@ -285,6 +287,7 @@ export interface ResolvedConfig extends AgentConfig {
 
 const DEFAULTS = {
   model: 'qwen3.5-122b-a10b',
+  timeZone: 'Asia/Shanghai',
   agent: {
     model: 'qwen3.5-122b-a10b',
     permissionMode: 'ask' as const,
@@ -411,6 +414,7 @@ function normalize(raw: Partial<AgentConfig>): ResolvedConfig {
     provider: clean.provider,
     apiKey:   clean.apiKey,
     baseUrl:  clean.baseUrl,
+    timeZone: clean.timeZone ?? DEFAULTS.timeZone,
     // 模型配置
     llm:        clean.llm,
     vision:     clean.vision,

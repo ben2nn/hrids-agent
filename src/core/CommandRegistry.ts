@@ -1,6 +1,7 @@
 // 斜杠命令注册系统
 import type { SkillRegistry } from '../skills/registry.js'
 import type { Command as UICommand, CommandContext as UICommandContext } from './command-types.js'
+import { formatDateTime, formatIsoDisplay } from './time.js'
 
 export interface SlashCommand {
   name: string
@@ -257,7 +258,7 @@ export function createBuiltinCommands(_apiKey: string, _model: string): SlashCom
         if (!isNaN(idx) && idx >= 1 && idx <= archives.length) {
           // 显示指定段的摘要详情
           const arc = archives[idx - 1]
-          const time = new Date(arc.archivedAt).toLocaleString('zh-CN')
+          const time = formatDateTime(arc.archivedAt)
           return {
             type: 'message',
             text: `归档段 ${idx}（${time}，共 ${arc.messageCount} 条消息）:\n\n${arc.summary}`,
@@ -266,7 +267,7 @@ export function createBuiltinCommands(_apiKey: string, _model: string): SlashCom
 
         // 列出所有归档段
         const lines = archives.map((arc, i) => {
-          const time = new Date(arc.archivedAt).toLocaleString('zh-CN')
+          const time = formatDateTime(arc.archivedAt)
           const preview = arc.summary.split('\n').find(l => l.trim())?.slice(0, 60) ?? ''
           return `  ${i + 1}. [${time}] ${arc.messageCount} 条消息 — ${preview}...`
         })
@@ -303,7 +304,7 @@ export function createBuiltinCommands(_apiKey: string, _model: string): SlashCom
         if (list.length === 0) return { type: 'status', text: '没有历史会话。' }
         const lines = list.map((s, i) => {
           const active = s.id === ctx.sessionId ? ' ◀ 当前' : ''
-          return `  ${i + 1}. [${s.updatedAt.slice(0, 16)}] ${s.title.slice(0, 40)}${active}\n     ID: ${s.id}  消息数: ${s.messageCount}  模型: ${s.model}`
+          return `  ${i + 1}. [${formatIsoDisplay(s.updatedAt)}] ${s.title.slice(0, 40)}${active}\n     ID: ${s.id}  消息数: ${s.messageCount}  模型: ${s.model}`
         })
         return { type: 'status', text: `历史会话（共 ${list.length} 条）:\n${lines.join('\n')}` }
       },

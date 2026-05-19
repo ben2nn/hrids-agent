@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { TONE, FG, STRIPE_BORDER } from '../terminal/theme.js'
 import type { SessionMeta } from '../../../core/SessionStore.js'
+import { formatDate as formatConfiguredDate } from '../../../core/time.js'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -148,7 +149,7 @@ export function SessionList({
     if (diffMins < 60) return `${diffMins} 分钟前`
     if (diffHours < 24) return `${diffHours} 小时前`
     if (diffDays < 7) return `${diffDays} 天前`
-    return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+    return formatConfiguredDate(date, { month: '2-digit', day: '2-digit' })
   }
 
   // 截断文本

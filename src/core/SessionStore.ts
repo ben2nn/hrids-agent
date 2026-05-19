@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto'
 import { join } from 'path'
 import type { ConversationEvent, ChatMessage } from './ConversationStore.js'
 import { getConfigDir } from './Config.js'
+import { formatCompactTimestamp } from './time.js'
 
 /** 压缩归档段元数据 */
 export interface CompactArchive {
@@ -191,8 +192,7 @@ export function archiveSession(sessionId: string, summary: string): string {
 
   // 生成归档文件名
   const now = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  const timestamp = formatCompactTimestamp(now)
   const archiveFilename = `events.${timestamp}.archive.jsonl`
   const archivePath = join(sessionDir, archiveFilename)
 

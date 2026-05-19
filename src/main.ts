@@ -18,6 +18,7 @@ import { loadMcpTools } from './tools/McpTool.js'
 import { TeamManager } from './core/coordinator/TeamManager.js'
 import { resetEmbeddingProvider, migrateOldMemoryStore } from './memory/index.js'
 import { logger } from './core/logger.js'
+import { formatIsoDisplay } from './core/time.js'
 
 import { setupProvider } from './bootstrap/setupProvider.js'
 import { prepareSession, initSessionStorage } from './bootstrap/setupSession.js'
@@ -175,7 +176,7 @@ async function main() {
         } else {
           console.log('最近的会话:')
           sessions.slice(0, 10).forEach(s => {
-            console.log(`  ${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.title}`)
+            console.log(`  ${s.id}  ${formatIsoDisplay(s.updatedAt)}  ${s.title}`)
           })
         }
         return

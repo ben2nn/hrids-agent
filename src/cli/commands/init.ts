@@ -28,6 +28,7 @@ function findExampleConfig(): string {
 
 const MINIMAL_CONFIG = {
   model: 'qwen-plus-2025-07-28',
+  timeZone: 'Asia/Shanghai',
   llm: {
     fallbacks: [
       {
